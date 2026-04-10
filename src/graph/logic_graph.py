@@ -16,6 +16,7 @@ request can select OpenAI or Anthropic dynamically.
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain_core.runnables import RunnableConfig
+from psycopg_pool import AsyncConnectionPool
 
 from src.graph.state import LogicState
 from src.agents.orchestrator import Orchestrator
@@ -250,8 +251,14 @@ async def compile_graph(
         postgres_dsn=postgres_dsn,
     )
 
-    checkpointer = AsyncPostgresSaver.from_conn_string(postgres_dsn)
-    await checkpointer.setup()
+    pool = AsyncConnectionPool(conninfo=postgres_dsn, open=False)
+    await pool.open()
+
+    checkpointer = AsyncPostgresSaver(pool)
+    try:
+        await checkpointer.setup()
+    except Exception as exc:
+        logger.warning(f"Checkpointer setup skipped (already initialized): {exc}")
 
     compiled = graph.compile(checkpointer=checkpointer)
     logger.info("Logic graph compiled with PostgreSQL checkpointer")

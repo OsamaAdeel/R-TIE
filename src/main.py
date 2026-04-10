@@ -8,15 +8,25 @@ providers. All requests receive a correlation ID for end-to-end tracing,
 and LangSmith tracing is enabled on every query.
 """
 
+import asyncio
 import os
+import platform
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
+# Windows requires SelectorEventLoop for psycopg async support.
+# Must be set before any async connection pools are created.
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import traceback
 
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
@@ -268,59 +278,95 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
         f"correlation_id={correlation_id}"
     )
 
-    # Check for slash commands
-    cmd = _orchestrator.check_command(request.query)
-    if cmd.is_command:
-        result = await _handle_command(
-            cmd.command, cmd.args, request.session_id
-        )
-        return {"type": "command", "result": result, "correlation_id": correlation_id}
+    try:
+        # Check for slash commands
+        cmd = _orchestrator.check_command(request.query)
+        if cmd.is_command:
+            result = await _handle_command(
+                cmd.command, cmd.args, request.session_id
+            )
+            return {"type": "command", "result": result, "correlation_id": correlation_id}
 
-    # Run the LangGraph pipeline
-    initial_state: LogicState = {
-        "session_id": request.session_id,
-        "correlation_id": correlation_id,
-        "raw_query": request.query,
-        "query_type": "",
-        "object_name": "",
-        "object_type": "",
-        "schema": "",
-        "source_code": [],
-        "call_tree": {},
-        "cache_hit": False,
-        "cache_stale": False,
-        "explanation": {},
-        "validated": False,
-        "confidence": 0.0,
-        "warnings": [],
-        "output": {},
-        "partial_flag": False,
-    }
-
-    config = {
-        "configurable": {
-            "thread_id": request.session_id,
-            "provider": provider,
-            "model": model,
-        },
-        "metadata": {
+        # Run the LangGraph pipeline
+        initial_state: LogicState = {
+            "session_id": request.session_id,
             "correlation_id": correlation_id,
-            "engineer_id": request.engineer_id,
-            "provider": provider,
-            "model": model,
-        },
-        "tags": ["query", request.engineer_id],
-    }
+            "raw_query": request.query,
+            "query_type": "",
+            "object_name": "",
+            "object_type": "",
+            "schema": "",
+            "source_code": [],
+            "call_tree": {},
+            "cache_hit": False,
+            "cache_stale": False,
+            "explanation": {},
+            "validated": False,
+            "confidence": 0.0,
+            "warnings": [],
+            "output": {},
+            "partial_flag": False,
+        }
 
-    final_state = await _compiled_graph.ainvoke(initial_state, config=config)
+        config = {
+            "configurable": {
+                "thread_id": request.session_id,
+                "provider": provider,
+                "model": model,
+            },
+            "metadata": {
+                "correlation_id": correlation_id,
+                "engineer_id": request.engineer_id,
+                "provider": provider,
+                "model": model,
+            },
+            "tags": ["query", request.engineer_id],
+        }
 
-    logger.info(
-        f"Query completed: object={final_state.get('object_name', 'N/A')} "
-        f"confidence={final_state.get('confidence', 0)} | "
-        f"correlation_id={correlation_id}"
-    )
+        final_state = await _compiled_graph.ainvoke(initial_state, config=config)
 
-    return final_state.get("output", {})
+        logger.info(
+            f"Query completed: object={final_state.get('object_name', 'N/A')} "
+            f"confidence={final_state.get('confidence', 0)} | "
+            f"correlation_id={correlation_id}"
+        )
+
+        return final_state.get("output", {})
+
+    except Exception as exc:
+        from src.agents.metadata_interpreter import ObjectNotFoundError
+
+        tb = traceback.format_exc()
+        logger.error(f"Query failed: {exc}\n{tb} | correlation_id={correlation_id}")
+
+        if isinstance(exc, ObjectNotFoundError):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "object_name": exc.object_name,
+                    "schema": exc.schema,
+                    "explanation": {
+                        "summary": (
+                            f"Object '{exc.object_name}' was not found in schema "
+                            f"'{exc.schema}'. Please verify the function or procedure "
+                            f"name exists in your Oracle OFSAA database."
+                        ),
+                    },
+                    "confidence": 0.0,
+                    "validated": False,
+                    "badge": "NOT_FOUND",
+                    "warnings": [f"Object '{exc.object_name}' does not exist in '{exc.schema}'"],
+                    "correlation_id": correlation_id,
+                },
+            )
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(exc),
+                "correlation_id": correlation_id,
+            },
+        )
 
 
 async def _handle_command(

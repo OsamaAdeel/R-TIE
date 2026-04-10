@@ -1,12 +1,15 @@
 """
 RTIE Metadata Interpreter Agent.
 
-Resolves PL/SQL objects in Oracle metadata, fetches source code (from
-Redis cache or Oracle ALL_SOURCE), and builds recursive dependency
-call trees. All Oracle queries are retried and validated through SQLGuardian.
+Resolves PL/SQL objects in Oracle metadata or from local SQL files,
+fetches source code (from Redis cache, Oracle ALL_SOURCE, or disk),
+and builds recursive dependency call trees. All Oracle queries are
+retried and validated through SQLGuardian.
 """
 
+import glob
 import hashlib
+import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -21,7 +24,7 @@ logger = get_logger(__name__, concern="oracle")
 
 
 class ObjectNotFoundError(Exception):
-    """Raised when a PL/SQL object cannot be found in Oracle metadata.
+    """Raised when a PL/SQL object cannot be found in Oracle metadata or disk.
 
     Attributes:
         object_name: The name of the object that was not found.
@@ -42,12 +45,76 @@ class ObjectNotFoundError(Exception):
         )
 
 
+# Paths to search for PL/SQL source files — both RTIE/db/modules/ and parent R-TIE/db/modules/
+_RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+MODULES_DIRS = [
+    os.path.join(_RTIE_ROOT, "db", "modules"),
+    os.path.join(os.path.dirname(_RTIE_ROOT), "db", "modules"),
+]
+
+
+def _scan_modules_for_file(object_name: str) -> Optional[str]:
+    """Scan all module directories for a SQL file matching the object name.
+
+    Searches RTIE/db/modules/ and the parent R-TIE/db/modules/ for a
+    .sql file whose name (case-insensitive) matches the given object_name.
+
+    Args:
+        object_name: The PL/SQL object name to find.
+
+    Returns:
+        Full file path if found, None otherwise.
+    """
+    for modules_dir in MODULES_DIRS:
+        if not os.path.isdir(modules_dir):
+            continue
+        pattern = os.path.join(modules_dir, "**", "*.sql")
+        for filepath in glob.glob(pattern, recursive=True):
+            basename = os.path.splitext(os.path.basename(filepath))[0]
+            if basename.upper() == object_name.upper():
+                return filepath
+    return None
+
+
+def _read_sql_file(filepath: str) -> List[Dict[str, Any]]:
+    """Read a SQL file and return numbered source lines.
+
+    Args:
+        filepath: Path to the .sql file.
+
+    Returns:
+        List of dicts with 'line' (int) and 'text' (str) keys.
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    return [{"line": i + 1, "text": line} for i, line in enumerate(lines)]
+
+
+def _detect_object_type(source_text: str) -> str:
+    """Detect PL/SQL object type from source code.
+
+    Args:
+        source_text: The raw PL/SQL source code.
+
+    Returns:
+        'FUNCTION', 'PROCEDURE', or 'PACKAGE' based on the source.
+    """
+    upper = source_text.upper()
+    if "CREATE OR REPLACE FUNCTION" in upper or "FUNCTION" in upper.split("BEGIN")[0]:
+        return "FUNCTION"
+    if "CREATE OR REPLACE PROCEDURE" in upper:
+        return "PROCEDURE"
+    if "CREATE OR REPLACE PACKAGE" in upper:
+        return "PACKAGE"
+    return "FUNCTION"
+
+
 class MetadataInterpreter:
     """Agent for Oracle metadata resolution and PL/SQL source fetching.
 
     Handles three core responsibilities:
-    1. Resolving objects in Oracle ALL_OBJECTS
-    2. Fetching source code with Redis caching
+    1. Resolving objects in Oracle ALL_OBJECTS (with fallback to disk files)
+    2. Fetching source code with Redis caching (with fallback to disk files)
     3. Building recursive dependency call trees
     """
 
@@ -69,10 +136,10 @@ class MetadataInterpreter:
         self._default_schema = default_schema
 
     async def resolve_object(self, state: LogicState) -> LogicState:
-        """Resolve a PL/SQL object in Oracle metadata.
+        """Resolve a PL/SQL object in Oracle metadata or local files.
 
-        Queries ALL_OBJECTS via TMPL_OBJECT_EXISTS to confirm the object
-        exists and determine its type (FUNCTION, PROCEDURE, PACKAGE).
+        First queries ALL_OBJECTS via TMPL_OBJECT_EXISTS. If not found in
+        Oracle, falls back to scanning db/modules/ for a matching .sql file.
 
         Args:
             state: Current pipeline state with object_name and schema.
@@ -81,7 +148,7 @@ class MetadataInterpreter:
             Updated state with object_type confirmed.
 
         Raises:
-            ObjectNotFoundError: If the object does not exist in the schema.
+            ObjectNotFoundError: If the object is not found anywhere.
         """
         correlation_id = get_correlation_id()
         schema = state.get("schema") or self._default_schema
@@ -92,38 +159,56 @@ class MetadataInterpreter:
             f"correlation_id={correlation_id}"
         )
 
+        # Try Oracle first
         rows = await self._schema_tools.execute_query(
             "TMPL_OBJECT_EXISTS",
             {"schema": schema, "object_name": object_name},
         )
 
-        if not rows:
-            logger.error(
-                f"Object not found: {schema}.{object_name} | "
-                f"correlation_id={correlation_id}"
+        if rows:
+            resolved_name, object_type, last_ddl_time = rows[0]
+            state["object_name"] = resolved_name
+            state["object_type"] = object_type
+            state["schema"] = schema
+            logger.info(
+                f"Object resolved from Oracle: {schema}.{resolved_name} "
+                f"type={object_type} | correlation_id={correlation_id}"
             )
-            raise ObjectNotFoundError(object_name, schema)
+            return state
 
-        # rows[0] = (object_name, object_type, last_ddl_time)
-        resolved_name, object_type, last_ddl_time = rows[0]
-
-        state["object_name"] = resolved_name
-        state["object_type"] = object_type
-        state["schema"] = schema
-
+        # Fallback: scan db/modules/ for SQL file
         logger.info(
-            f"Object resolved: {schema}.{resolved_name} type={object_type} "
-            f"last_ddl={last_ddl_time} | correlation_id={correlation_id}"
+            f"Object not in Oracle ALL_OBJECTS, scanning db/modules/ | "
+            f"correlation_id={correlation_id}"
         )
-        return state
+        filepath = _scan_modules_for_file(object_name)
+
+        if filepath:
+            source_lines = _read_sql_file(filepath)
+            source_text = "".join(line["text"] for line in source_lines)
+            object_type = _detect_object_type(source_text)
+
+            state["object_name"] = object_name.upper()
+            state["object_type"] = object_type
+            state["schema"] = schema
+
+            logger.info(
+                f"Object resolved from disk: {filepath} "
+                f"type={object_type} | correlation_id={correlation_id}"
+            )
+            return state
+
+        logger.error(
+            f"Object not found anywhere: {schema}.{object_name} | "
+            f"correlation_id={correlation_id}"
+        )
+        raise ObjectNotFoundError(object_name, schema)
 
     async def fetch_logic(self, state: LogicState) -> LogicState:
-        """Fetch PL/SQL source code from Redis cache or Oracle.
+        """Fetch PL/SQL source code from cache, Oracle, or disk.
 
-        Checks Redis first using key logic:{schema}:{object_name}.
-        On cache hit, reads source_code directly. On cache miss, queries
-        Oracle via TMPL_FETCH_SOURCE and stores in Redis with version stamp.
-        If Redis is unavailable, falls back to Oracle directly.
+        Priority: Redis cache -> Oracle ALL_SOURCE -> db/modules/ .sql files.
+        If Redis is unavailable, falls back gracefully.
 
         Args:
             state: Current pipeline state with object_name and schema.
@@ -141,7 +226,7 @@ class MetadataInterpreter:
             f"correlation_id={correlation_id}"
         )
 
-        # Try Redis cache first
+        # 1. Try Redis cache first
         cached = await self._cache.get_json(*cache_key_parts)
         if cached:
             state["source_code"] = cached["source_code"]
@@ -154,9 +239,9 @@ class MetadataInterpreter:
             )
             return state
 
-        # Cache miss — fetch from Oracle
+        # 2. Try Oracle ALL_SOURCE
         logger.info(
-            f"Cache MISS for {schema}.{object_name} — querying Oracle | "
+            f"Cache MISS for {schema}.{object_name} — trying Oracle | "
             f"correlation_id={correlation_id}"
         )
         rows = await self._schema_tools.execute_query(
@@ -164,45 +249,92 @@ class MetadataInterpreter:
             {"schema": schema, "object_name": object_name},
         )
 
-        source_lines = [{"line": row[0], "text": row[1]} for row in rows]
+        if rows:
+            source_lines = [{"line": row[0], "text": row[1]} for row in rows]
+            await self._cache_source(
+                schema, object_name, source_lines, cache_key_parts, correlation_id
+            )
+            state["source_code"] = source_lines
+            state["cache_hit"] = False
+            state["cache_stale"] = False
+            logger.info(
+                f"Fetched {len(source_lines)} lines from Oracle | "
+                f"correlation_id={correlation_id}"
+            )
+            return state
 
-        # Get last DDL time for version stamp
-        obj_rows = await self._schema_tools.execute_query(
-            "TMPL_OBJECT_EXISTS",
-            {"schema": schema, "object_name": object_name},
+        # 3. Fallback: read from db/modules/ on disk
+        logger.info(
+            f"Not in Oracle ALL_SOURCE, trying db/modules/ | "
+            f"correlation_id={correlation_id}"
         )
-        last_ddl_time = str(obj_rows[0][2]) if obj_rows else None
+        filepath = _scan_modules_for_file(object_name)
 
-        # Compute version hash
-        source_text = "".join(line["text"] for line in source_lines)
-        version_hash = hashlib.sha256(source_text.encode()).hexdigest()[:16]
+        if filepath:
+            source_lines = _read_sql_file(filepath)
+            await self._cache_source(
+                schema, object_name, source_lines, cache_key_parts, correlation_id
+            )
+            state["source_code"] = source_lines
+            state["cache_hit"] = False
+            state["cache_stale"] = False
+            logger.info(
+                f"Fetched {len(source_lines)} lines from disk: {filepath} | "
+                f"correlation_id={correlation_id}"
+            )
+            return state
 
-        # Store in Redis (graceful degradation — never fail on Redis errors)
-        cache_payload = {
-            "source_code": source_lines,
-            "cached_at": datetime.utcnow().isoformat(),
-            "oracle_last_ddl_time": last_ddl_time,
-            "version_hash": version_hash,
-        }
-        await self._cache.set_json(cache_payload, *cache_key_parts)
-
-        state["source_code"] = source_lines
+        # Nothing found — return empty (resolve_object should have caught this)
+        state["source_code"] = []
         state["cache_hit"] = False
         state["cache_stale"] = False
-
-        logger.info(
-            f"Fetched {len(source_lines)} lines from Oracle for "
-            f"{schema}.{object_name} (hash={version_hash}) | "
+        logger.warning(
+            f"No source found for {schema}.{object_name} | "
             f"correlation_id={correlation_id}"
         )
         return state
+
+    async def _cache_source(
+        self,
+        schema: str,
+        object_name: str,
+        source_lines: List[Dict[str, Any]],
+        cache_key_parts: tuple,
+        correlation_id: str,
+    ) -> None:
+        """Cache source code in Redis with a version stamp.
+
+        Args:
+            schema: Oracle schema name.
+            object_name: PL/SQL object name.
+            source_lines: List of line dicts to cache.
+            cache_key_parts: Redis key tuple.
+            correlation_id: Request correlation ID for logging.
+        """
+        source_text = "".join(
+            line["text"] if isinstance(line, dict) else str(line)
+            for line in source_lines
+        )
+        version_hash = hashlib.sha256(source_text.encode()).hexdigest()[:16]
+
+        cache_payload = {
+            "source_code": source_lines,
+            "cached_at": datetime.utcnow().isoformat(),
+            "oracle_last_ddl_time": None,
+            "version_hash": version_hash,
+        }
+        await self._cache.set_json(cache_payload, *cache_key_parts)
+        logger.info(
+            f"Cached {len(source_lines)} lines for {schema}.{object_name} "
+            f"(hash={version_hash}) | correlation_id={correlation_id}"
+        )
 
     async def fetch_dependencies(self, state: LogicState) -> LogicState:
         """Build a recursive call tree of function dependencies.
 
         Scans the PL/SQL source code for function/procedure call patterns,
-        then recursively fetches each dependency's source from Oracle
-        (max depth 3).
+        then recursively fetches each dependency's source (from Oracle or
+        disk, max depth 3).
 
         Args:
             state: Current pipeline state with source_code.
@@ -277,6 +409,10 @@ class MetadataInterpreter:
             "NVL", "NVL2", "DECODE", "TO_CHAR", "TO_DATE", "TO_NUMBER",
             "SUBSTR", "INSTR", "LENGTH", "REPLACE", "COALESCE",
             "COUNT", "SUM", "AVG", "MIN", "MAX", "ROUND", "TRUNC",
+            "INSERT", "UPDATE", "DELETE", "SELECT", "FROM", "WHERE",
+            "GROUP", "ORDER", "HAVING", "VALUES", "INTO", "SET",
+            "COMMIT", "ROLLBACK", "DBMS_OUTPUT", "PUT_LINE",
+            "EXTRACT", "MONTH", "YEAR", "DAY",
         }
 
         seen = set()
@@ -298,6 +434,8 @@ class MetadataInterpreter:
         visited: set,
     ) -> Dict[str, Any]:
         """Recursively build a dependency call tree.
+
+        Tries Oracle ALL_SOURCE first, then falls back to db/modules/ files.
 
         Args:
             schema: Oracle schema to search in.
@@ -321,45 +459,50 @@ class MetadataInterpreter:
                 continue
 
             visited.add(upper_name)
+            source_lines = None
 
             try:
+                # Try Oracle first
                 rows = await self._schema_tools.execute_query(
                     "TMPL_FETCH_SOURCE",
                     {"schema": schema, "object_name": fn_name},
                 )
 
-                if not rows:
-                    tree[fn_name] = {"status": "not_found", "depth": depth}
-                    continue
-
-                source_lines = [{"line": r[0], "text": r[1]} for r in rows]
-                source_text = "".join(line["text"] for line in source_lines)
-                sub_calls = self._extract_function_calls(source_text)
-                sub_calls = [
-                    f for f in sub_calls
-                    if f.upper() != upper_name and f.upper() not in visited
-                ]
-
-                sub_tree = await self._build_call_tree(
-                    schema, sub_calls, depth + 1, max_depth, visited
-                )
-
-                tree[fn_name] = {
-                    "status": "resolved",
-                    "depth": depth,
-                    "line_count": len(source_lines),
-                    "source_code": source_lines,
-                    "dependencies": sub_tree,
-                }
-
+                if rows:
+                    source_lines = [{"line": r[0], "text": r[1]} for r in rows]
             except Exception as exc:
-                logger.warning(
-                    f"Failed to resolve dependency {fn_name}: {exc}"
-                )
-                tree[fn_name] = {
-                    "status": "error",
-                    "depth": depth,
-                    "error": str(exc),
-                }
+                logger.warning(f"Oracle fetch failed for {fn_name}: {exc}")
+
+            # Fallback to disk
+            if not source_lines:
+                filepath = _scan_modules_for_file(fn_name)
+                if filepath:
+                    source_lines = _read_sql_file(filepath)
+
+            if not source_lines:
+                tree[fn_name] = {"status": "not_found", "depth": depth}
+                continue
+
+            source_text = "".join(
+                line["text"] if isinstance(line, dict) else str(line)
+                for line in source_lines
+            )
+            sub_calls = self._extract_function_calls(source_text)
+            sub_calls = [
+                f for f in sub_calls
+                if f.upper() != upper_name and f.upper() not in visited
+            ]
+
+            sub_tree = await self._build_call_tree(
+                schema, sub_calls, depth + 1, max_depth, visited
+            )
+
+            tree[fn_name] = {
+                "status": "resolved",
+                "depth": depth,
+                "line_count": len(source_lines),
+                "source_code": source_lines,
+                "dependencies": sub_tree,
+            }
 
         return tree
