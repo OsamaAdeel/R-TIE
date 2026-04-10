@@ -1,0 +1,46 @@
+TMPL_FETCH_SOURCE:
+  sql: |
+    SELECT line, text
+    FROM   all_source
+    WHERE  owner = :schema
+    AND    name  = UPPER(:object_name)
+    AND    type  IN ('FUNCTION', 'PROCEDURE', 'PACKAGE BODY')
+    ORDER  BY line
+  params: [schema, object_name]
+  read_only: true
+
+TMPL_OBJECT_EXISTS:
+  sql: |
+    SELECT object_name, object_type, last_ddl_time
+    FROM   all_objects
+    WHERE  owner       = :schema
+    AND    object_name = UPPER(:object_name)
+    AND    object_type IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')
+  params: [schema, object_name]
+  read_only: true
+
+TMPL_SCHEMA_SNAPSHOT:
+  sql: |
+    SELECT table_name, column_name, column_id,
+           data_type, data_length, data_precision,
+           data_scale, nullable
+    FROM   all_tab_columns
+    WHERE  owner = :schema
+    ORDER  BY table_name, column_id
+  params: [schema]
+  read_only: true
+
+TMPL_BATCH_RUN_ID_LOOKUP:
+  sql: |
+    SELECT DISTINCT batch_run_id,
+           MIN(msg_timestamp) AS run_start_time,
+           MAX(msg_timestamp) AS run_end_time,
+           COUNT(*)           AS total_messages
+    FROM   fsi_message_log
+    WHERE  batch_run_id LIKE :module_prefix || '%'
+    AND    batch_run_id LIKE '%' || :mis_date_fmt || '%'
+    GROUP  BY batch_run_id
+    ORDER  BY run_start_time DESC
+    FETCH  FIRST 10 ROWS ONLY
+  params: [module_prefix, mis_date_fmt]
+  read_only: true
