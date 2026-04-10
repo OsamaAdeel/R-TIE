@@ -1,0 +1,257 @@
+"""
+RTIE Logic Explainer Agent.
+
+Uses an LLM (OpenAI or Claude) to generate structured, fully-cited
+explanations of PL/SQL functions and procedures. Every claim in the
+explanation must reference specific line numbers from the source code.
+LangSmith tracing is enabled on all LLM calls. Supports dynamic model
+switching per request.
+"""
+
+import json
+from typing import Any, Dict, Optional
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage, HumanMessage
+
+from src.graph.state import LogicState
+from src.llm_factory import create_llm
+from src.logger import get_logger
+from src.middleware.correlation_id import get_correlation_id
+
+logger = get_logger(__name__, concern="app")
+
+
+EXPLANATION_SYSTEM_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
+You analyze Oracle OFSAA PL/SQL functions and procedures used in regulatory capital computations.
+
+You will receive:
+1. The complete source code of a PL/SQL function/procedure with line numbers.
+2. A call tree showing all dependencies and their source code.
+
+Your task is to produce a structured JSON explanation. You MUST respond with ONLY valid JSON — no markdown, no extra text.
+
+STRICT RULES:
+- ONLY reference line numbers and content that exist in the provided source code.
+- NEVER hallucinate logic, functions, or formulas that are not in the source.
+- Cite specific line numbers for EVERY claim you make.
+- If something is unclear or ambiguous, FLAG IT rather than guessing.
+- Every formula must map to exact lines in the source code.
+- Every dependency mentioned must exist in the call tree provided.
+
+Output JSON schema:
+{
+  "summary": "A concise plain-English summary of what the function/procedure does",
+  "step_by_step": [
+    {
+      "step": 1,
+      "description": "What this step does",
+      "lines": [10, 11, 12],
+      "code_snippet": "relevant code from those lines"
+    }
+  ],
+  "formulas": [
+    {
+      "name": "Formula name or description",
+      "formula": "The mathematical formula",
+      "lines": [15, 16],
+      "variables": {"var_name": "description of what it represents"}
+    }
+  ],
+  "dependencies_used": [
+    {
+      "name": "FN_DEPENDENCY_NAME",
+      "purpose": "What this dependency does in context",
+      "called_at_lines": [25, 30]
+    }
+  ],
+  "regulatory_refs": [
+    "Any regulatory framework references found (Basel III, IFRS 9, etc.)"
+  ],
+  "raw_source_references": [
+    {
+      "line": 10,
+      "text": "exact text from that line",
+      "significance": "why this line matters"
+    }
+  ],
+  "unclear_items": [
+    "Anything that could not be determined from the source code alone"
+  ]
+}
+"""
+
+
+class LogicExplainer:
+    """Agent for generating structured PL/SQL logic explanations.
+
+    Uses OpenAI or Anthropic LLMs with LangSmith tracing to analyze
+    source code and produce fully-cited, step-by-step explanations of
+    regulatory capital computation logic. Model is selectable per request.
+    """
+
+    def __init__(
+        self,
+        temperature: float = 0,
+        max_tokens: int = 2000,
+        langsmith_project: str = "RTIE",
+    ) -> None:
+        """Initialize the LogicExplainer with LLM settings.
+
+        Args:
+            temperature: LLM temperature. Defaults to 0.
+            max_tokens: Maximum tokens for LLM response. Defaults to 2000.
+            langsmith_project: LangSmith project name for tracing. Defaults to 'RTIE'.
+        """
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._langsmith_project = langsmith_project
+
+    def _get_llm(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> BaseChatModel:
+        """Get an LLM instance for the specified provider.
+
+        Args:
+            provider: 'openai' or 'anthropic'. None uses default.
+            model: Specific model name. None uses default for provider.
+
+        Returns:
+            A LangChain chat model instance.
+        """
+        return create_llm(
+            provider=provider,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            json_mode=(provider or "openai") != "anthropic",
+        )
+
+    async def explain_logic(
+        self,
+        state: LogicState,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> LogicState:
+        """Generate a structured explanation of the PL/SQL source code.
+
+        Sends the full source code and call tree to the selected LLM,
+        which returns a structured JSON explanation with line citations.
+        LangSmith tracing is active for this call.
+
+        Args:
+            state: Current pipeline state with source_code and call_tree.
+            provider: LLM provider ('openai' or 'anthropic'). None uses default.
+            model: Specific model name. None uses default for provider.
+
+        Returns:
+            Updated state with explanation dict populated.
+        """
+        correlation_id = get_correlation_id()
+        object_name = state["object_name"]
+        schema = state["schema"]
+
+        logger.info(
+            f"Generating explanation for {schema}.{object_name} | "
+            f"provider={provider}, model={model} | "
+            f"correlation_id={correlation_id}"
+        )
+
+        llm = self._get_llm(provider, model)
+
+        # Format source code for the LLM
+        source_text = self._format_source_code(state["source_code"])
+        call_tree_text = self._format_call_tree(state["call_tree"])
+
+        # For Anthropic, add explicit JSON-only instruction
+        system_prompt = EXPLANATION_SYSTEM_PROMPT
+        if (provider or "").lower() == "anthropic":
+            system_prompt += (
+                "\n\nIMPORTANT: Respond with ONLY the raw JSON object. "
+                "No markdown code fences, no explanation before or after."
+            )
+
+        user_prompt = (
+            f"Analyze the following PL/SQL object: {schema}.{object_name}\n\n"
+            f"=== SOURCE CODE ===\n{source_text}\n\n"
+            f"=== CALL TREE (Dependencies) ===\n{call_tree_text}\n\n"
+            f"Produce a complete structured JSON explanation following the "
+            f"schema in your instructions. Cite every claim with line numbers."
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        # Invoke with LangSmith tracing
+        response = await llm.ainvoke(
+            messages,
+            config={
+                "metadata": {
+                    "correlation_id": correlation_id,
+                    "object_name": object_name,
+                    "schema": schema,
+                    "provider": provider,
+                    "model": model,
+                },
+                "tags": ["logic_explanation", object_name],
+            },
+        )
+
+        raw_content = response.content.strip()
+
+        # Strip markdown fences if present (Claude sometimes adds them)
+        if raw_content.startswith("```"):
+            raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        logger.info(
+            f"LLM explanation received for {schema}.{object_name} "
+            f"({len(raw_content)} chars) | correlation_id={correlation_id}"
+        )
+
+        # Parse the JSON response
+        explanation = json.loads(raw_content)
+
+        state["explanation"] = explanation
+
+        logger.info(
+            f"Explanation parsed: {len(explanation.get('step_by_step', []))} steps, "
+            f"{len(explanation.get('formulas', []))} formulas, "
+            f"{len(explanation.get('dependencies_used', []))} deps | "
+            f"correlation_id={correlation_id}"
+        )
+        return state
+
+    def _format_source_code(self, source_lines: list) -> str:
+        """Format source code lines for LLM consumption.
+
+        Args:
+            source_lines: List of dicts with 'line' and 'text' keys,
+                or raw strings.
+
+        Returns:
+            Formatted string with line numbers and code text.
+        """
+        lines = []
+        for item in source_lines:
+            if isinstance(item, dict):
+                line_num = item.get("line", "?")
+                text = item.get("text", "").rstrip("\n")
+                lines.append(f"L{line_num}: {text}")
+            else:
+                lines.append(str(item))
+        return "\n".join(lines)
+
+    def _format_call_tree(self, call_tree: dict) -> str:
+        """Format the call tree for LLM consumption.
+
+        Args:
+            call_tree: Nested dependency dictionary.
+
+        Returns:
+            Human-readable string representation of the call tree.
+        """
+        return json.dumps(call_tree, indent=2, default=str)
