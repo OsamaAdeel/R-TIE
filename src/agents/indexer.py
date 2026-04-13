@@ -160,8 +160,16 @@ class IndexerAgent:
                 if indexed or errors:
                     await asyncio.sleep(2)
 
+                # Truncate source to keep payload under 2KB (corporate network TLS limit)
+                max_chars = 3000  # ~750 tokens, keeps total request under 2KB
+                truncated_source = source_code[:max_chars]
+                if len(source_code) > max_chars:
+                    truncated_source += f"\n\n-- [TRUNCATED: {len(source_code) - max_chars} more characters]"
+
+                print(f"    Generating description for {fn_name} ({len(source_code)} chars, sending {len(truncated_source)})...")
+
                 # Generate description via LLM
-                desc_result = await self._generate_description(fn_name, source_code)
+                desc_result = await self._generate_description(fn_name, truncated_source)
 
                 # Small delay before embedding call
                 await asyncio.sleep(1)
@@ -242,13 +250,13 @@ class IndexerAgent:
         Returns:
             Dict with description, tables_read, tables_written, key_columns.
         """
-        # Use Ollama for description generation (large source payloads)
+        # Use OpenAI for indexing (one-time, fast)
         llm = create_llm(
-            provider="ollama",
-            model=os.getenv("OLLAMA_MODEL", "llama3:8b"),
+            provider="openai",
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             temperature=self._temperature,
             max_tokens=self._max_tokens,
-            json_mode=self._llm_provider != "anthropic",
+            json_mode=True,
         )
 
         messages = [
@@ -269,7 +277,17 @@ class IndexerAgent:
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-        return json.loads(raw)
+        # Try JSON parse; if Ollama didn't return valid JSON, build a fallback
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(f"Non-JSON response from LLM for {function_name}, using raw text as description")
+            return {
+                "description": raw[:2000],
+                "tables_read": [],
+                "tables_written": [],
+                "key_columns": [],
+            }
 
     async def _get_embedding(self, text: str) -> List[float]:
         """Generate an embedding vector for the given text.
