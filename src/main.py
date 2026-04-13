@@ -4,40 +4,38 @@ RTIE FastAPI Application.
 Provides the HTTP API layer for the Regulatory Trace & Intelligence Engine.
 Endpoints include POST /v1/query for logic explanation, GET /health for
 dependency status checks, and GET /v1/models for listing available LLM
-providers. All requests receive a correlation ID for end-to-end tracing,
-and LangSmith tracing is enabled on every query.
+providers. All queries flow through semantic vector search.
 """
 
 import asyncio
 import os
 import platform
-import sys
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-# Windows requires SelectorEventLoop for psycopg async support.
-# Must be set before any async connection pools are created.
-if platform.system() == "Windows":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# Note: ProactorEventLoop (Windows default) is used for httpx compatibility.
+# psycopg uses psycopg-binary which handles the event loop internally.
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import traceback
 
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
+from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
 from src.graph.logic_graph import compile_graph
 from src.graph.state import LogicState
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
+from src.tools.vector_store import VectorStore
 from src.monitoring.health import HealthChecker
 from src.middleware.correlation_id import CorrelationIdMiddleware, get_correlation_id
 from src.llm_factory import list_available_models, get_default_provider, get_default_model
@@ -53,9 +51,6 @@ load_dotenv(f".env.{env}")
 
 def _load_settings() -> Dict[str, Any]:
     """Load and merge YAML configuration files.
-
-    Loads the base settings.yaml and overlays the environment-specific
-    settings file (e.g. settings.dev.yaml).
 
     Returns:
         Merged configuration dictionary.
@@ -96,11 +91,13 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 # Global references for app state
 _schema_tools: SchemaTools = None
 _cache_client: CacheClient = None
+_vector_store: VectorStore = None
 _orchestrator: Orchestrator = None
 _metadata_interpreter: MetadataInterpreter = None
 _logic_explainer: LogicExplainer = None
 _validator: Validator = None
 _cache_manager: CacheManager = None
+_indexer: IndexerAgent = None
 _renderer: Renderer = None
 _compiled_graph = None
 _health_checker: HealthChecker = None
@@ -111,20 +108,23 @@ _settings: Dict[str, Any] = {}
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown.
 
-    Initializes all agents, connection pools, and the LangGraph pipeline
-    on startup. Cleans up connections on shutdown.
+    Initializes all agents, connection pools, vector store, and the
+    LangGraph pipeline on startup. Auto-indexes configured modules.
+    Cleans up connections on shutdown.
 
     Args:
         app: The FastAPI application instance.
     """
-    global _schema_tools, _cache_client, _orchestrator, _metadata_interpreter
-    global _logic_explainer, _validator, _cache_manager, _renderer
+    global _schema_tools, _cache_client, _vector_store
+    global _orchestrator, _metadata_interpreter, _logic_explainer
+    global _validator, _cache_manager, _indexer, _renderer
     global _compiled_graph, _health_checker, _settings
 
     _settings = _load_settings()
     oracle_cfg = _settings["oracle"]
     redis_cfg = _settings["redis"]
     llm_cfg = _settings["llm"]
+    embedding_cfg = _settings.get("embedding", {})
 
     # Initialize Oracle connection pool
     _schema_tools = SchemaTools(
@@ -146,7 +146,15 @@ async def lifespan(app: FastAPI):
     )
     await _cache_client.connect()
 
-    # Initialize agents (no longer need Azure-specific credentials)
+    # Initialize Redis vector store
+    _vector_store = VectorStore(
+        host=os.getenv("REDIS_HOST"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+    )
+    await _vector_store.connect()
+    await _vector_store.ensure_index()
+
+    # Initialize agents
     _orchestrator = Orchestrator(
         temperature=llm_cfg["temperature"],
         max_tokens=llm_cfg["max_tokens"],
@@ -174,6 +182,18 @@ async def lifespan(app: FastAPI):
         cache_client=_cache_client,
     )
 
+    _indexer = IndexerAgent(
+        vector_store=_vector_store,
+        embedding_model=os.getenv(
+            "EMBEDDING_MODEL",
+            embedding_cfg.get("model", "text-embedding-3-small"),
+        ),
+        llm_provider=embedding_cfg.get("description_provider", "openai"),
+        llm_model=embedding_cfg.get("description_model", "gpt-4o"),
+        temperature=llm_cfg["temperature"],
+        max_tokens=llm_cfg["max_tokens"],
+    )
+
     _renderer = Renderer()
 
     # PostgreSQL DSN for LangGraph checkpointer
@@ -191,6 +211,7 @@ async def lifespan(app: FastAPI):
         validator=_validator,
         renderer=_renderer,
         postgres_dsn=postgres_dsn,
+        vector_store=_vector_store,
     )
 
     # Initialize health checker
@@ -200,10 +221,26 @@ async def lifespan(app: FastAPI):
         postgres_dsn=postgres_dsn,
     )
 
+    # Auto-index configured modules on startup
+    auto_index_modules = embedding_cfg.get("auto_index_modules", [])
+    for module_name in auto_index_modules:
+        try:
+            logger.info(f"Auto-indexing module: {module_name}")
+            result = await _indexer.index_module(module_name, force=False)
+            logger.info(
+                f"Auto-index {module_name}: "
+                f"{result.get('indexed', 0)} indexed, "
+                f"{result.get('skipped', 0)} skipped, "
+                f"{result.get('errors', 0)} errors"
+            )
+        except Exception as exc:
+            logger.warning(f"Auto-indexing failed for {module_name} (non-fatal): {exc}")
+
     logger.info("RTIE application started successfully")
     yield
 
     # Shutdown
+    await _vector_store.close()
     await _cache_client.close()
     await _schema_tools.close()
     logger.info("RTIE application shut down cleanly")
@@ -219,15 +256,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Add correlation ID middleware
 app.add_middleware(CorrelationIdMiddleware)
 
 
@@ -238,7 +272,7 @@ class QueryRequest(BaseModel):
         query: The user's natural language query or slash command.
         session_id: Unique session identifier for conversation continuity.
         engineer_id: Identifier for the requesting engineer.
-        provider: LLM provider to use ('openai' or 'anthropic'). Optional.
+        provider: LLM provider to use. Optional.
         model: Specific model name to use. Optional.
     """
 
@@ -253,18 +287,17 @@ class QueryRequest(BaseModel):
 
 @app.post("/v1/query")
 async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
-    """Process a logic explanation query or slash command.
+    """Process a logic query or slash command.
 
-    For slash commands, routes directly to the CacheManager.
-    For logic queries, runs the full LangGraph pipeline with the
-    selected LLM provider and model.
+    All logic queries flow through the unified semantic search pipeline.
+    Slash commands are routed directly to their handlers.
 
     Args:
         request: The query request body.
         req: The raw Starlette request for correlation ID.
 
     Returns:
-        Full output dict from the pipeline state, or command result.
+        Full output dict from the pipeline, or command result.
     """
     correlation_id = get_correlation_id()
     provider = request.provider
@@ -287,7 +320,7 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             )
             return {"type": "command", "result": result, "correlation_id": correlation_id}
 
-        # Run the LangGraph pipeline
+        # Run the unified semantic search pipeline
         initial_state: LogicState = {
             "session_id": request.session_id,
             "correlation_id": correlation_id,
@@ -304,6 +337,8 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             "validated": False,
             "confidence": 0.0,
             "warnings": [],
+            "search_results": [],
+            "multi_source": {},
             "output": {},
             "partial_flag": False,
         }
@@ -326,7 +361,8 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
         final_state = await _compiled_graph.ainvoke(initial_state, config=config)
 
         logger.info(
-            f"Query completed: object={final_state.get('object_name', 'N/A')} "
+            f"Query completed: "
+            f"functions={list(final_state.get('multi_source', {}).keys())} "
             f"confidence={final_state.get('confidence', 0)} | "
             f"correlation_id={correlation_id}"
         )
@@ -334,32 +370,8 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
         return final_state.get("output", {})
 
     except Exception as exc:
-        from src.agents.metadata_interpreter import ObjectNotFoundError
-
         tb = traceback.format_exc()
         logger.error(f"Query failed: {exc}\n{tb} | correlation_id={correlation_id}")
-
-        if isinstance(exc, ObjectNotFoundError):
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "object_name": exc.object_name,
-                    "schema": exc.schema,
-                    "explanation": {
-                        "summary": (
-                            f"Object '{exc.object_name}' was not found in schema "
-                            f"'{exc.schema}'. Please verify the function or procedure "
-                            f"name exists in your Oracle OFSAA database."
-                        ),
-                    },
-                    "confidence": 0.0,
-                    "validated": False,
-                    "badge": "NOT_FOUND",
-                    "warnings": [f"Object '{exc.object_name}' does not exist in '{exc.schema}'"],
-                    "correlation_id": correlation_id,
-                },
-            )
-
         return JSONResponse(
             status_code=500,
             content={
@@ -372,10 +384,10 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
 async def _handle_command(
     command: str, args: list, session_id: str
 ) -> Dict[str, Any]:
-    """Route a slash command to the appropriate CacheManager method.
+    """Route a slash command to the appropriate handler.
 
     Args:
-        command: The command name (e.g. 'refresh-cache').
+        command: The command name.
         args: List of command arguments.
         session_id: The current session ID.
 
@@ -399,6 +411,15 @@ async def _handle_command(
         return await _cache_manager.clear_cache_entry(args[0], schema)
     elif command == "refresh-schema":
         return await _cache_manager.refresh_schema_snapshot(schema)
+    elif command == "index-module" and args:
+        force = "--force" in args
+        module_name = [a for a in args if a != "--force"][0]
+        return await _indexer.index_module(module_name, force=force)
+    elif command == "index-all":
+        force = "--force" in args
+        return await _indexer.index_all_modules(force=force)
+    elif command == "index-status":
+        return await _vector_store.get_index_stats()
     else:
         return {
             "status": "error",
@@ -410,6 +431,9 @@ async def _handle_command(
                 "/cache-list",
                 "/cache-clear <name>",
                 "/refresh-schema",
+                "/index-module <name> [--force]",
+                "/index-all [--force]",
+                "/index-status",
             ],
         }
 

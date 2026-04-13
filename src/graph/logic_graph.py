@@ -1,22 +1,22 @@
 """
 RTIE LangGraph Logic Graph.
 
-Builds and compiles the deterministic StateGraph that orchestrates the
-full logic explanation pipeline. Nodes execute in a fixed linear order:
-parse -> resolve -> fetch -> cache_validate -> dependencies -> explain
--> relevance_validate -> output_validate -> render.
+Builds and compiles the unified semantic search StateGraph. All queries
+go through: parse → semantic_search → fetch_multi → explain → validate → render.
 
 Command queries (starting with '/') bypass the graph entirely and are
-routed to cache_manager tools before graph execution.
-
-LLM provider and model are passed through the graph config so each
-request can select OpenAI or Anthropic dynamically.
+routed to cache_manager/indexer tools before graph execution.
 """
 
+import asyncio
+import os
+from typing import Optional
+
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain_core.runnables import RunnableConfig
+from langchain_openai import OpenAIEmbeddings
 from psycopg_pool import AsyncConnectionPool
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from src.graph.state import LogicState
 from src.agents.orchestrator import Orchestrator
@@ -24,6 +24,7 @@ from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
 from src.agents.validator import Validator
 from src.agents.renderer import Renderer
+from src.tools.vector_store import VectorStore
 from src.logger import get_logger
 
 logger = get_logger(__name__, concern="app")
@@ -49,15 +50,15 @@ def build_logic_graph(
     orchestrator: Orchestrator,
     metadata_interpreter: MetadataInterpreter,
     logic_explainer: LogicExplainer,
-    validator: Validator,
+    validator: Validator,  # noqa: ARG001 — kept for compile_graph API compatibility
     renderer: Renderer,
-    postgres_dsn: str,
+    vector_store: Optional[VectorStore] = None,
 ) -> StateGraph:
-    """Build and compile the RTIE logic explanation StateGraph.
+    """Build the RTIE unified semantic search StateGraph.
 
-    Constructs a deterministic linear graph where each node represents
-    an agent operation. All edges are unconditional — command routing
-    happens before graph invocation.
+    All queries flow through a single linear path:
+    parse_query → semantic_search → fetch_multi_logic → explain_semantic
+    → output_validator → render_response → END
 
     Args:
         orchestrator: The Orchestrator agent instance.
@@ -65,23 +66,23 @@ def build_logic_graph(
         logic_explainer: The LogicExplainer agent instance.
         validator: The Validator agent instance.
         renderer: The Renderer agent instance.
-        postgres_dsn: PostgreSQL connection string for the checkpointer.
+        vector_store: Redis vector store for semantic search. Optional.
 
     Returns:
-        A compiled LangGraph StateGraph ready for invocation.
+        A LangGraph StateGraph ready for compilation.
     """
 
     async def parse_query(state: LogicState, config: RunnableConfig) -> LogicState:
-        """Classify the user query and extract object metadata.
+        """Classify the user query and extract search terms.
 
         Args:
             state: Current pipeline state.
-            config: LangGraph config with provider/model in configurable.
+            config: LangGraph config with provider/model.
 
         Returns:
-            Updated state with query_type, object_name, schema populated.
+            Updated state with enriched search query in object_name.
         """
-        logger.info(f"[parse_query] Classifying query: {state['raw_query'][:80]}...")
+        logger.info(f"[parse_query] Classifying: {state['raw_query'][:80]}...")
         llm_cfg = _extract_llm_config(config)
         return await orchestrator.classify_query(
             state["raw_query"], state,
@@ -89,95 +90,137 @@ def build_logic_graph(
             model=llm_cfg["model"],
         )
 
-    async def resolve_object(state: LogicState) -> LogicState:
-        """Resolve the target object in Oracle metadata.
+    async def semantic_search(state: LogicState) -> LogicState:
+        """Perform vector similarity search to find relevant functions.
+
+        Embeds the enriched query and searches Redis for the top-K
+        most relevant indexed functions.
 
         Args:
-            state: Current pipeline state with object_name.
+            state: Current pipeline state with enriched query in object_name.
 
         Returns:
-            Updated state with object_type confirmed.
+            Updated state with search_results list.
         """
-        logger.info(f"[resolve_object] Resolving: {state['object_name']}")
-        return await metadata_interpreter.resolve_object(state)
+        logger.info("[semantic_search] Searching for relevant functions...")
 
-    async def fetch_logic(state: LogicState) -> LogicState:
-        """Fetch PL/SQL source code from cache or Oracle.
+        if not vector_store:
+            state["search_results"] = []
+            state["warnings"] = state.get("warnings", []) + [
+                "Vector store not available — no semantic search results"
+            ]
+            logger.warning("[semantic_search] Vector store not available")
+            return state
+
+        # Use the enriched query (original + intent + search terms)
+        search_query = state.get("object_name", state["raw_query"])
+
+        import ssl as _ssl
+        import httpx as _httpx
+        _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
+        _ssl_ctx.load_default_certs()
+        embeddings = OpenAIEmbeddings(
+            model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+            http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
+            http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+        )
+        query_embedding = await embeddings.aembed_query(search_query)
+
+        results = await vector_store.search(
+            query_embedding=query_embedding,
+            top_k=5,
+        )
+
+        state["search_results"] = results
+        state["schema"] = state.get("schema") or "OFSMDM"
+
+        logger.info(
+            f"[semantic_search] Found {len(results)} results: "
+            f"{[r['function_name'] for r in results]}"
+        )
+        return state
+
+    async def fetch_multi_logic(state: LogicState) -> LogicState:
+        """Fetch source code for all functions from semantic search results.
 
         Args:
-            state: Current pipeline state.
+            state: Current pipeline state with search_results.
 
         Returns:
-            Updated state with source_code and cache_hit.
+            Updated state with multi_source dict.
         """
-        logger.info(f"[fetch_logic] Fetching source for: {state['object_name']}")
-        return await metadata_interpreter.fetch_logic(state)
+        logger.info(
+            f"[fetch_multi_logic] Fetching source for "
+            f"{len(state.get('search_results', []))} functions"
+        )
+        return await metadata_interpreter.fetch_multi_logic(state)
 
-    async def cache_validate(state: LogicState) -> LogicState:
-        """Validate cache freshness against Oracle DDL timestamps.
+    async def explain_semantic(state: LogicState, config: RunnableConfig) -> LogicState:
+        """Generate cross-function explanation for the user's query.
 
         Args:
-            state: Current pipeline state with cached data.
-
-        Returns:
-            Updated state with cache_stale flag.
-        """
-        logger.info("[cache_validate] Checking cache freshness")
-        return await validator.cache_validator(state)
-
-    async def fetch_dependencies(state: LogicState) -> LogicState:
-        """Build the dependency call tree from source code analysis.
-
-        Args:
-            state: Current pipeline state with source_code.
-
-        Returns:
-            Updated state with call_tree populated.
-        """
-        logger.info(f"[fetch_dependencies] Scanning dependencies for: {state['object_name']}")
-        return await metadata_interpreter.fetch_dependencies(state)
-
-    async def explain_logic(state: LogicState, config: RunnableConfig) -> LogicState:
-        """Generate structured LLM explanation of the PL/SQL logic.
-
-        Args:
-            state: Current pipeline state with source_code and call_tree.
-            config: LangGraph config with provider/model in configurable.
+            state: Current pipeline state with multi_source.
+            config: LangGraph config with provider/model.
 
         Returns:
             Updated state with explanation dict.
         """
-        logger.info(f"[explain_logic] Explaining: {state['object_name']}")
+        logger.info("[explain_semantic] Generating cross-function explanation...")
         llm_cfg = _extract_llm_config(config)
-        return await logic_explainer.explain_logic(
+        return await logic_explainer.explain_semantic(
             state,
             provider=llm_cfg["provider"],
             model=llm_cfg["model"],
         )
 
-    async def query_relevance_validate(state: LogicState) -> LogicState:
-        """Validate that the explanation references the queried object.
-
-        Args:
-            state: Current pipeline state with explanation.
-
-        Returns:
-            Updated state with relevance warnings if any.
-        """
-        logger.info("[query_relevance_validate] Checking explanation relevance")
-        return await validator.query_relevance_validator(state)
-
     async def output_validate(state: LogicState) -> LogicState:
-        """Validate that all referenced functions exist in the call tree.
+        """Validate the explanation output.
+
+        For semantic search, validates that mentioned functions exist in
+        the multi_source results.
 
         Args:
-            state: Current pipeline state with explanation and call_tree.
+            state: Current pipeline state with explanation and multi_source.
 
         Returns:
             Updated state with validated flag and confidence score.
         """
-        logger.info("[output_validate] Validating output references")
-        return await validator.output_validator(state)
+        logger.info("[output_validate] Validating output")
+
+        explanation = state.get("explanation", {})
+        multi_source = state.get("multi_source", {})
+        warnings = list(state.get("warnings", []))
+
+        # Check that referenced functions exist in search results
+        known_functions = {name.upper() for name in multi_source.keys()}
+        mentioned = []
+
+        for fn in explanation.get("relevant_functions", []):
+            name = fn.get("name", "")
+            if name:
+                mentioned.append(name)
+                if name.upper() not in known_functions:
+                    warnings.append(
+                        f"Function '{name}' mentioned in explanation but not "
+                        f"in search results"
+                    )
+
+        total = len(mentioned)
+        resolved = sum(1 for m in mentioned if m.upper() in known_functions)
+        confidence = resolved / total if total > 0 else 1.0
+
+        state["validated"] = len(warnings) == 0
+        state["confidence"] = round(confidence, 4)
+        state["warnings"] = warnings
+        state["call_tree"] = {}
+
+        logger.info(
+            f"[output_validate] validated={state['validated']}, "
+            f"confidence={confidence:.4f}, "
+            f"resolved={resolved}/{total}"
+        )
+        return state
 
     async def render_response(state: LogicState) -> LogicState:
         """Render the final structured response.
@@ -191,33 +234,26 @@ def build_logic_graph(
         logger.info("[render_response] Rendering final output")
         return await renderer.render_response(state)
 
-    # Build the graph
+    # Build the graph — unified linear path
     graph = StateGraph(LogicState)
 
-    # Add nodes
     graph.add_node("parse_query", parse_query)
-    graph.add_node("resolve_object", resolve_object)
-    graph.add_node("fetch_logic", fetch_logic)
-    graph.add_node("cache_validator", cache_validate)
-    graph.add_node("fetch_dependencies", fetch_dependencies)
-    graph.add_node("explain_logic", explain_logic)
-    graph.add_node("query_relevance_validator", query_relevance_validate)
+    graph.add_node("semantic_search", semantic_search)
+    graph.add_node("fetch_multi_logic", fetch_multi_logic)
+    graph.add_node("explain_semantic", explain_semantic)
     graph.add_node("output_validator", output_validate)
     graph.add_node("render_response", render_response)
 
-    # Add deterministic edges
+    # Linear edges — every query follows the same path
     graph.set_entry_point("parse_query")
-    graph.add_edge("parse_query", "resolve_object")
-    graph.add_edge("resolve_object", "fetch_logic")
-    graph.add_edge("fetch_logic", "cache_validator")
-    graph.add_edge("cache_validator", "fetch_dependencies")
-    graph.add_edge("fetch_dependencies", "explain_logic")
-    graph.add_edge("explain_logic", "query_relevance_validator")
-    graph.add_edge("query_relevance_validator", "output_validator")
+    graph.add_edge("parse_query", "semantic_search")
+    graph.add_edge("semantic_search", "fetch_multi_logic")
+    graph.add_edge("fetch_multi_logic", "explain_semantic")
+    graph.add_edge("explain_semantic", "output_validator")
     graph.add_edge("output_validator", "render_response")
     graph.add_edge("render_response", END)
 
-    logger.info("Logic graph built with 9 nodes and deterministic edges")
+    logger.info("Unified semantic search graph built with 6 nodes")
     return graph
 
 
@@ -228,6 +264,7 @@ async def compile_graph(
     validator: Validator,
     renderer: Renderer,
     postgres_dsn: str,
+    vector_store: Optional[VectorStore] = None,
 ):
     """Compile the logic graph with PostgreSQL checkpointing.
 
@@ -238,6 +275,7 @@ async def compile_graph(
         validator: The Validator agent instance.
         renderer: The Renderer agent instance.
         postgres_dsn: PostgreSQL connection string for persistence.
+        vector_store: Redis vector store for semantic search.
 
     Returns:
         A compiled, checkpointed graph ready for invocation.
@@ -248,7 +286,7 @@ async def compile_graph(
         logic_explainer=logic_explainer,
         validator=validator,
         renderer=renderer,
-        postgres_dsn=postgres_dsn,
+        vector_store=vector_store,
     )
 
     pool = AsyncConnectionPool(conninfo=postgres_dsn, open=False)

@@ -7,8 +7,10 @@ model switching via the provider and model parameters.
 """
 
 import os
+import ssl
 from typing import Optional
 
+import httpx
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -18,7 +20,7 @@ from src.logger import get_logger
 logger = get_logger(__name__, concern="app")
 
 # Supported providers
-PROVIDERS = {"openai", "anthropic"}
+PROVIDERS = {"openai", "anthropic", "ollama"}
 
 
 def get_default_provider() -> str:
@@ -34,13 +36,15 @@ def get_default_model(provider: str) -> str:
     """Get the default model name for a given provider.
 
     Args:
-        provider: The LLM provider ('openai' or 'anthropic').
+        provider: The LLM provider ('openai', 'anthropic', or 'ollama').
 
     Returns:
         Default model name string.
     """
     if provider == "anthropic":
         return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    if provider == "ollama":
+        return os.getenv("OLLAMA_MODEL", "llama3:8b")
     return os.getenv("OPENAI_MODEL", "gpt-4o")
 
 
@@ -87,12 +91,30 @@ def create_llm(
         if json_mode:
             kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
 
+        # Force TLS 1.2 — TLS 1.3 on Python 3.14 + corporate networks
+        # causes SSL: SSLV3_ALERT_BAD_RECORD_MAC on large payloads
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        ssl_ctx.load_default_certs()
+
         return ChatOpenAI(
             api_key=api_key,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            http_client=httpx.Client(verify=ssl_ctx, timeout=120),
+            http_async_client=httpx.AsyncClient(verify=ssl_ctx, timeout=120),
             **kwargs,
+        )
+
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            model=model,
+            temperature=temperature,
+            num_predict=max_tokens,
         )
 
     if provider == "anthropic":
@@ -104,7 +126,7 @@ def create_llm(
             api_key=api_key,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens_to_sample=max_tokens,
         )
 
 

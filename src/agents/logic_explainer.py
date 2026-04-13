@@ -8,6 +8,7 @@ LangSmith tracing is enabled on all LLM calls. Supports dynamic model
 switching per request.
 """
 
+import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -78,6 +79,68 @@ Output JSON schema:
   "unclear_items": [
     "Anything that could not be determined from the source code alone"
   ]
+}
+"""
+
+
+SEMANTIC_EXPLANATION_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
+You are answering a user's question by analyzing MULTIPLE PL/SQL functions found via semantic search.
+
+You will receive:
+1. The user's original question.
+2. Multiple functions with their source code, descriptions, and relevance scores.
+
+Your task is to answer the user's question by explaining HOW the relevant functions work together.
+
+STRICT RULES:
+- ONLY reference code that exists in the provided sources.
+- Cite specific function names and line numbers for EVERY claim.
+- If a function is not relevant to the question, say so briefly and focus on the relevant ones.
+- Explain the data flow across functions if applicable.
+- Never hallucinate logic, functions, or formulas not in the source.
+
+You MUST respond with ONLY valid JSON — no markdown, no extra text.
+
+Output JSON schema:
+{
+  "summary": "Direct answer to the user's question in plain English",
+  "relevant_functions": [
+    {
+      "name": "FUNCTION_NAME",
+      "relevance": "Why this function is relevant to the question",
+      "key_logic": [
+        {
+          "step": 1,
+          "description": "What this part does relevant to the question",
+          "lines": [10, 11],
+          "code_snippet": "relevant code"
+        }
+      ]
+    }
+  ],
+  "data_flow": "How data flows across the relevant functions (if applicable)",
+  "step_by_step": [
+    {
+      "step": 1,
+      "description": "Overall step description across functions",
+      "function": "FUNCTION_NAME",
+      "lines": [10, 11],
+      "code_snippet": "relevant code"
+    }
+  ],
+  "formulas": [
+    {
+      "name": "Formula description",
+      "formula": "The calculation",
+      "function": "FUNCTION_NAME",
+      "lines": [15, 16],
+      "variables": {"var_name": "description"}
+    }
+  ],
+  "dependencies_used": [],
+  "regulatory_refs": [],
+  "raw_source_references": [],
+  "unclear_items": []
 }
 """
 
@@ -159,15 +222,22 @@ class LogicExplainer:
             f"correlation_id={correlation_id}"
         )
 
-        llm = self._get_llm(provider, model)
+        # Always use Ollama for source analysis (large payloads)
+        import os as _os
+        llm = create_llm(
+            provider="ollama",
+            model=_os.getenv("OLLAMA_MODEL", "llama3:8b"),
+            temperature=self._temperature,
+            max_tokens=2000,
+        )
 
         # Format source code for the LLM
         source_text = self._format_source_code(state["source_code"])
         call_tree_text = self._format_call_tree(state["call_tree"])
 
-        # For Anthropic, add explicit JSON-only instruction
         system_prompt = EXPLANATION_SYSTEM_PROMPT
-        if (provider or "").lower() == "anthropic":
+        # Ollama doesn't need the anthropic-specific instruction
+        if False:  # kept for reference
             system_prompt += (
                 "\n\nIMPORTANT: Respond with ONLY the raw JSON object. "
                 "No markdown code fences, no explanation before or after."
@@ -186,19 +256,10 @@ class LogicExplainer:
             HumanMessage(content=user_prompt),
         ]
 
-        # Invoke with LangSmith tracing
-        response = await llm.ainvoke(
+        # Invoke with sync-in-thread (Windows SelectorEventLoop compat)
+        response = await asyncio.to_thread(
+            llm.invoke,
             messages,
-            config={
-                "metadata": {
-                    "correlation_id": correlation_id,
-                    "object_name": object_name,
-                    "schema": schema,
-                    "provider": provider,
-                    "model": model,
-                },
-                "tags": ["logic_explanation", object_name],
-            },
         )
 
         raw_content = response.content.strip()
@@ -221,6 +282,95 @@ class LogicExplainer:
             f"Explanation parsed: {len(explanation.get('step_by_step', []))} steps, "
             f"{len(explanation.get('formulas', []))} formulas, "
             f"{len(explanation.get('dependencies_used', []))} deps | "
+            f"correlation_id={correlation_id}"
+        )
+        return state
+
+    async def explain_semantic(
+        self,
+        state: LogicState,
+        provider: Optional[str] = None,  # Ignored — always uses Ollama
+        model: Optional[str] = None,  # Ignored — always uses Ollama
+    ) -> LogicState:
+        """Generate explanation across multiple functions found via semantic search.
+
+        Receives all relevant function sources and the user's original question,
+        then produces a unified cross-function explanation with citations.
+
+        Args:
+            state: Pipeline state with raw_query and multi_source.
+            provider: LLM provider. None uses default.
+            model: Model name. None uses default.
+
+        Returns:
+            Updated state with explanation dict.
+        """
+        correlation_id = get_correlation_id()
+        query = state["raw_query"]
+        multi_source = state.get("multi_source", {})
+
+        logger.info(
+            f"Generating semantic explanation for: {query[:80]}... "
+            f"({len(multi_source)} functions) | "
+            f"provider={provider}, model={model} | "
+            f"correlation_id={correlation_id}"
+        )
+
+        # Always use Ollama for source analysis — large payloads break
+        # corporate network TLS with remote APIs (OpenAI/Anthropic)
+        import os
+        llm = create_llm(
+            provider="ollama",
+            model=os.getenv("OLLAMA_MODEL", "llama3:8b"),
+            temperature=self._temperature,
+            max_tokens=4096,
+        )
+
+        # Format all function sources
+        function_sections = []
+        for fn_name, fn_data in multi_source.items():
+            source_text = self._format_source_code(fn_data.get("source_code", []))
+            section = (
+                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code:\n{source_text}\n"
+            )
+            function_sections.append(section)
+
+        system_prompt = SEMANTIC_EXPLANATION_PROMPT
+        if (provider or "").lower() == "anthropic":
+            system_prompt += (
+                "\n\nIMPORTANT: Respond with ONLY the raw JSON object. "
+                "No markdown code fences, no explanation before or after."
+            )
+
+        user_prompt = (
+            f"User Question: {query}\n\n"
+            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+            + "\n".join(function_sections)
+            + "\n\nAnswer the user's question by explaining the relevant logic across these functions. "
+            "Cite specific function names and line numbers for every claim."
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        response = await llm.ainvoke(messages)
+
+        raw_content = response.content.strip()
+        if raw_content.startswith("```"):
+            raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        explanation = json.loads(raw_content)
+        state["explanation"] = explanation
+
+        logger.info(
+            f"Semantic explanation generated: "
+            f"{len(explanation.get('relevant_functions', []))} functions analyzed | "
             f"correlation_id={correlation_id}"
         )
         return state

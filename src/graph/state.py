@@ -52,6 +52,9 @@ class LogicState(TypedDict):
     validated: bool
     confidence: float
     warnings: list
+    # Semantic search output
+    search_results: list
+    multi_source: dict
     # Final output
     output: dict
     partial_flag: bool

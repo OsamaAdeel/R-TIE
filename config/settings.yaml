@@ -24,6 +24,19 @@ graph:
   node_timeout: 60
   max_retries: 3
 
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3:8b"
+
+embedding:
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  description_provider: "ollama"
+  description_model: "llama3:8b"
+  search_top_k: 3
+  auto_index_modules:
+    - "OFSDMINFO_ABL_DATA_PREPARATION"
+
 langsmith:
   project: RTIE
   tracing: true
