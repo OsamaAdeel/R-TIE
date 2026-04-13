@@ -2,152 +2,144 @@
 
 RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that explains the complete logic behind regulatory capital computations — tracing PL/SQL functions, T2T transformations, and RRF rules to give engineers instant, fully cited answers without touching the underlying system.
 
+**This branch (`main`)** explains individual PL/SQL functions by name.
+
 ---
 
 ## Prerequisites
 
 - **Python 3.11+** — required runtime
-- **Poetry** — dependency management (`pip install poetry`)
 - **Docker & Docker Compose** — for Redis and PostgreSQL
 - **Oracle Database** — access to an OFSAA FSAPPS instance (read-only credentials)
-- **Azure OpenAI API** — GPT-4o deployment with API key and endpoint
-- **LangSmith Account** — for observability and tracing (optional but recommended)
+- **OpenAI API Key** — for query classification and logic explanation
+- **LangSmith Account** — for observability and tracing (optional)
 
 ---
 
-## Setup Instructions
+## Quick Start
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd RTIE
-   ```
+### 1. Clone the repository
+```bash
+git clone <repository-url>
+cd RTIE
+```
 
-2. **Start infrastructure services**:
-   ```bash
-   docker-compose up -d
-   ```
-   This starts Redis (port 6379) and PostgreSQL (port 5432) with the memory tables auto-initialized.
+### 2. Start infrastructure
+```bash
+docker-compose up -d
+```
+This starts Redis (port 6379) and PostgreSQL (port 5432) with memory tables auto-initialized.
 
-3. **Configure environment variables**:
-   ```bash
-   cp .env.dev .env.dev.local
-   ```
-   Edit `.env.dev` with your actual Oracle, Azure OpenAI, and LangSmith credentials.
+### 3. Configure environment
+Edit `.env.dev` with your credentials:
+```
+OPENAI_API_KEY=your_openai_key
+ORACLE_HOST=localhost
+ORACLE_PORT=1521
+ORACLE_SID=XE
+ORACLE_USER=OFSMDM
+ORACLE_PASSWORD=your_password
+```
 
-4. **Install Python dependencies**:
-   ```bash
-   poetry install
-   ```
+### 4. Install Python dependencies
+```bash
+pip install poetry
+poetry install
+```
 
-5. **Verify connectivity**:
-   ```bash
-   curl http://localhost:8000/health
-   ```
+### 5. Start the backend
+```bash
+python run.py
+```
+The server starts at http://localhost:8000
+
+### 6. Start the frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open http://localhost:5173
+
+### 7. Verify health
+```bash
+curl http://localhost:8000/health
+```
+Should return: `{"oracle":"ok","redis":"ok","postgres":"ok","status":"healthy"}`
+
+### 8. Ask a question
+In the web UI or via curl:
+```bash
+curl -X POST http://localhost:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Explain the logic of FN_LOAD_OPS_RISK_DATA",
+    "session_id": "test-001",
+    "engineer_id": "engineer@company.com"
+  }'
+```
 
 ---
 
-## How to Run
+## How to Add a New Module
 
-1. **Start infrastructure** (if not already running):
-   ```bash
-   docker-compose up -d
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   poetry install
-   ```
-
-3. **Run the application**:
-   ```bash
-   poetry run uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-4. **Send a query**:
-   ```bash
-   curl -X POST http://localhost:8000/v1/query \
-     -H "Content-Type: application/json" \
-     -d '{
-       "query": "Explain the logic of FN_CALC_RWA",
-       "session_id": "test-session-001",
-       "engineer_id": "engineer@company.com"
-     }'
-   ```
-
----
-
-## How to Add a New Module/Batch
-
-RTIE organizes Oracle OFSAA modules under `db/modules/`. To add a new module:
-
-1. Create a directory under `db/modules/` matching the module name:
+1. Create a directory under `db/modules/`:
    ```
    db/modules/YOUR_MODULE_NAME/
-   ├── functions/
-   │   ├── FN_YOUR_FUNCTION.sql
-   │   └── ...
-   └── procedures/
+   └── functions/
+       ├── FN_YOUR_FUNCTION.sql
        ├── SP_YOUR_PROCEDURE.sql
        └── ...
    ```
 
-2. Place individual PL/SQL source files in the appropriate subdirectory (`functions/` or `procedures/`).
+2. Place `.sql` files with PL/SQL source code in the `functions/` subdirectory.
 
-3. The naming convention is: `{TYPE_PREFIX}_{OBJECT_NAME}.sql` (e.g., `FN_CALC_RWA.sql`, `SP_PROCESS_DATA.sql`).
-
-4. These files serve as local references. RTIE always fetches live source from Oracle `ALL_SOURCE` at query time, with Redis caching.
+3. RTIE reads from Oracle `ALL_SOURCE` first, then falls back to these disk files.
 
 ---
 
-## Slash Command Reference
+## Slash Commands
 
 | Command | Args | Description |
 |---------|------|-------------|
-| `/refresh-cache <name>` | Object name | Fetch latest source from Oracle and update Redis cache for one object |
-| `/refresh-cache-all` | None | Re-sync all functions and procedures for the configured schema |
-| `/cache-status <name>` | Object name | Show cached_at, oracle_last_ddl_time, version_hash for one object |
-| `/cache-list` | None | List all `logic:*` keys currently stored in Redis |
-| `/cache-clear <name>` | Object name | Delete one object's cache entry from Redis |
-| `/refresh-schema` | None | Detect DDL changes in Oracle, sync to local schema files, show diff report |
+| `/refresh-cache <name>` | Object name | Refresh one object's source cache |
+| `/refresh-cache-all` | None | Re-sync all functions for the schema |
+| `/cache-status <name>` | Object name | Show cache timestamps and version hash |
+| `/cache-list` | None | List all cached keys |
+| `/cache-clear <name>` | Object name | Delete one cache entry |
+| `/refresh-schema` | None | Detect Oracle DDL changes and sync |
 
 ---
 
-## Architecture Overview
+## Architecture
 
-RTIE uses a **LangGraph StateGraph** with six specialized agents executing in a deterministic linear pipeline:
-
-1. **Orchestrator** — Classifies incoming queries using Azure OpenAI GPT-4o. Determines whether input is a slash command or a logic explanation request. Extracts the target object name and schema.
-
-2. **Metadata Interpreter** — Resolves PL/SQL objects in Oracle `ALL_OBJECTS`, fetches source code from Redis cache (or Oracle `ALL_SOURCE` on cache miss), and builds recursive dependency call trees up to 3 levels deep.
-
-3. **Logic Explainer** — Sends the full source code and call tree to Azure OpenAI GPT-4o, which returns a structured, fully-cited explanation with step-by-step breakdowns, formulas, and regulatory references. LangSmith tracing is enabled.
-
-4. **Validator** — Three validators in one agent:
-   - **Cache Validator**: Compares cached DDL timestamps with Oracle `ALL_OBJECTS.LAST_DDL_TIME`
-   - **Query Relevance Validator**: Pure Python check that the object name appears in the explanation
-   - **Output Validator**: Verifies all referenced functions exist in the call tree; computes confidence score
-
-5. **Cache Manager** — Handles all six slash commands for cache refresh, status, listing, clearing, and schema DDL change detection.
-
-6. **Renderer** — Assembles the final structured response with explanation, confidence score, warnings, source citations, and an UNVERIFIED badge if validation fails.
-
-### Pipeline Flow
+### Pipeline (9 nodes)
 
 ```
-START -> parse_query -> resolve_object -> fetch_logic -> cache_validator
-      -> fetch_dependencies -> explain_logic -> query_relevance_validator
-      -> output_validator -> render_response -> END
+parse_query → resolve_object → fetch_logic → cache_validator
+→ fetch_dependencies → explain_logic → query_relevance_validator
+→ output_validator → render_response → END
 ```
 
-Slash commands bypass the graph entirely and route directly to the Cache Manager.
+1. **Orchestrator** — Classifies query via OpenAI, extracts the PL/SQL function name
+2. **Metadata Interpreter** — Resolves object in Oracle or disk files, fetches source, builds dependency tree
+3. **Logic Explainer** — Sends source + call tree to OpenAI, gets structured explanation with line citations
+4. **Validator** — Checks cache freshness, query relevance, and output accuracy
+5. **Cache Manager** — Handles slash commands for cache operations
+6. **Renderer** — Assembles final response with confidence badge and citations
+
+Slash commands bypass the graph and route directly to the Cache Manager.
 
 ---
 
-## Environment Variables Reference
+## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key |
+| `OPENAI_MODEL` | Model name (default: gpt-4o) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (optional) |
+| `ANTHROPIC_MODEL` | Claude model name (optional) |
 | `ORACLE_HOST` | Oracle database hostname |
 | `ORACLE_PORT` | Oracle listener port (default: 1521) |
 | `ORACLE_SID` | Oracle System Identifier |
@@ -160,10 +152,13 @@ Slash commands bypass the graph entirely and route directly to the Cache Manager
 | `POSTGRES_DB` | PostgreSQL database name |
 | `POSTGRES_USER` | PostgreSQL username |
 | `POSTGRES_PASSWORD` | PostgreSQL password |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL |
-| `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI model deployment name (e.g. gpt-4o) |
-| `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing (true/false) |
-| `LANGCHAIN_API_KEY` | LangSmith API key |
-| `LANGCHAIN_PROJECT` | LangSmith project name |
 | `ENVIRONMENT` | Runtime environment (dev/staging/prod) |
+
+---
+
+## Branches
+
+| Branch | Description |
+|--------|-------------|
+| `main` | Explains individual PL/SQL functions by name (stable) |
+| `feature/semantic-search` | Semantic vector search — ask any question about columns, tables, or batch flows (testing) |
