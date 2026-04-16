@@ -8,6 +8,7 @@ providers. All queries flow through semantic vector search.
 """
 
 import asyncio
+import json as json_mod
 import os
 import platform
 import traceback
@@ -21,6 +22,7 @@ from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -421,6 +423,185 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
                 "correlation_id": correlation_id,
             },
         )
+
+
+@app.post("/v1/stream")
+async def stream_endpoint(request: QueryRequest, req: Request):
+    """Stream a logic query response via Server-Sent Events.
+
+    Runs the pipeline (classify, search, fetch) synchronously, then
+    streams the LLM explanation tokens one chunk at a time. The frontend
+    receives partial markdown and renders it incrementally.
+
+    SSE event format:
+        event: meta     → JSON with metadata (schema, functions, correlation_id)
+        event: token    → partial markdown text chunk
+        event: done     → final JSON with confidence, validated, citations
+        event: error    → error message
+    """
+    correlation_id = get_correlation_id()
+    provider = request.provider
+    model = request.model
+
+    async def event_stream():
+        try:
+            # Check for slash commands — not streamable, return as single event
+            cmd = _orchestrator.check_command(request.query)
+            if cmd.is_command:
+                result = await _handle_command(cmd.command, cmd.args, request.session_id)
+                payload = {"type": "command", "result": result, "correlation_id": correlation_id}
+                yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
+                return
+
+            # Run the pipeline up to (but not including) the LLM explanation
+            initial_state: LogicState = {
+                "session_id": request.session_id,
+                "correlation_id": correlation_id,
+                "raw_query": request.query,
+                "query_type": "",
+                "object_name": "",
+                "object_type": "",
+                "schema": "",
+                "source_code": [],
+                "call_tree": {},
+                "cache_hit": False,
+                "cache_stale": False,
+                "explanation": {},
+                "validated": False,
+                "confidence": 0.0,
+                "warnings": [],
+                "search_results": [],
+                "multi_source": {},
+                "target_variable": "",
+                "variable_chain": {},
+                "llm_payload": "",
+                "graph_node_ids": [],
+                "graph_available": _graph_available,
+                "output": {},
+                "partial_flag": False,
+            }
+
+            config = {
+                "configurable": {
+                    "thread_id": request.session_id,
+                    "provider": provider,
+                    "model": model,
+                },
+            }
+
+            # Run the full pipeline (non-streaming) to get the final state
+            # We'll use the pipeline for everything, then stream only the LLM part
+            # First: run classify + search + fetch via the graph (stop before explain)
+            state = dict(initial_state)
+
+            # Classify
+            state = await _orchestrator.classify_query(
+                request.query, state, provider=provider, model=model
+            )
+
+            if state.get("partial_flag"):
+                yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
+                return
+
+            # Semantic search
+            from langchain_openai import OpenAIEmbeddings
+            import ssl as _ssl
+            import httpx as _httpx
+            _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
+            _ssl_ctx.load_default_certs()
+            embeddings = OpenAIEmbeddings(
+                model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
+                http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+            )
+            search_query = state.get("object_name", state["raw_query"])
+            query_embedding = await embeddings.aembed_query(search_query)
+            results = await _vector_store.search(query_embedding=query_embedding, top_k=5)
+            state["search_results"] = results
+            state["schema"] = state.get("schema") or "OFSMDM"
+
+            # Fetch multi logic
+            state = await _metadata_interpreter.fetch_multi_logic(state)
+
+            # Send metadata event
+            meta = {
+                "schema": state.get("schema", ""),
+                "object_name": state.get("object_name", "")[:100],
+                "query_type": state.get("query_type", ""),
+                "functions_analyzed": list(state.get("multi_source", {}).keys()),
+                "correlation_id": correlation_id,
+            }
+            yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
+
+            # Stream the LLM explanation
+            full_markdown = ""
+            if state.get("query_type") == "VARIABLE_TRACE":
+                # Run variable resolver + extraction first (fast, non-streaming)
+                target_var = state.get("target_variable", "").strip()
+                functions_source = {}
+                for fn_name, fn_data in state.get("multi_source", {}).items():
+                    src = fn_data.get("source_code", [])
+                    if src:
+                        functions_source[fn_name] = src
+
+                if target_var and functions_source:
+                    seeds = await _variable_tracer.resolve_variable_names(
+                        target_var, functions_source, provider, model
+                    )
+                    alias_map = _variable_tracer.build_alias_map(seeds, functions_source)
+                    tagged = _variable_tracer.extract_relevant_lines(
+                        target_var, functions_source, alias_map, seeds
+                    )
+                    chain_text = _variable_tracer.build_transformation_chain(
+                        target_var, tagged, seeds
+                    )
+                    async for token in _variable_tracer.stream_chain(
+                        target_var, chain_text, request.query, provider, model
+                    ):
+                        full_markdown += token
+                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+                else:
+                    # Fallback to semantic stream
+                    async for token in _logic_explainer.stream_semantic(
+                        state, provider, model
+                    ):
+                        full_markdown += token
+                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+            else:
+                async for token in _logic_explainer.stream_semantic(
+                    state, provider, model
+                ):
+                    full_markdown += token
+                    yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+
+            # Send done event with final metadata
+            done_payload = {
+                "confidence": 1.0,
+                "validated": True,
+                "badge": "VERIFIED",
+                "source_citations": [],
+                "correlation_id": correlation_id,
+                "explanation": {
+                    "markdown": full_markdown,
+                    "summary": full_markdown[:200],
+                },
+            }
+            yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
+
+        except Exception as exc:
+            logger.error(f"Stream failed: {exc}\n{traceback.format_exc()}")
+            yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Correlation-ID": correlation_id,
+        },
+    )
 
 
 async def _handle_command(

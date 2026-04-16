@@ -34,10 +34,14 @@ export default function MessageBubble({ message }) {
         <Bot size={15} className="text-white" />
       </div>
       <div className="max-w-4xl flex-1 min-w-0">
-        {message.loading ? (
-          <LoadingIndicator />
-        ) : message.error ? (
+        {message.error ? (
           <ErrorCard error={message.error} />
+        ) : message.streaming ? (
+          message.streamedMarkdown
+            ? <StreamingMarkdown markdown={message.streamedMarkdown} meta={message.meta} />
+            : <LoadingIndicator />
+        ) : message.loading ? (
+          <LoadingIndicator />
         ) : data?.type === 'command' ? (
           <CommandResult result={data.result} correlationId={data.correlation_id} />
         ) : data?.explanation?.markdown ? (
@@ -118,6 +122,51 @@ function MarkdownResponse({ data }) {
           )}
           <span className="font-medium">{source_citations?.length || 0} source citations</span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function StreamingMarkdown({ markdown, meta }) {
+  return (
+    <div className="bg-bg-secondary border-2 border-border rounded-2xl rounded-bl-sm overflow-hidden shadow-sm">
+      {/* Header with streaming indicator */}
+      {meta?.functions_analyzed?.length > 0 && (
+        <div className="px-5 py-3 border-b border-border bg-gradient-to-r from-accent-soft to-bg-secondary text-xs text-text-muted flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+          Analyzing {meta.functions_analyzed.length} functions...
+        </div>
+      )}
+
+      {/* Streaming markdown body */}
+      <div className="px-6 py-5 prose prose-sm max-w-none
+        prose-headings:text-text-primary prose-headings:font-bold
+        prose-h2:text-lg prose-h2:mt-6 prose-h2:mb-3 prose-h2:pb-2 prose-h2:border-b prose-h2:border-border
+        prose-h3:text-base prose-h3:mt-5 prose-h3:mb-2
+        prose-p:text-text-secondary prose-p:leading-relaxed prose-p:my-2
+        prose-strong:text-text-primary
+        prose-code:text-red-600 prose-code:bg-red-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-xs prose-code:font-mono prose-code:before:content-none prose-code:after:content-none
+        prose-ul:my-2 prose-li:text-text-secondary prose-li:my-1
+        prose-a:text-accent
+      ">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            code({ node, inline, className, children, ...props }) {
+              const match = /language-(\w+)/.exec(className || '');
+              const codeStr = String(children).replace(/\n$/, '');
+              const isBlock = !inline && (match || codeStr.includes('\n'));
+              if (isBlock) {
+                return <CodeBlockWithCopy code={codeStr} language={match ? match[1] : 'sql'} />;
+              }
+              return <code className={className} {...props}>{children}</code>;
+            },
+          }}
+        >
+          {markdown}
+        </ReactMarkdown>
+        {/* Blinking cursor */}
+        <span className="inline-block w-2 h-5 bg-accent/60 animate-pulse rounded-sm ml-0.5" />
       </div>
     </div>
   );

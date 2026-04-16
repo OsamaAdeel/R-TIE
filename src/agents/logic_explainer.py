@@ -327,6 +327,65 @@ class LogicExplainer:
         )
         return state
 
+    async def stream_semantic(
+        self,
+        state: LogicState,
+        provider: str | None = None,
+        model: str | None = None,
+    ):
+        """Stream semantic explanation tokens as an async generator.
+
+        Yields markdown tokens one chunk at a time for SSE streaming.
+        Does NOT update state — the caller collects the full text.
+
+        Args:
+            state: Pipeline state with raw_query and multi_source.
+            provider: LLM provider.
+            model: Model name.
+
+        Yields:
+            String chunks of the markdown response.
+        """
+        query = state["raw_query"]
+        multi_source = state.get("multi_source", {})
+
+        function_sections = []
+        for fn_name, fn_data in multi_source.items():
+            source_text = self._format_source_code(fn_data.get("source_code", []))
+            section = (
+                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code:\n{source_text}\n"
+            )
+            function_sections.append(section)
+
+        user_prompt = (
+            f"User Question: {query}\n\n"
+            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+            + "\n".join(function_sections)
+            + "\n\nAnswer the user's question with a detailed markdown explanation. "
+            "Cite specific function names and line numbers for every claim."
+        )
+
+        llm = create_llm(
+            provider=provider,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
+        messages = [
+            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
     def _format_source_code(self, source_lines: list) -> str:
         """Format source code lines for LLM consumption.
 

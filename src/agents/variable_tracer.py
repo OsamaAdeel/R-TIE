@@ -564,6 +564,45 @@ class VariableTracer:
             "summary": markdown_content[:200] + "..." if len(markdown_content) > 200 else markdown_content,
         }
 
+    async def stream_chain(
+        self,
+        target_variable: str,
+        chain_text: str,
+        user_query: str,
+        provider: str | None = None,
+        model: str | None = None,
+    ):
+        """Stream variable trace explanation tokens as an async generator.
+
+        Yields markdown chunks for SSE streaming.
+        """
+        llm = create_llm(
+            provider=provider or "openai",
+            model=model or "gpt-4o-mini",
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
+        user_prompt = (
+            f"User Question: {user_query}\n\n"
+            f"Trace the calculation lifecycle of variable '{target_variable}' "
+            f"using the following transformation chain:\n\n"
+            f"{chain_text}\n\n"
+            f"Produce a detailed markdown explanation of how '{target_variable}' "
+            f"is calculated, transformed, and propagated. "
+            f"Cite every function name and line number."
+        )
+
+        messages = [
+            SystemMessage(content=VARIABLE_TRACE_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
     # ──────────────────────────────────────────────────────────
     # 5. FULL PIPELINE — called from the graph node
     # ──────────────────────────────────────────────────────────
