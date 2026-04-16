@@ -3,18 +3,20 @@ RTIE Orchestrator Agent.
 
 Handles query classification and command routing. Determines whether
 user input is a slash command or a logic query, and extracts structured
-metadata (object name, schema, query type) using an LLM with strict
-JSON output. Supports dynamic model switching between OpenAI and Claude.
+metadata using an LLM with strict JSON output. All queries are routed
+through semantic search — the orchestrator simply validates and
+prepares the query for the pipeline.
 """
 
+import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
@@ -26,34 +28,22 @@ class ClassificationResult(BaseModel):
     """Pydantic model for LLM classification output.
 
     Attributes:
-        query_type: Either 'COLUMN_LOGIC' or 'COMMAND'.
-        object_name: Name of the PL/SQL object to analyze.
-        schema: Oracle schema name (e.g. OFSMDM).
-        confidence: Model's confidence in the classification (0.0 - 1.0).
+        query_type: 'COLUMN_LOGIC' or 'VARIABLE_TRACE'.
+        intent: What the user is asking about.
+        search_terms: Key terms for semantic search enrichment.
+        target_variable: Variable/column name for VARIABLE_TRACE queries.
+        schema_name: Oracle schema name (e.g. OFSMDM).
+        confidence: Model's confidence in understanding the query.
     """
 
     model_config = {"strict": True}
 
     query_type: str
-    object_name: str
-    schema: str
+    intent: str
+    search_terms: List[str]
+    target_variable: Optional[str] = None
+    schema_name: str
     confidence: float
-
-    @model_validator(mode="after")
-    def validate_query_type(self) -> "ClassificationResult":
-        """Ensure query_type is one of the allowed values.
-
-        Returns:
-            Self if valid.
-
-        Raises:
-            ValueError: If query_type is not COLUMN_LOGIC or COMMAND.
-        """
-        if self.query_type not in ("COLUMN_LOGIC", "COMMAND"):
-            raise ValueError(
-                f"query_type must be 'COLUMN_LOGIC' or 'COMMAND', got '{self.query_type}'"
-            )
-        return self
 
 
 class CommandResult(BaseModel):
@@ -73,34 +63,48 @@ class CommandResult(BaseModel):
 
 
 CLASSIFICATION_SYSTEM_PROMPT = """You are a query classifier for the RTIE system (Regulatory Trace & Intelligence Engine).
-Your job is to classify user queries about Oracle OFSAA PL/SQL objects.
+Your job is to understand user queries about Oracle OFSAA PL/SQL objects, tables, columns, and data flows.
 
 You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no extra text.
 
-The JSON must have exactly these fields:
 {
-  "query_type": "COLUMN_LOGIC",
-  "object_name": "<name of the PL/SQL function, procedure, or package>",
-  "schema": "<Oracle schema name, default OFSMDM>",
+  "query_type": "COLUMN_LOGIC" or "VARIABLE_TRACE",
+  "intent": "<concise description of what the user wants to know>",
+  "search_terms": ["<keyword1>", "<keyword2>", "..."],
+  "target_variable": "<variable/column name if query_type is VARIABLE_TRACE, else null>",
+  "schema_name": "<Oracle schema name, default OFSMDM>",
   "confidence": <float between 0.0 and 1.0>
 }
 
 Rules:
-- query_type is always "COLUMN_LOGIC" for logic explanation queries.
-- object_name is the PL/SQL function, procedure, or package name mentioned in the query.
-- schema defaults to "OFSMDM" unless the user specifies another schema.
-- confidence reflects how certain you are about the classification.
-- If you cannot identify a clear object name, set confidence below 0.7.
-- Do NOT invent object names — only use names explicitly mentioned in the query.
+- query_type: Use "VARIABLE_TRACE" when the user asks how a specific variable or column
+  is CALCULATED, DERIVED, POPULATED, or TRANSFORMED across functions.
+  Use "COLUMN_LOGIC" for all other logic/explanation queries.
+- target_variable: When query_type is "VARIABLE_TRACE", extract the exact variable or
+  column name being traced (e.g. "EAD_AMOUNT", "N_ANNUAL_GROSS_INCOME", "V_PROD_CODE").
+  Set to null for COLUMN_LOGIC queries.
+- intent: summarize what the user is asking in one sentence.
+- search_terms: extract ALL relevant keywords — function names, table names, column names,
+  business concepts (e.g. "operational risk", "capital adequacy", "GL data").
+  These terms will be used for semantic search, so be thorough.
+- schema_name defaults to "OFSMDM" unless the user specifies another schema.
+- confidence reflects how well you understood the user's question.
+
+Examples:
+- "Explain FN_LOAD_OPS_RISK_DATA" → query_type: "COLUMN_LOGIC", target_variable: null
+- "How is EAD_AMOUNT calculated across functions?" → query_type: "VARIABLE_TRACE", target_variable: "EAD_AMOUNT"
+- "Trace N_ANNUAL_GROSS_INCOME" → query_type: "VARIABLE_TRACE", target_variable: "N_ANNUAL_GROSS_INCOME"
+- "What updates STG_PRODUCT_PROCESSOR?" → query_type: "COLUMN_LOGIC", target_variable: null
+- "How is V_PROD_CODE populated?" → query_type: "VARIABLE_TRACE", target_variable: "V_PROD_CODE"
+- "How does the entire batch flow work?" → query_type: "COLUMN_LOGIC", target_variable: null
 """
 
 
 class Orchestrator:
     """Orchestrator agent for query classification and command routing.
 
-    Classifies incoming queries as either slash commands or logic
-    explanation requests. Supports dynamic model switching between
-    OpenAI and Anthropic (Claude) per request.
+    Classifies incoming queries and extracts search terms for semantic
+    search. Supports dynamic model switching between OpenAI and Claude.
     """
 
     def __init__(
@@ -173,22 +177,19 @@ class Orchestrator:
         provider: Optional[str] = None,
         model: Optional[str] = None,
     ) -> LogicState:
-        """Classify a logic query using the selected LLM.
+        """Classify a query and extract search terms for semantic search.
 
-        Sends the query to the LLM with a strict system prompt that forces
-        JSON output. Validates the response with Pydantic. If confidence
-        is below 0.7, returns a clarification request instead.
+        Sends the query to the LLM to extract intent and search terms.
+        These terms enrich the semantic search embedding for better results.
 
         Args:
             query: The raw user query string.
-            state: Current LogicState to update with classification results.
-            provider: LLM provider ('openai' or 'anthropic'). None uses default.
-            model: Specific model name. None uses default for provider.
+            state: Current LogicState to update.
+            provider: LLM provider. None uses default.
+            model: Specific model name. None uses default.
 
         Returns:
-            Updated LogicState with query_type, object_name, schema, and
-            confidence populated. If confidence is too low, output contains
-            a clarification request.
+            Updated LogicState with query_type, object_name, schema populated.
         """
         correlation_id = get_correlation_id()
         logger.info(
@@ -199,7 +200,6 @@ class Orchestrator:
 
         llm = self._get_llm(provider, model)
 
-        # For Anthropic, embed JSON instruction more explicitly since no json_mode
         system_prompt = CLASSIFICATION_SYSTEM_PROMPT
         if (provider or "").lower() == "anthropic":
             system_prompt += (
@@ -215,48 +215,36 @@ class Orchestrator:
         response = await llm.ainvoke(messages)
         raw_content = response.content.strip()
 
-        # Strip markdown fences if present (Claude sometimes adds them)
+        # Strip markdown fences if present
         if raw_content.startswith("```"):
             raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
         logger.info(
-            f"LLM classification raw response: {raw_content} | "
+            f"LLM classification response: {raw_content} | "
             f"correlation_id={correlation_id}"
         )
 
-        # Parse and validate with Pydantic
         parsed = json.loads(raw_content)
         result = ClassificationResult(**parsed)
 
-        # Check confidence threshold
-        if result.confidence < 0.7:
-            logger.warning(
-                f"Low confidence classification ({result.confidence}): {query[:50]}... | "
-                f"correlation_id={correlation_id}"
-            )
-            state["query_type"] = result.query_type
-            state["object_name"] = result.object_name
-            state["schema"] = result.schema
-            state["output"] = {
-                "type": "clarification",
-                "message": (
-                    f"I'm not confident enough (confidence: {result.confidence:.2f}) "
-                    f"about which object you're referring to. Could you please specify "
-                    f"the exact function or procedure name?"
-                ),
-            }
-            state["partial_flag"] = True
-            return state
+        # Build enriched search query from intent + search terms
+        enriched_query = f"{query} {result.intent} {' '.join(result.search_terms)}"
 
         state["query_type"] = result.query_type
-        state["object_name"] = result.object_name
-        state["schema"] = result.schema
+        state["object_name"] = enriched_query
+        state["object_type"] = ""
+        state["schema"] = result.schema_name
+        state["target_variable"] = result.target_variable or ""
         state["warnings"] = []
         state["partial_flag"] = False
 
         logger.info(
             f"Query classified: type={result.query_type}, "
-            f"object={result.object_name}, schema={result.schema}, "
-            f"confidence={result.confidence} | correlation_id={correlation_id}"
+            f"intent='{result.intent}', "
+            f"target_variable={result.target_variable}, "
+            f"search_terms={result.search_terms}, "
+            f"schema={result.schema_name}, "
+            f"confidence={result.confidence} | "
+            f"correlation_id={correlation_id}"
         )
         return state

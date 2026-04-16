@@ -3,7 +3,7 @@ import Sidebar from './components/Sidebar';
 import Chat from './pages/Chat';
 import { useSessions } from './hooks/useSessions';
 import { useHealth } from './hooks/useHealth';
-import { sendQuery } from './api/client';
+import { streamQuery } from './api/client';
 
 const ENGINEER_ID = 'engineer@rtie.local';
 
@@ -32,26 +32,74 @@ export default function App() {
       // Add user message
       addMessage(sid, { role: 'user', content: text });
 
-      // Add placeholder assistant message
-      addMessage(sid, { role: 'assistant', loading: true, data: null, error: null });
+      // Add placeholder assistant message with streaming state
+      addMessage(sid, {
+        role: 'assistant',
+        loading: true,
+        streaming: true,
+        streamedMarkdown: '',
+        data: null,
+        error: null,
+      });
       setLoading(true);
 
-      try {
-        const data = await sendQuery(text, sid, ENGINEER_ID, provider, model);
-        updateLastMessage(sid, (msg) => ({
-          ...msg,
-          loading: false,
-          data,
-        }));
-      } catch (err) {
-        updateLastMessage(sid, (msg) => ({
-          ...msg,
-          loading: false,
-          error: err.message,
-        }));
-      } finally {
-        setLoading(false);
-      }
+      let meta = null;
+
+      await streamQuery(text, sid, ENGINEER_ID, provider, model, {
+        onStage: (stageData) => {
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            stage: stageData,
+          }));
+        },
+
+        onMeta: (metaData) => {
+          meta = metaData;
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            loading: false,
+            meta: metaData,
+          }));
+        },
+
+        onToken: (token) => {
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            loading: false,
+            streamedMarkdown: (msg.streamedMarkdown || '') + token,
+          }));
+        },
+
+        onDone: (finalPayload) => {
+          updateLastMessage(sid, (msg) => {
+            const fullMarkdown = msg.streamedMarkdown || '';
+            return {
+              ...msg,
+              loading: false,
+              streaming: false,
+              streamedMarkdown: undefined,
+              data: {
+                ...finalPayload,
+                ...(meta || {}),
+                explanation: {
+                  markdown: fullMarkdown,
+                },
+              },
+            };
+          });
+          setLoading(false);
+        },
+
+        onError: (errorMsg) => {
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            loading: false,
+            streaming: false,
+            error: errorMsg,
+          }));
+          setLoading(false);
+        },
+      });
     },
     [activeSession, addMessage, updateLastMessage, provider, model]
   );

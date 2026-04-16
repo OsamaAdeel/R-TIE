@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.logger import get_logger
@@ -45,11 +45,10 @@ class ObjectNotFoundError(Exception):
         )
 
 
-# Paths to search for PL/SQL source files — both RTIE/db/modules/ and parent R-TIE/db/modules/
+# Path to PL/SQL source files — RTIE/db/modules/
 _RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 MODULES_DIRS = [
     os.path.join(_RTIE_ROOT, "db", "modules"),
-    os.path.join(os.path.dirname(_RTIE_ROOT), "db", "modules"),
 ]
 
 
@@ -328,6 +327,72 @@ class MetadataInterpreter:
             f"Cached {len(source_lines)} lines for {schema}.{object_name} "
             f"(hash={version_hash}) | correlation_id={correlation_id}"
         )
+
+    async def fetch_multi_logic(self, state: LogicState) -> LogicState:
+        """Fetch source code for multiple functions from semantic search results.
+
+        Iterates over search_results in state, fetches each function's source
+        via the existing pipeline (Redis -> Oracle -> disk), and stores all
+        sources in state['multi_source'].
+
+        Args:
+            state: Pipeline state with search_results containing function names.
+
+        Returns:
+            Updated state with multi_source dict mapping function_name to source info.
+        """
+        correlation_id = get_correlation_id()
+        search_results = state.get("search_results", [])
+        schema = state.get("schema") or self._default_schema
+        multi_source: Dict[str, Any] = {}
+
+        for result in search_results:
+            fn_name = result["function_name"]
+            logger.info(
+                f"Fetching source for {fn_name} | correlation_id={correlation_id}"
+            )
+
+            # Build a mini-state for existing fetch_logic
+            mini_state: Dict[str, Any] = {
+                "schema": schema,
+                "object_name": fn_name,
+                "source_code": [],
+                "cache_hit": False,
+                "cache_stale": False,
+            }
+            try:
+                fetched = await self.fetch_logic(mini_state)
+                multi_source[fn_name] = {
+                    "source_code": fetched["source_code"],
+                    "description": result.get("description", ""),
+                    "tables_read": result.get("tables_read", ""),
+                    "tables_written": result.get("tables_written", ""),
+                    "score": result.get("score", 0.0),
+                }
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to fetch source for {fn_name}: {exc} | "
+                    f"correlation_id={correlation_id}"
+                )
+                multi_source[fn_name] = {
+                    "source_code": [],
+                    "description": result.get("description", ""),
+                    "tables_read": result.get("tables_read", ""),
+                    "tables_written": result.get("tables_written", ""),
+                    "score": result.get("score", 0.0),
+                    "error": str(exc),
+                }
+
+        state["multi_source"] = multi_source
+        state["source_code"] = []
+        state["cache_hit"] = False
+        state["cache_stale"] = False
+
+        logger.info(
+            f"Fetched source for {len(multi_source)} functions | "
+            f"correlation_id={correlation_id}"
+        )
+        return state
 
     async def fetch_dependencies(self, state: LogicState) -> LogicState:
         """Build a recursive call tree of function dependencies.

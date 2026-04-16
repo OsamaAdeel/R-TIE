@@ -7,8 +7,10 @@ model switching via the provider and model parameters.
 """
 
 import os
+import ssl
 from typing import Optional
 
+import httpx
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -87,11 +89,19 @@ def create_llm(
         if json_mode:
             kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
 
+        # Force TLS 1.2 — TLS 1.3 on Python 3.14 + corporate networks
+        # causes SSL: SSLV3_ALERT_BAD_RECORD_MAC on large payloads
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        ssl_ctx.load_default_certs()
+
         return ChatOpenAI(
             api_key=api_key,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            http_client=httpx.Client(verify=ssl_ctx, timeout=120),
+            http_async_client=httpx.AsyncClient(verify=ssl_ctx, timeout=120),
             **kwargs,
         )
 
@@ -104,7 +114,7 @@ def create_llm(
             api_key=api_key,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens_to_sample=max_tokens,
         )
 
 

@@ -10,7 +10,7 @@ and output accuracy:
 
 from typing import Any, Dict, List, Set
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.logger import get_logger

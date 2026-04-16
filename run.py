@@ -1,6 +1,9 @@
 """RTIE Backend Launcher.
 
-Sets the correct event loop policy for Windows before starting uvicorn.
+Sets the Windows event loop to SelectorEventLoop before starting uvicorn.
+psycopg (PostgreSQL async driver) requires SelectorEventLoop — the default
+ProactorEventLoop on Windows is not compatible.
+
 Usage: python run.py
 """
 

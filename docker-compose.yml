@@ -1,11 +1,11 @@
 version: '3.8'
 services:
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest
     container_name: rtie-redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes
+      - "8001:8001"
     volumes:
       - redis_data:/data
 

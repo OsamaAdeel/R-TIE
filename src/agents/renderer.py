@@ -8,7 +8,7 @@ status, and traceability identifiers.
 
 from typing import Any, Dict
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
@@ -65,6 +65,17 @@ class Renderer:
             "session_id": state.get("session_id", ""),
             "correlation_id": state.get("correlation_id", correlation_id),
         }
+
+        # Add semantic search metadata
+        search_results = state.get("search_results", [])
+        if search_results:
+            output["search_results"] = [
+                {"function_name": r["function_name"], "score": r.get("score", 0)}
+                for r in search_results
+            ]
+            output["functions_analyzed"] = list(
+                state.get("multi_source", {}).keys()
+            )
 
         # Add UNVERIFIED badge if validation failed
         if not validated:

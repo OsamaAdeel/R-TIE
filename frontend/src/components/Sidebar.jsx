@@ -1,30 +1,24 @@
-import { Plus, MessageSquare, Trash2, Activity } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Activity, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
 export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, health }) {
-  const statusColor = {
-    healthy: 'bg-success',
-    degraded: 'bg-warning',
-    error: 'bg-error',
-  };
-
   return (
-    <aside className="w-72 h-screen flex flex-col bg-bg-secondary border-r border-border">
+    <aside className="w-72 h-screen flex flex-col bg-sidebar text-sidebar-text">
       {/* Header */}
-      <div className="p-4 border-b border-border">
+      <div className="p-4 border-b border-white/10">
         <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center text-white font-bold text-sm">
-              R
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-400 to-indigo-500 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-500/25">
+              <Zap size={18} />
             </div>
             <div>
-              <h1 className="text-sm font-semibold text-text-primary leading-tight">RTIE</h1>
-              <p className="text-xs text-text-muted">Regulatory Trace Engine</p>
+              <h1 className="text-sm font-bold text-white leading-tight tracking-tight">RTIE</h1>
+              <p className="text-[11px] text-sidebar-muted font-medium">Regulatory Trace Engine</p>
             </div>
           </div>
           <button
             onClick={onNew}
-            className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
+            className="p-2 rounded-lg bg-white/5 hover:bg-white/15 text-sidebar-muted hover:text-white transition-all duration-200"
             title="New conversation"
           >
             <Plus size={18} />
@@ -33,18 +27,20 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
 
         {/* Health indicator */}
         {health && (
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-bg-tertiary text-xs">
-            <Activity size={12} className="text-text-muted" />
-            <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 text-xs">
+            <Activity size={12} className="text-sidebar-muted" />
+            <div className="flex items-center gap-2">
               {['oracle', 'redis', 'postgres'].map((svc) => (
                 <div key={svc} className="flex items-center gap-1">
                   <div
                     className={clsx(
-                      'w-1.5 h-1.5 rounded-full',
-                      health[svc] === 'ok' ? 'bg-success' : 'bg-error'
+                      'w-2 h-2 rounded-full',
+                      health[svc] === 'ok'
+                        ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                        : 'bg-red-400 shadow-sm shadow-red-400/50'
                     )}
                   />
-                  <span className="text-text-muted capitalize">{svc}</span>
+                  <span className="text-sidebar-muted capitalize">{svc}</span>
                 </div>
               ))}
             </div>
@@ -54,16 +50,16 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
 
       {/* Sessions list */}
       <div className="flex-1 overflow-y-auto p-2">
-        <p className="text-xs text-text-muted px-2 py-1 uppercase tracking-wider">Conversations</p>
+        <p className="text-[10px] text-sidebar-muted px-3 py-2 uppercase tracking-widest font-semibold">Conversations</p>
         {sessions.map((session) => (
           <div
             key={session.id}
             onClick={() => onSelect(session.id)}
             className={clsx(
-              'group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer mb-0.5 transition-colors',
+              'group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer mb-0.5 transition-all duration-200',
               session.id === activeId
-                ? 'bg-bg-tertiary text-text-primary'
-                : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                ? 'bg-white/15 text-white'
+                : 'text-sidebar-muted hover:bg-white/8 hover:text-sidebar-text'
             )}
           >
             <MessageSquare size={14} className="shrink-0" />
@@ -73,7 +69,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
                 e.stopPropagation();
                 onDelete(session.id);
               }}
-              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-bg-hover text-text-muted hover:text-error transition-all"
+              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-white/10 text-sidebar-muted hover:text-red-400 transition-all"
             >
               <Trash2 size={12} />
             </button>

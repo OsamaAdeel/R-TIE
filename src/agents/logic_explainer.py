@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
@@ -79,6 +79,37 @@ Output JSON schema:
     "Anything that could not be determined from the source code alone"
   ]
 }
+"""
+
+
+SEMANTIC_EXPLANATION_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
+You are answering a user's question by analyzing MULTIPLE PL/SQL functions found via semantic search.
+
+You will receive:
+1. The user's original question.
+2. Multiple functions with their source code, descriptions, and relevance scores.
+
+Your task is to produce a **rich, detailed markdown explanation** that a database engineer would find useful.
+
+FORMAT RULES:
+- Use ## for the main topic, ### for each function or section.
+- For each operation, use a descriptive header that includes the line reference:
+  ### INSERT into STG_PRODUCT_PROCESSOR (Lines 157-520)
+  Do NOT add a separate [Lines ...] citation below — the header IS the citation.
+- Use `inline code` for function names, table names, column names, variable names.
+- Include ```sql code blocks with relevant PL/SQL snippets from the source.
+- Use **bold** for important concepts, statuses, and key findings.
+- If logic is commented out, state **Commented Out — Deprecated** and show the SQL.
+- Explain formulas with variable breakdowns.
+- If a function is not relevant, say so briefly and move on.
+- Explain the data flow across functions if applicable.
+- Be thorough — engineers need the full picture.
+
+STRICT RULES:
+- ONLY reference code that exists in the provided sources.
+- NEVER repeat the same line reference twice. Each line citation appears once (in the header).
+- NEVER hallucinate logic, functions, or formulas not in the source.
+- If something is unclear, flag it explicitly.
 """
 
 
@@ -165,7 +196,6 @@ class LogicExplainer:
         source_text = self._format_source_code(state["source_code"])
         call_tree_text = self._format_call_tree(state["call_tree"])
 
-        # For Anthropic, add explicit JSON-only instruction
         system_prompt = EXPLANATION_SYSTEM_PROMPT
         if (provider or "").lower() == "anthropic":
             system_prompt += (
@@ -186,20 +216,7 @@ class LogicExplainer:
             HumanMessage(content=user_prompt),
         ]
 
-        # Invoke with LangSmith tracing
-        response = await llm.ainvoke(
-            messages,
-            config={
-                "metadata": {
-                    "correlation_id": correlation_id,
-                    "object_name": object_name,
-                    "schema": schema,
-                    "provider": provider,
-                    "model": model,
-                },
-                "tags": ["logic_explanation", object_name],
-            },
-        )
+        response = await llm.ainvoke(messages)
 
         raw_content = response.content.strip()
 
@@ -224,6 +241,148 @@ class LogicExplainer:
             f"correlation_id={correlation_id}"
         )
         return state
+
+    async def explain_semantic(
+        self,
+        state: LogicState,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> LogicState:
+        """Generate explanation across multiple functions found via semantic search.
+
+        Receives all relevant function sources and the user's original question,
+        then produces a unified cross-function explanation with citations.
+
+        Args:
+            state: Pipeline state with raw_query and multi_source.
+            provider: LLM provider. None uses default.
+            model: Model name. None uses default.
+
+        Returns:
+            Updated state with explanation dict.
+        """
+        correlation_id = get_correlation_id()
+        query = state["raw_query"]
+        multi_source = state.get("multi_source", {})
+
+        logger.info(
+            f"Generating semantic explanation for: {query[:80]}... "
+            f"({len(multi_source)} functions) | "
+            f"provider={provider}, model={model} | "
+            f"correlation_id={correlation_id}"
+        )
+
+        llm = self._get_llm(provider, model)
+
+        # Format all function sources
+        function_sections = []
+        for fn_name, fn_data in multi_source.items():
+            source_text = self._format_source_code(fn_data.get("source_code", []))
+            section = (
+                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code:\n{source_text}\n"
+            )
+            function_sections.append(section)
+
+        user_prompt = (
+            f"User Question: {query}\n\n"
+            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+            + "\n".join(function_sections)
+            + "\n\nAnswer the user's question with a detailed markdown explanation. "
+            "Cite specific function names and line numbers for every claim."
+        )
+
+        # Use non-JSON mode for markdown responses
+        llm = create_llm(
+            provider=provider,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
+        messages = [
+            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+
+        response = await llm.ainvoke(messages)
+        markdown_content = response.content.strip()
+
+        # Store as markdown explanation
+        state["explanation"] = {
+            "markdown": markdown_content,
+            "summary": markdown_content[:200] + "..." if len(markdown_content) > 200 else markdown_content,
+        }
+
+        logger.info(
+            f"Semantic explanation generated: "
+            f"{len(markdown_content)} chars markdown | "
+            f"correlation_id={correlation_id}"
+        )
+        return state
+
+    async def stream_semantic(
+        self,
+        state: LogicState,
+        provider: str | None = None,
+        model: str | None = None,
+    ):
+        """Stream semantic explanation tokens as an async generator.
+
+        Yields markdown tokens one chunk at a time for SSE streaming.
+        Does NOT update state — the caller collects the full text.
+
+        Args:
+            state: Pipeline state with raw_query and multi_source.
+            provider: LLM provider.
+            model: Model name.
+
+        Yields:
+            String chunks of the markdown response.
+        """
+        query = state["raw_query"]
+        multi_source = state.get("multi_source", {})
+
+        function_sections = []
+        for fn_name, fn_data in multi_source.items():
+            source_text = self._format_source_code(fn_data.get("source_code", []))
+            section = (
+                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code:\n{source_text}\n"
+            )
+            function_sections.append(section)
+
+        user_prompt = (
+            f"User Question: {query}\n\n"
+            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+            + "\n".join(function_sections)
+            + "\n\nAnswer the user's question with a detailed markdown explanation. "
+            "Cite specific function names and line numbers for every claim."
+        )
+
+        llm = create_llm(
+            provider=provider,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
+        messages = [
+            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
 
     def _format_source_code(self, source_lines: list) -> str:
         """Format source code lines for LLM consumption.

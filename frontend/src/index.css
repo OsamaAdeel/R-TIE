@@ -1,20 +1,39 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 @theme {
-  --color-bg-primary: #0f1117;
-  --color-bg-secondary: #161922;
-  --color-bg-tertiary: #1e2130;
-  --color-bg-hover: #262a3a;
-  --color-border: #2a2e3f;
-  --color-text-primary: #e4e5eb;
-  --color-text-secondary: #8b8fa3;
-  --color-text-muted: #5c6078;
-  --color-accent: #6c63ff;
-  --color-accent-hover: #5a52e0;
-  --color-success: #34d399;
-  --color-warning: #fbbf24;
-  --color-error: #f87171;
-  --color-info: #60a5fa;
+  --color-bg-primary: #f8fafc;
+  --color-bg-secondary: #ffffff;
+  --color-bg-tertiary: #f1f5f9;
+  --color-bg-hover: #e2e8f0;
+  --color-border: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #94a3b8;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-light: #dbeafe;
+  --color-accent-soft: #eff6ff;
+  --color-success: #16a34a;
+  --color-success-light: #dcfce7;
+  --color-warning: #d97706;
+  --color-warning-light: #fef3c7;
+  --color-error: #dc2626;
+  --color-error-light: #fee2e2;
+  --color-info: #0284c7;
+  --color-info-light: #e0f2fe;
+  --color-purple: #7c3aed;
+  --color-purple-light: #ede9fe;
+  --color-sidebar: #1e293b;
+  --color-sidebar-hover: #334155;
+  --color-sidebar-text: #e2e8f0;
+  --color-sidebar-muted: #94a3b8;
+}
+
+/* Force light mode — disable Tailwind v4 automatic dark mode */
+html {
+  color-scheme: light !important;
 }
 
 * {
@@ -35,14 +54,161 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
+  background: var(--color-border-strong);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-muted);
 }
 
-pre code {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
+/* ──────────────────────────────────────────────
+   RTIE Markdown — Claude-style typography
+   ────────────────────────────────────────────── */
+
+.rtie-markdown {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: #1a1a2e;
+}
+
+.rtie-markdown h1,
+.rtie-markdown h2 {
+  font-size: 17px;
+  font-weight: 650;
+  color: #0f172a;
+  margin: 28px 0 8px;
+  letter-spacing: -0.01em;
+}
+
+.rtie-markdown h3 {
+  font-size: 15px;
+  font-weight: 620;
+  color: #0f172a;
+  margin: 22px 0 6px;
+}
+
+.rtie-markdown h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 18px 0 4px;
+}
+
+.rtie-markdown p {
+  margin: 10px 0;
+  color: #334155;
+}
+
+.rtie-markdown strong {
+  font-weight: 620;
+  color: #0f172a;
+}
+
+.rtie-markdown ul, .rtie-markdown ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.rtie-markdown li {
+  margin: 4px 0;
+  color: #334155;
+}
+
+.rtie-markdown a {
+  color: #2563eb;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+/* Inline code — subtle warm tint */
+.rtie-markdown code {
+  font-family: 'Söhne Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.85em;
+  font-weight: 500;
+  color: #c7254e;
+  background: #fdf2f4;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Kill prose defaults on pre/code */
+.rtie-markdown pre {
+  background: transparent !important;
+  border: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.rtie-markdown pre code {
+  background: transparent !important;
+  padding: 0 !important;
   font-size: 13px !important;
+  color: inherit !important;
+}
+
+/* ──────────────────────────────────────────────
+   Code Block — Claude style
+   ────────────────────────────────────────────── */
+
+.rtie-codeblock {
+  margin: 14px 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.rtie-codeblock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fafafa;
+}
+
+.rtie-codeblock-lang {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  text-transform: lowercase;
+}
+
+.rtie-codeblock-copy {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9ca3af;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+
+.rtie-codeblock-copy:hover {
+  color: #374151;
+}
+
+.rtie-codeblock-body {
+  background: #ffffff;
+  padding: 4px 6px;
+}
+
+/* Override any Tailwind prose interference */
+.prose pre,
+.prose pre[class*="language-"],
+.prose :where(pre):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+  background: transparent !important;
+  color: inherit !important;
+  border: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.prose code::before,
+.prose code::after {
+  content: none !important;
 }
