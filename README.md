@@ -2,8 +2,6 @@
 
 RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that explains the complete logic behind regulatory capital computations — tracing PL/SQL functions, column lineage, and data flows to give engineers instant, fully cited answers without touching the underlying system.
 
-**This branch (`feature/graph-pipeline`)** adds a pure-Python PL/SQL graph parser that converts raw source code into structured JSON graphs, enabling microsecond column lookups and compact ~300-token LLM payloads instead of sending thousands of lines of raw SQL.
-
 ---
 
 ## Prerequisites
