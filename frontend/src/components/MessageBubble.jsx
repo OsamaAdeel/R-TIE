@@ -1,4 +1,5 @@
-import { User, Bot } from 'lucide-react';
+import { useState } from 'react';
+import { User, Bot, Copy, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -78,24 +79,12 @@ function MarkdownResponse({ data }) {
           components={{
             code({ node, inline, className, children, ...props }) {
               const match = /language-(\w+)/.exec(className || '');
-              if (!inline && match) {
-                return (
-                  <SyntaxHighlighter
-                    style={oneLight}
-                    language={match[1]}
-                    showLineNumbers
-                    wrapLongLines
-                    customStyle={{
-                      margin: '8px 0',
-                      borderRadius: '12px',
-                      fontSize: '13px',
-                      border: '2px solid #e2e8f0',
-                    }}
-                    {...props}
-                  >
-                    {String(children).replace(/\n$/, '')}
-                  </SyntaxHighlighter>
-                );
+              const codeStr = String(children).replace(/\n$/, '');
+              const isBlock = !inline && (match || codeStr.includes('\n'));
+
+              if (isBlock) {
+                const lang = match ? match[1] : 'sql';
+                return <CodeBlockWithCopy code={codeStr} language={lang} />;
               }
               return <code className={className} {...props}>{children}</code>;
             },
@@ -130,6 +119,48 @@ function MarkdownResponse({ data }) {
           <span className="font-medium">{source_citations?.length || 0} source citations</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CodeBlockWithCopy({ code, language }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="relative group my-3">
+      {/* Language label + copy button */}
+      <div className="flex items-center justify-between bg-slate-100 border-2 border-b-0 border-slate-200 rounded-t-xl px-4 py-1.5">
+        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{language}</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1 text-[10px] font-medium text-slate-400 hover:text-slate-600 transition-colors"
+        >
+          {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <SyntaxHighlighter
+        style={oneLight}
+        language={language}
+        showLineNumbers
+        wrapLongLines
+        customStyle={{
+          margin: 0,
+          borderRadius: '0 0 12px 12px',
+          fontSize: '12.5px',
+          border: '2px solid #e2e8f0',
+          borderTop: 'none',
+          background: '#f8fafc',
+        }}
+      >
+        {code}
+      </SyntaxHighlighter>
     </div>
   );
 }
