@@ -135,11 +135,11 @@ function CodeBlockWithCopy({ code, language }) {
   return (
     <div className="relative group my-3">
       {/* Language label + copy button */}
-      <div className="flex items-center justify-between bg-slate-100 border-2 border-b-0 border-slate-200 rounded-t-xl px-4 py-1.5">
-        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{language}</span>
+      <div className="flex items-center justify-between bg-white border border-b-0 border-blue-200 rounded-t-xl px-4 py-1.5">
+        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider">{language}</span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 text-[10px] font-medium text-slate-400 hover:text-slate-600 transition-colors"
+          className="flex items-center gap-1 text-[10px] font-medium text-slate-400 hover:text-blue-500 transition-colors"
         >
           {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
           {copied ? 'Copied' : 'Copy'}
@@ -154,9 +154,9 @@ function CodeBlockWithCopy({ code, language }) {
           margin: 0,
           borderRadius: '0 0 12px 12px',
           fontSize: '12.5px',
-          border: '2px solid #e2e8f0',
+          border: '1px solid #bfdbfe',
           borderTop: 'none',
-          background: '#f8fafc',
+          background: '#ffffff',
         }}
       >
         {code}
