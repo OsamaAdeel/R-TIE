@@ -5,6 +5,20 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import ResponseCard from './ResponseCard';
+
+// Force white background on code blocks — oneLight defaults to grey
+const codeTheme = {
+  ...oneLight,
+  'pre[class*="language-"]': {
+    ...oneLight['pre[class*="language-"]'],
+    background: '#ffffff',
+    margin: 0,
+  },
+  'code[class*="language-"]': {
+    ...oneLight['code[class*="language-"]'],
+    background: '#ffffff',
+  },
+};
 import CommandResult from './CommandResult';
 
 const STAGE_CONFIG = {
@@ -233,7 +247,7 @@ function CodeBlockWithCopy({ code, language }) {
         </button>
       </div>
       <SyntaxHighlighter
-        style={oneLight}
+        style={codeTheme}
         language={language}
         showLineNumbers
         wrapLongLines
