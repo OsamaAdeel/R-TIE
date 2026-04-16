@@ -77,59 +77,30 @@ You will receive a **variable transformation chain** — a compact extract showi
 every line across multiple PL/SQL functions where a specific target variable
 (or any of its aliases) is read, written, or transformed.
 
-Each line is tagged with:
-- The function it belongs to
-- The original line number in that function
-- Which alias of the target variable appears on that line
+Your task is to produce a **rich, detailed markdown explanation** of the complete
+calculation lifecycle of the target variable.
 
-Your task is to explain, in plain English, the **complete calculation lifecycle**
-of the target variable: where it originates, how it is transformed step by step,
-and where it ends up.
+FORMAT RULES:
+- Start with a header: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)
+- Use ### subheaders for each function that touches the variable.
+- Use `inline code` for variable names, table names, column names.
+- **ALWAYS include ```sql code blocks** with the actual PL/SQL code from the chain.
+  Every assignment, SELECT INTO, UPDATE SET, INSERT, or formula MUST have its source
+  code shown in a ```sql block. Engineers need to see the actual SQL.
+- After each code block, cite: **[Line N]** or **[Lines N-M]**
+- Use **bold** for statuses, key findings, and important values.
+- Break down formulas with variable explanations (what each component means).
+- Show the data flow: origin → transformations → destination.
+- If logic is commented out, mark it: **Status: Commented Out — Deprecated Logic**
+  and still show the commented SQL.
+- Be thorough — engineers need the full picture.
 
 STRICT RULES:
 - ONLY reference lines that appear in the provided chain.
 - Cite function name + line number for EVERY claim.
 - If a step is unclear, FLAG it rather than guessing.
-- Explain mathematical formulas explicitly.
-
-You MUST respond with ONLY valid JSON — no markdown, no extra text.
-
-Output JSON schema:
-{
-  "target_variable": "<the variable being traced>",
-  "aliases_found": ["<list of all aliases discovered>"],
-  "summary": "Plain-English summary of how the variable is calculated end-to-end",
-  "transformation_steps": [
-    {
-      "step": 1,
-      "function": "FUNCTION_NAME",
-      "line": 42,
-      "description": "What happens to the variable at this point",
-      "code_snippet": "the exact code from the chain",
-      "operation": "ASSIGN | READ | TRANSFORM | INSERT | UPDATE | SELECT_INTO | PARAMETER"
-    }
-  ],
-  "formulas": [
-    {
-      "name": "Formula description",
-      "formula": "The mathematical expression",
-      "function": "FUNCTION_NAME",
-      "lines": [42, 43],
-      "variables": {"var_name": "what it represents"}
-    }
-  ],
-  "data_flow": "How the variable flows across functions (origin → transforms → destination)",
-  "tables_involved": [
-    {
-      "table": "TABLE_NAME",
-      "column": "COLUMN_NAME",
-      "operation": "READ | WRITE",
-      "function": "FUNCTION_NAME",
-      "line": 42
-    }
-  ],
-  "unclear_items": ["Anything that could not be determined from the chain alone"]
-}
+- NEVER hallucinate logic not in the source.
+- You MUST include SQL code blocks — a response without ```sql blocks is incomplete.
 """
 
 
@@ -550,12 +521,13 @@ class VariableTracer:
         """Send the compact transformation chain to the LLM for explanation."""
         correlation_id = get_correlation_id()
 
+        # Use non-JSON mode for markdown responses
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o",
+            model=model or "gpt-4o-mini",
             temperature=self._temperature,
-            max_tokens=self._max_tokens,
-            json_mode=(provider or "openai") != "anthropic",
+            max_tokens=4096,
+            json_mode=False,
         )
 
         user_prompt = (
@@ -563,8 +535,9 @@ class VariableTracer:
             f"Trace the calculation lifecycle of variable '{target_variable}' "
             f"using the following transformation chain:\n\n"
             f"{chain_text}\n\n"
-            f"Explain how '{target_variable}' is calculated, transformed, and "
-            f"propagated across the functions. Cite every function name and line number."
+            f"Produce a detailed markdown explanation of how '{target_variable}' "
+            f"is calculated, transformed, and propagated. "
+            f"Cite every function name and line number."
         )
 
         messages = [
@@ -579,20 +552,17 @@ class VariableTracer:
         )
 
         response = await llm.ainvoke(messages)
-        raw_content = response.content.strip()
-
-        if raw_content.startswith("```"):
-            raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        explanation = json.loads(raw_content)
+        markdown_content = response.content.strip()
 
         logger.info(
             f"Variable trace explanation received: "
-            f"{len(explanation.get('transformation_steps', []))} steps, "
-            f"{len(explanation.get('formulas', []))} formulas | "
+            f"{len(markdown_content)} chars markdown | "
             f"correlation_id={correlation_id}"
         )
-        return explanation
+        return {
+            "markdown": markdown_content,
+            "summary": markdown_content[:200] + "..." if len(markdown_content) > 200 else markdown_content,
+        }
 
     # ──────────────────────────────────────────────────────────
     # 5. FULL PIPELINE — called from the graph node

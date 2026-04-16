@@ -89,58 +89,29 @@ You will receive:
 1. The user's original question.
 2. Multiple functions with their source code, descriptions, and relevance scores.
 
-Your task is to answer the user's question by explaining HOW the relevant functions work together.
+Your task is to produce a **rich, detailed markdown explanation** that a database engineer would find useful.
+
+FORMAT RULES:
+- Use markdown headers (##, ###) to organize by function and topic.
+- Use `inline code` for function names, table names, column names, and variable names.
+- **ALWAYS include ```sql code blocks** with the actual PL/SQL snippets from the source code.
+  Every major operation (INSERT, UPDATE, MERGE, SELECT INTO, CASE WHEN, DECODE, etc.) MUST
+  have its relevant source code shown in a ```sql block. This is critical — engineers need
+  to see the actual SQL, not just a description of it.
+- After each code block, cite the line numbers: **[Lines 42-55]**
+- Use **bold** for important concepts, statuses, and key findings.
+- If logic is commented out, clearly state **Status: Commented Out — Deprecated Logic**
+  and still show the commented SQL so engineers can see what was intended.
+- Explain formulas with variable breakdowns (what each variable represents).
+- If a function is not relevant, say so briefly and move on.
+- Explain the data flow across functions if applicable.
+- Be thorough — engineers need the full picture, not just a summary.
 
 STRICT RULES:
 - ONLY reference code that exists in the provided sources.
-- Cite specific function names and line numbers for EVERY claim.
-- If a function is not relevant to the question, say so briefly and focus on the relevant ones.
-- Explain the data flow across functions if applicable.
-- Never hallucinate logic, functions, or formulas not in the source.
-
-You MUST respond with ONLY valid JSON — no markdown, no extra text.
-
-Output JSON schema:
-{
-  "summary": "Direct answer to the user's question in plain English",
-  "relevant_functions": [
-    {
-      "name": "FUNCTION_NAME",
-      "relevance": "Why this function is relevant to the question",
-      "key_logic": [
-        {
-          "step": 1,
-          "description": "What this part does relevant to the question",
-          "lines": [10, 11],
-          "code_snippet": "relevant code"
-        }
-      ]
-    }
-  ],
-  "data_flow": "How data flows across the relevant functions (if applicable)",
-  "step_by_step": [
-    {
-      "step": 1,
-      "description": "Overall step description across functions",
-      "function": "FUNCTION_NAME",
-      "lines": [10, 11],
-      "code_snippet": "relevant code"
-    }
-  ],
-  "formulas": [
-    {
-      "name": "Formula description",
-      "formula": "The calculation",
-      "function": "FUNCTION_NAME",
-      "lines": [15, 16],
-      "variables": {"var_name": "description"}
-    }
-  ],
-  "dependencies_used": [],
-  "regulatory_refs": [],
-  "raw_source_references": [],
-  "unclear_items": []
-}
+- NEVER hallucinate logic, functions, or formulas not in the source.
+- If something is unclear, flag it explicitly.
+- You MUST include SQL code blocks — a response without any ```sql blocks is incomplete.
 """
 
 
@@ -318,38 +289,40 @@ class LogicExplainer:
             )
             function_sections.append(section)
 
-        system_prompt = SEMANTIC_EXPLANATION_PROMPT
-        if (provider or "").lower() == "anthropic":
-            system_prompt += (
-                "\n\nIMPORTANT: Respond with ONLY the raw JSON object. "
-                "No markdown code fences, no explanation before or after."
-            )
-
         user_prompt = (
             f"User Question: {query}\n\n"
             f"The following {len(multi_source)} functions were found via semantic search:\n\n"
             + "\n".join(function_sections)
-            + "\n\nAnswer the user's question by explaining the relevant logic across these functions. "
+            + "\n\nAnswer the user's question with a detailed markdown explanation. "
             "Cite specific function names and line numbers for every claim."
         )
 
+        # Use non-JSON mode for markdown responses
+        llm = create_llm(
+            provider=provider,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
         messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
             HumanMessage(content=user_prompt),
         ]
 
         response = await llm.ainvoke(messages)
+        markdown_content = response.content.strip()
 
-        raw_content = response.content.strip()
-        if raw_content.startswith("```"):
-            raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        explanation = json.loads(raw_content)
-        state["explanation"] = explanation
+        # Store as markdown explanation
+        state["explanation"] = {
+            "markdown": markdown_content,
+            "summary": markdown_content[:200] + "..." if len(markdown_content) > 200 else markdown_content,
+        }
 
         logger.info(
             f"Semantic explanation generated: "
-            f"{len(explanation.get('relevant_functions', []))} functions analyzed | "
+            f"{len(markdown_content)} chars markdown | "
             f"correlation_id={correlation_id}"
         )
         return state

@@ -102,6 +102,7 @@ _cache_manager: CacheManager = None
 _indexer: IndexerAgent = None
 _renderer: Renderer = None
 _compiled_graph = None
+_graph_available: bool = False
 _health_checker: HealthChecker = None
 _settings: Dict[str, Any] = {}
 
@@ -120,7 +121,7 @@ async def lifespan(app: FastAPI):
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
     global _variable_tracer, _validator, _cache_manager, _indexer, _renderer
-    global _compiled_graph, _health_checker, _settings
+    global _compiled_graph, _health_checker, _settings, _graph_available
 
     _settings = _load_settings()
     oracle_cfg = _settings["oracle"]
@@ -231,7 +232,7 @@ async def lifespan(app: FastAPI):
 
     # Load graph pipeline for PL/SQL function parsing
     graph_cfg = _settings.get("graph", {})
-    graph_available = False
+    _graph_available = False
     try:
         import redis as _redis
         from src.parsing.loader import load_all_functions
@@ -253,7 +254,7 @@ async def lifespan(app: FastAPI):
                 f"{result['functions_failed']} failed"
             )
             if result["status"] in ("success", "partial"):
-                graph_available = True
+                _graph_available = True
     except Exception as exc:
         logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
 
@@ -379,7 +380,7 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             "variable_chain": {},
             "llm_payload": "",
             "graph_node_ids": [],
-            "graph_available": graph_available,
+            "graph_available": _graph_available,
             "output": {},
             "partial_flag": False,
         }
