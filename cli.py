@@ -160,13 +160,10 @@ async def cmd_ask(question: str):
         await vs.close()
         return
 
-    # Step 4: Send to Ollama (local LLM) — no network size limits
-    print(f"\n[3/4] Analyzing {len(multi_source)} functions via Ollama (local)...")
+    # Step 4: Send to OpenAI gpt-4o for analysis
+    print(f"\n[3/4] Analyzing {len(multi_source)} functions via gpt-4o...")
 
-    from src.llm_factory import create_llm
-    from langchain_core.messages import SystemMessage, HumanMessage
-
-    llm = create_llm(provider="ollama", model=os.getenv("OLLAMA_MODEL", "llama3:8b"), temperature=0, max_tokens=2000)
+    llm = create_llm(provider="openai", model="gpt-4o", temperature=0, max_tokens=2000)
 
     per_function_answers = []
 

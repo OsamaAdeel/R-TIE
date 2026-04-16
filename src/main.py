@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
+from src.agents.variable_tracer import VariableTracer
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -95,6 +96,7 @@ _vector_store: VectorStore = None
 _orchestrator: Orchestrator = None
 _metadata_interpreter: MetadataInterpreter = None
 _logic_explainer: LogicExplainer = None
+_variable_tracer: VariableTracer = None
 _validator: Validator = None
 _cache_manager: CacheManager = None
 _indexer: IndexerAgent = None
@@ -117,7 +119,7 @@ async def lifespan(app: FastAPI):
     """
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
-    global _validator, _cache_manager, _indexer, _renderer
+    global _variable_tracer, _validator, _cache_manager, _indexer, _renderer
     global _compiled_graph, _health_checker, _settings
 
     _settings = _load_settings()
@@ -172,6 +174,11 @@ async def lifespan(app: FastAPI):
         langsmith_project=_settings["langsmith"]["project"],
     )
 
+    _variable_tracer = VariableTracer(
+        temperature=llm_cfg["temperature"],
+        max_tokens=llm_cfg["max_tokens"],
+    )
+
     _validator = Validator(
         schema_tools=_schema_tools,
         cache_client=_cache_client,
@@ -208,6 +215,7 @@ async def lifespan(app: FastAPI):
         orchestrator=_orchestrator,
         metadata_interpreter=_metadata_interpreter,
         logic_explainer=_logic_explainer,
+        variable_tracer=_variable_tracer,
         validator=_validator,
         renderer=_renderer,
         postgres_dsn=postgres_dsn,
@@ -220,6 +228,34 @@ async def lifespan(app: FastAPI):
         cache_client=_cache_client,
         postgres_dsn=postgres_dsn,
     )
+
+    # Load graph pipeline for PL/SQL function parsing
+    graph_cfg = _settings.get("graph", {})
+    graph_available = False
+    try:
+        import redis as _redis
+        from src.tools.graph.loader import load_all_functions
+        _graph_redis = _redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+        )
+        for fn_dir in graph_cfg.get("functions_dirs", []):
+            result = load_all_functions(
+                functions_dir=fn_dir,
+                schema=oracle_cfg["schema"],
+                redis_client=_graph_redis,
+                force_reparse=graph_cfg.get("force_reparse_on_startup", False),
+            )
+            logger.info(
+                f"Graph pipeline: {result['status']} — "
+                f"{result['functions_parsed']} parsed, "
+                f"{result['functions_skipped']} skipped, "
+                f"{result['functions_failed']} failed"
+            )
+            if result["status"] in ("success", "partial"):
+                graph_available = True
+    except Exception as exc:
+        logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
 
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
@@ -339,6 +375,11 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             "warnings": [],
             "search_results": [],
             "multi_source": {},
+            "target_variable": "",
+            "variable_chain": {},
+            "llm_payload": "",
+            "graph_node_ids": [],
+            "graph_available": graph_available,
             "output": {},
             "partial_flag": False,
         }

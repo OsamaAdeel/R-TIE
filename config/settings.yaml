@@ -23,16 +23,18 @@ llm:
 graph:
   node_timeout: 60
   max_retries: 3
-
-ollama:
-  base_url: "http://localhost:11434"
-  model: "llama3:8b"
+  functions_dirs:
+    - "db/modules/OFSDMINFO_ABL_DATA_PREPARATION/functions"
+  force_reparse_on_startup: false
+  fallback_to_raw_on_low_confidence: true
+  max_payload_chars: 2000
+  token_estimate_chars_per_token: 4
 
 embedding:
   model: "text-embedding-3-small"
   dimensions: 1536
-  description_provider: "ollama"
-  description_model: "llama3:8b"
+  description_provider: "openai"
+  description_model: "gpt-4o"
   search_top_k: 3
   auto_index_modules:
     - "OFSDMINFO_ABL_DATA_PREPARATION"

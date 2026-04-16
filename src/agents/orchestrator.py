@@ -28,9 +28,10 @@ class ClassificationResult(BaseModel):
     """Pydantic model for LLM classification output.
 
     Attributes:
-        query_type: 'COLUMN_LOGIC' for all logic queries.
+        query_type: 'COLUMN_LOGIC' or 'VARIABLE_TRACE'.
         intent: What the user is asking about.
         search_terms: Key terms for semantic search enrichment.
+        target_variable: Variable/column name for VARIABLE_TRACE queries.
         schema_name: Oracle schema name (e.g. OFSMDM).
         confidence: Model's confidence in understanding the query.
     """
@@ -40,6 +41,7 @@ class ClassificationResult(BaseModel):
     query_type: str
     intent: str
     search_terms: List[str]
+    target_variable: Optional[str] = None
     schema_name: str
     confidence: float
 
@@ -66,15 +68,21 @@ Your job is to understand user queries about Oracle OFSAA PL/SQL objects, tables
 You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no extra text.
 
 {
-  "query_type": "COLUMN_LOGIC",
+  "query_type": "COLUMN_LOGIC" or "VARIABLE_TRACE",
   "intent": "<concise description of what the user wants to know>",
   "search_terms": ["<keyword1>", "<keyword2>", "..."],
+  "target_variable": "<variable/column name if query_type is VARIABLE_TRACE, else null>",
   "schema_name": "<Oracle schema name, default OFSMDM>",
   "confidence": <float between 0.0 and 1.0>
 }
 
 Rules:
-- query_type is always "COLUMN_LOGIC" for any logic/data/explanation query.
+- query_type: Use "VARIABLE_TRACE" when the user asks how a specific variable or column
+  is CALCULATED, DERIVED, POPULATED, or TRANSFORMED across functions.
+  Use "COLUMN_LOGIC" for all other logic/explanation queries.
+- target_variable: When query_type is "VARIABLE_TRACE", extract the exact variable or
+  column name being traced (e.g. "EAD_AMOUNT", "N_ANNUAL_GROSS_INCOME", "V_PROD_CODE").
+  Set to null for COLUMN_LOGIC queries.
 - intent: summarize what the user is asking in one sentence.
 - search_terms: extract ALL relevant keywords — function names, table names, column names,
   business concepts (e.g. "operational risk", "capital adequacy", "GL data").
@@ -83,10 +91,12 @@ Rules:
 - confidence reflects how well you understood the user's question.
 
 Examples:
-- "Explain FN_LOAD_OPS_RISK_DATA" → search_terms: ["FN_LOAD_OPS_RISK_DATA", "operational risk", "ops risk data"]
-- "How is N_ANNUAL_GROSS_INCOME calculated?" → search_terms: ["N_ANNUAL_GROSS_INCOME", "annual gross income", "calculation", "operational risk"]
-- "What updates STG_PRODUCT_PROCESSOR?" → search_terms: ["STG_PRODUCT_PROCESSOR", "product processor", "update", "insert", "merge"]
-- "How does the entire batch flow work?" → search_terms: ["batch flow", "data preparation", "pipeline", "ETL", "staging"]
+- "Explain FN_LOAD_OPS_RISK_DATA" → query_type: "COLUMN_LOGIC", target_variable: null
+- "How is EAD_AMOUNT calculated across functions?" → query_type: "VARIABLE_TRACE", target_variable: "EAD_AMOUNT"
+- "Trace N_ANNUAL_GROSS_INCOME" → query_type: "VARIABLE_TRACE", target_variable: "N_ANNUAL_GROSS_INCOME"
+- "What updates STG_PRODUCT_PROCESSOR?" → query_type: "COLUMN_LOGIC", target_variable: null
+- "How is V_PROD_CODE populated?" → query_type: "VARIABLE_TRACE", target_variable: "V_PROD_CODE"
+- "How does the entire batch flow work?" → query_type: "COLUMN_LOGIC", target_variable: null
 """
 
 
@@ -224,11 +234,14 @@ class Orchestrator:
         state["object_name"] = enriched_query
         state["object_type"] = ""
         state["schema"] = result.schema_name
+        state["target_variable"] = result.target_variable or ""
         state["warnings"] = []
         state["partial_flag"] = False
 
         logger.info(
-            f"Query classified: intent='{result.intent}', "
+            f"Query classified: type={result.query_type}, "
+            f"intent='{result.intent}', "
+            f"target_variable={result.target_variable}, "
             f"search_terms={result.search_terms}, "
             f"schema={result.schema_name}, "
             f"confidence={result.confidence} | "

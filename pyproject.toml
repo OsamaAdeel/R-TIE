@@ -24,8 +24,8 @@ python-dotenv = "^1.0.0"
 sqlparse = "^0.5.0"
 tenacity = "^9.0.0"
 pyyaml = "^6.0.0"
-langchain-ollama = "^0.3.0"
 numpy = "^1.26.0"
+msgpack = "^1.0.0"
 langgraph-checkpoint-postgres = "^2.0.0"
 
 [tool.poetry.group.dev.dependencies]

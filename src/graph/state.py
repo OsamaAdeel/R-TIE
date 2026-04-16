@@ -55,6 +55,13 @@ class LogicState(TypedDict):
     # Semantic search output
     search_results: list
     multi_source: dict
+    # Variable trace output
+    target_variable: str
+    variable_chain: dict
+    # Graph pipeline output
+    llm_payload: str
+    graph_node_ids: list
+    graph_available: bool
     # Final output
     output: dict
     partial_flag: bool

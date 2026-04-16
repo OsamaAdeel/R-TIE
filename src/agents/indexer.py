@@ -277,7 +277,7 @@ class IndexerAgent:
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-        # Try JSON parse; if Ollama didn't return valid JSON, build a fallback
+        # Try JSON parse; if LLM didn't return valid JSON, build a fallback
         try:
             return json.loads(raw)
         except json.JSONDecodeError:

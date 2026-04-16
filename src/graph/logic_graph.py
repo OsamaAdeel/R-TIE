@@ -22,6 +22,7 @@ from src.graph.state import LogicState
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
+from src.agents.variable_tracer import VariableTracer
 from src.agents.validator import Validator
 from src.agents.renderer import Renderer
 from src.tools.vector_store import VectorStore
@@ -50,20 +51,22 @@ def build_logic_graph(
     orchestrator: Orchestrator,
     metadata_interpreter: MetadataInterpreter,
     logic_explainer: LogicExplainer,
+    variable_tracer: VariableTracer,
     validator: Validator,  # noqa: ARG001 — kept for compile_graph API compatibility
     renderer: Renderer,
     vector_store: Optional[VectorStore] = None,
 ) -> StateGraph:
     """Build the RTIE unified semantic search StateGraph.
 
-    All queries flow through a single linear path:
-    parse_query → semantic_search → fetch_multi_logic → explain_semantic
-    → output_validator → render_response → END
+    Queries flow through: parse → search → fetch → (branch) → validate → render.
+    The branch routes to either variable_trace or explain_semantic based on
+    the query_type set by the orchestrator.
 
     Args:
         orchestrator: The Orchestrator agent instance.
         metadata_interpreter: The MetadataInterpreter agent instance.
         logic_explainer: The LogicExplainer agent instance.
+        variable_tracer: The VariableTracer agent instance.
         validator: The Validator agent instance.
         renderer: The Renderer agent instance.
         vector_store: Redis vector store for semantic search. Optional.
@@ -174,6 +177,45 @@ def build_logic_graph(
             model=llm_cfg["model"],
         )
 
+    async def variable_trace(state: LogicState, config: RunnableConfig) -> LogicState:
+        """Trace a specific variable across multiple functions.
+
+        Runs the pure Python extraction pipeline to build a compact
+        transformation chain, then sends only that chain to the LLM.
+
+        Args:
+            state: Current pipeline state with multi_source.
+            config: LangGraph config with provider/model.
+
+        Returns:
+            Updated state with explanation and variable_chain populated.
+        """
+        logger.info(
+            f"[variable_trace] Tracing variable: "
+            f"{state.get('target_variable', 'unknown')}"
+        )
+        llm_cfg = _extract_llm_config(config)
+        return await variable_tracer.trace_variable(
+            state,
+            provider=llm_cfg["provider"],
+            model=llm_cfg["model"],
+        )
+
+    def route_after_fetch(state: LogicState) -> str:
+        """Route to variable_trace or explain_semantic based on query_type.
+
+        Args:
+            state: Current pipeline state.
+
+        Returns:
+            Node name to route to.
+        """
+        if state.get("query_type") == "VARIABLE_TRACE":
+            logger.info("[route] Routing to variable_trace")
+            return "variable_trace"
+        logger.info("[route] Routing to explain_semantic")
+        return "explain_semantic"
+
     async def output_validate(state: LogicState) -> LogicState:
         """Validate the explanation output.
 
@@ -234,26 +276,39 @@ def build_logic_graph(
         logger.info("[render_response] Rendering final output")
         return await renderer.render_response(state)
 
-    # Build the graph — unified linear path
+    # Build the graph — with conditional branch after fetch
     graph = StateGraph(LogicState)
 
     graph.add_node("parse_query", parse_query)
     graph.add_node("semantic_search", semantic_search)
     graph.add_node("fetch_multi_logic", fetch_multi_logic)
     graph.add_node("explain_semantic", explain_semantic)
+    graph.add_node("variable_trace", variable_trace)
     graph.add_node("output_validator", output_validate)
     graph.add_node("render_response", render_response)
 
-    # Linear edges — every query follows the same path
+    # Linear edges up to fetch
     graph.set_entry_point("parse_query")
     graph.add_edge("parse_query", "semantic_search")
     graph.add_edge("semantic_search", "fetch_multi_logic")
-    graph.add_edge("fetch_multi_logic", "explain_semantic")
+
+    # Conditional branch: variable trace or semantic explanation
+    graph.add_conditional_edges(
+        "fetch_multi_logic",
+        route_after_fetch,
+        {
+            "variable_trace": "variable_trace",
+            "explain_semantic": "explain_semantic",
+        },
+    )
+
+    # Both branches converge at output_validator
+    graph.add_edge("variable_trace", "output_validator")
     graph.add_edge("explain_semantic", "output_validator")
     graph.add_edge("output_validator", "render_response")
     graph.add_edge("render_response", END)
 
-    logger.info("Unified semantic search graph built with 6 nodes")
+    logger.info("Semantic search graph built with 7 nodes and conditional routing")
     return graph
 
 
@@ -261,6 +316,7 @@ async def compile_graph(
     orchestrator: Orchestrator,
     metadata_interpreter: MetadataInterpreter,
     logic_explainer: LogicExplainer,
+    variable_tracer: VariableTracer,
     validator: Validator,
     renderer: Renderer,
     postgres_dsn: str,
@@ -272,6 +328,7 @@ async def compile_graph(
         orchestrator: The Orchestrator agent instance.
         metadata_interpreter: The MetadataInterpreter agent instance.
         logic_explainer: The LogicExplainer agent instance.
+        variable_tracer: The VariableTracer agent instance.
         validator: The Validator agent instance.
         renderer: The Renderer agent instance.
         postgres_dsn: PostgreSQL connection string for persistence.
@@ -284,6 +341,7 @@ async def compile_graph(
         orchestrator=orchestrator,
         metadata_interpreter=metadata_interpreter,
         logic_explainer=logic_explainer,
+        variable_tracer=variable_tracer,
         validator=validator,
         renderer=renderer,
         vector_store=vector_store,

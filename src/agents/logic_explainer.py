@@ -8,7 +8,6 @@ LangSmith tracing is enabled on all LLM calls. Supports dynamic model
 switching per request.
 """
 
-import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -222,22 +221,14 @@ class LogicExplainer:
             f"correlation_id={correlation_id}"
         )
 
-        # Always use Ollama for source analysis (large payloads)
-        import os as _os
-        llm = create_llm(
-            provider="ollama",
-            model=_os.getenv("OLLAMA_MODEL", "llama3:8b"),
-            temperature=self._temperature,
-            max_tokens=2000,
-        )
+        llm = self._get_llm(provider, model)
 
         # Format source code for the LLM
         source_text = self._format_source_code(state["source_code"])
         call_tree_text = self._format_call_tree(state["call_tree"])
 
         system_prompt = EXPLANATION_SYSTEM_PROMPT
-        # Ollama doesn't need the anthropic-specific instruction
-        if False:  # kept for reference
+        if (provider or "").lower() == "anthropic":
             system_prompt += (
                 "\n\nIMPORTANT: Respond with ONLY the raw JSON object. "
                 "No markdown code fences, no explanation before or after."
@@ -256,11 +247,7 @@ class LogicExplainer:
             HumanMessage(content=user_prompt),
         ]
 
-        # Invoke with sync-in-thread (Windows SelectorEventLoop compat)
-        response = await asyncio.to_thread(
-            llm.invoke,
-            messages,
-        )
+        response = await llm.ainvoke(messages)
 
         raw_content = response.content.strip()
 
@@ -289,8 +276,8 @@ class LogicExplainer:
     async def explain_semantic(
         self,
         state: LogicState,
-        provider: Optional[str] = None,  # Ignored — always uses Ollama
-        model: Optional[str] = None,  # Ignored — always uses Ollama
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> LogicState:
         """Generate explanation across multiple functions found via semantic search.
 
@@ -316,15 +303,7 @@ class LogicExplainer:
             f"correlation_id={correlation_id}"
         )
 
-        # Always use Ollama for source analysis — large payloads break
-        # corporate network TLS with remote APIs (OpenAI/Anthropic)
-        import os
-        llm = create_llm(
-            provider="ollama",
-            model=os.getenv("OLLAMA_MODEL", "llama3:8b"),
-            temperature=self._temperature,
-            max_tokens=4096,
-        )
+        llm = self._get_llm(provider, model)
 
         # Format all function sources
         function_sections = []
