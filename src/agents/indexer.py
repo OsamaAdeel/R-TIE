@@ -28,7 +28,6 @@ logger = get_logger(__name__, concern="app")
 _RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 MODULES_DIRS = [
     os.path.join(_RTIE_ROOT, "db", "modules"),
-    os.path.join(os.path.dirname(_RTIE_ROOT), "db", "modules"),
 ]
 
 DESCRIPTION_SYSTEM_PROMPT = """You are a PL/SQL documentation specialist for Oracle OFSAA regulatory systems.

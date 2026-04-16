@@ -45,11 +45,10 @@ class ObjectNotFoundError(Exception):
         )
 
 
-# Paths to search for PL/SQL source files — both RTIE/db/modules/ and parent R-TIE/db/modules/
+# Path to PL/SQL source files — RTIE/db/modules/
 _RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 MODULES_DIRS = [
     os.path.join(_RTIE_ROOT, "db", "modules"),
-    os.path.join(os.path.dirname(_RTIE_ROOT), "db", "modules"),
 ]
 
 

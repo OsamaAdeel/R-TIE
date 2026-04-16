@@ -33,12 +33,10 @@ logger = get_logger(__name__, concern="app")
 # Project root resolution
 # ---------------------------------------------------------------------------
 
-# loader.py lives at src/tools/graph/loader.py
-# RTIE root = 3 levels up from this file's directory
+# loader.py lives at src/parsing/loader.py
+# RTIE root = 2 levels up from this file's directory
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_THIS_DIR)))
-# The R-TIE parent (one level above RTIE/)
-_RTIE_PARENT = os.path.dirname(_RTIE_ROOT)
+_RTIE_ROOT = os.path.dirname(os.path.dirname(_THIS_DIR))
 
 
 def _resolve_functions_dir(functions_dir: str) -> str | None:
@@ -47,14 +45,12 @@ def _resolve_functions_dir(functions_dir: str) -> str | None:
     Checks (in order):
       1. The path as-is (already absolute or cwd-relative).
       2. Relative to the RTIE project root.
-      3. Relative to the R-TIE parent directory (one level above RTIE/).
 
     Returns the first path that exists, or ``None``.
     """
     candidates = [
         functions_dir,
         os.path.join(_RTIE_ROOT, functions_dir),
-        os.path.join(_RTIE_PARENT, functions_dir),
     ]
     for candidate in candidates:
         resolved = os.path.abspath(candidate)
@@ -85,7 +81,7 @@ def load_all_functions(
     ----------
     functions_dir:
         Directory containing ``.sql`` function files.  May be absolute or
-        relative to the RTIE project root (or the R-TIE parent).
+        relative to the RTIE project root.
     schema:
         Oracle schema name used as a namespace in Redis keys.
     redis_client:
@@ -303,9 +299,9 @@ def parse_single_function(
         Result with keys: ``status``, ``function_name``, ``nodes``,
         ``edges``, ``compression``, ``error`` (if any).
     """
-    # Resolve path — try as-is, then relative to project root / parent
+    # Resolve path — try as-is, then relative to project root
     resolved_path: str | None = None
-    for candidate in [sql_file_path, os.path.join(_RTIE_ROOT, sql_file_path), os.path.join(_RTIE_PARENT, sql_file_path)]:
+    for candidate in [sql_file_path, os.path.join(_RTIE_ROOT, sql_file_path)]:
         abs_candidate = os.path.abspath(candidate)
         if os.path.isfile(abs_candidate):
             resolved_path = abs_candidate
