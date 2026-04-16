@@ -81,26 +81,25 @@ Your task is to produce a **rich, detailed markdown explanation** of the complet
 calculation lifecycle of the target variable.
 
 FORMAT RULES:
-- Start with a header: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)
-- Use ### subheaders for each function that touches the variable.
+- Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)
+- Use ### for each function that touches the variable.
+- For each step, use a short descriptive header like ### Step 1: Initial Read (Line 43)
+  — put the line number IN the header itself, do NOT repeat it separately below.
 - Use `inline code` for variable names, table names, column names.
-- **ALWAYS include ```sql code blocks** with the actual PL/SQL code from the chain.
-  Every assignment, SELECT INTO, UPDATE SET, INSERT, or formula MUST have its source
-  code shown in a ```sql block. Engineers need to see the actual SQL.
-- After each code block, cite: **[Line N]** or **[Lines N-M]**
+- Include ```sql code blocks with the actual PL/SQL code from the chain.
+- Do NOT add a separate [Line N] citation below a code block if the line number
+  is already in the section header. Never repeat the same line reference twice.
 - Use **bold** for statuses, key findings, and important values.
-- Break down formulas with variable explanations (what each component means).
+- Break down formulas with variable explanations.
 - Show the data flow: origin → transformations → destination.
-- If logic is commented out, mark it: **Status: Commented Out — Deprecated Logic**
-  and still show the commented SQL.
+- If logic is commented out, mark it: **Commented Out — Deprecated**
 - Be thorough — engineers need the full picture.
 
 STRICT RULES:
 - ONLY reference lines that appear in the provided chain.
-- Cite function name + line number for EVERY claim.
+- NEVER repeat information. Each line number should appear exactly once.
 - If a step is unclear, FLAG it rather than guessing.
 - NEVER hallucinate logic not in the source.
-- You MUST include SQL code blocks — a response without ```sql blocks is incomplete.
 """
 
 

@@ -92,26 +92,24 @@ You will receive:
 Your task is to produce a **rich, detailed markdown explanation** that a database engineer would find useful.
 
 FORMAT RULES:
-- Use markdown headers (##, ###) to organize by function and topic.
-- Use `inline code` for function names, table names, column names, and variable names.
-- **ALWAYS include ```sql code blocks** with the actual PL/SQL snippets from the source code.
-  Every major operation (INSERT, UPDATE, MERGE, SELECT INTO, CASE WHEN, DECODE, etc.) MUST
-  have its relevant source code shown in a ```sql block. This is critical — engineers need
-  to see the actual SQL, not just a description of it.
-- After each code block, cite the line numbers: **[Lines 42-55]**
+- Use ## for the main topic, ### for each function or section.
+- For each operation, use a descriptive header that includes the line reference:
+  ### INSERT into STG_PRODUCT_PROCESSOR (Lines 157-520)
+  Do NOT add a separate [Lines ...] citation below — the header IS the citation.
+- Use `inline code` for function names, table names, column names, variable names.
+- Include ```sql code blocks with relevant PL/SQL snippets from the source.
 - Use **bold** for important concepts, statuses, and key findings.
-- If logic is commented out, clearly state **Status: Commented Out — Deprecated Logic**
-  and still show the commented SQL so engineers can see what was intended.
-- Explain formulas with variable breakdowns (what each variable represents).
+- If logic is commented out, state **Commented Out — Deprecated** and show the SQL.
+- Explain formulas with variable breakdowns.
 - If a function is not relevant, say so briefly and move on.
 - Explain the data flow across functions if applicable.
-- Be thorough — engineers need the full picture, not just a summary.
+- Be thorough — engineers need the full picture.
 
 STRICT RULES:
 - ONLY reference code that exists in the provided sources.
+- NEVER repeat the same line reference twice. Each line citation appears once (in the header).
 - NEVER hallucinate logic, functions, or formulas not in the source.
 - If something is unclear, flag it explicitly.
-- You MUST include SQL code blocks — a response without any ```sql blocks is incomplete.
 """
 
 

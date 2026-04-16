@@ -1,22 +1,22 @@
 import { useState } from 'react';
-import { User, Copy, Check, Search, Database, Brain, FileCode, ChevronRight, Sparkles } from 'lucide-react';
+import { Copy, Check, Search, Brain, FileCode, ChevronRight, Sparkles, RotateCcw, Pencil } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import ResponseCard from './ResponseCard';
 
-// Force white background on code blocks — oneLight defaults to grey
+// Code theme — transparent bg, wrapper handles the styling
 const codeTheme = {
   ...oneLight,
   'pre[class*="language-"]': {
     ...oneLight['pre[class*="language-"]'],
-    background: '#ffffff',
+    background: 'transparent',
     margin: 0,
   },
   'code[class*="language-"]': {
     ...oneLight['code[class*="language-"]'],
-    background: '#ffffff',
+    background: 'transparent',
   },
 };
 import CommandResult from './CommandResult';
@@ -28,34 +28,19 @@ const STAGE_CONFIG = {
   explain:  { icon: Sparkles, label: 'Generating explanation', color: 'text-amber-500' },
 };
 
-export default function MessageBubble({ message }) {
+export default function MessageBubble({ message, onRetry, onEdit }) {
   const isUser = message.role === 'user';
 
   if (isUser) {
-    return (
-      <div className="flex gap-3 justify-end">
-        <div className="max-w-2xl">
-          <div className="bg-gradient-to-br from-accent to-blue-500 rounded-2xl rounded-br-sm px-5 py-3 shadow-lg shadow-accent/15">
-            <p className="text-sm text-white whitespace-pre-wrap">{message.content}</p>
-          </div>
-        </div>
-        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center shrink-0">
-          <User size={14} className="text-slate-500" />
-        </div>
-      </div>
-    );
+    return <UserMessage content={message.content} onRetry={onRetry} onEdit={onEdit} />;
   }
 
   // Assistant message
   const data = message.data;
 
   return (
-    <div className="flex gap-3">
-      {/* Agent avatar */}
-      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center shrink-0 shadow-sm shadow-purple-500/20">
-        <Database size={14} className="text-white" />
-      </div>
-      <div className="max-w-4xl flex-1 min-w-0">
+    <div>
+      <div className="max-w-4xl">
         {message.error ? (
           <ErrorCard error={message.error} />
         ) : message.streaming ? (
@@ -71,6 +56,84 @@ export default function MessageBubble({ message }) {
         ) : (
           <ResponseCard data={data} />
         )}
+      </div>
+    </div>
+  );
+}
+
+function UserMessage({ content, onRetry, onEdit }) {
+  const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(content);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleSave = () => {
+    const trimmed = editText.trim();
+    if (trimmed && trimmed !== content) {
+      onEdit?.(trimmed);
+    }
+    setEditing(false);
+  };
+
+  const handleCancel = () => {
+    setEditText(content);
+    setEditing(false);
+  };
+
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  if (editing) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-2xl w-full">
+          <textarea
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            className="w-full bg-white border border-[#d0d0d0] rounded-xl px-4 py-3 text-sm text-text-primary resize-none focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
+            rows={Math.max(2, editText.split('\n').length)}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); }
+              if (e.key === 'Escape') handleCancel();
+            }}
+          />
+          <div className="flex items-center justify-end gap-2 mt-2">
+            <button onClick={handleCancel} className="px-3 py-1 text-xs font-medium text-[#888] hover:text-[#555] transition-colors">
+              Cancel
+            </button>
+            <button onClick={handleSave} className="px-3 py-1 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover transition-colors">
+              Send
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex justify-end group">
+      <div className="max-w-2xl">
+        <div className="bg-[#f0f0f0] rounded-2xl rounded-br-sm px-5 py-3">
+          <p className="text-sm text-text-primary whitespace-pre-wrap">{content}</p>
+        </div>
+        {/* Action bar — visible on hover */}
+        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+          <span className="text-[11px] text-[#aaa] mr-1">{time}</span>
+          <button onClick={onRetry} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Retry">
+            <RotateCcw size={13} />
+          </button>
+          <button onClick={() => setEditing(true)} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Edit">
+            <Pencil size={13} />
+          </button>
+          <button onClick={handleCopy} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Copy">
+            {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -170,17 +233,7 @@ function StreamingMarkdown({ markdown, meta, stage }) {
 
 function MarkdownBody({ markdown }) {
   return (
-    <div className="prose prose-sm max-w-none
-      prose-headings:text-text-primary prose-headings:font-bold
-      prose-h2:text-[15px] prose-h2:mt-5 prose-h2:mb-2 prose-h2:pb-1.5 prose-h2:border-b prose-h2:border-border
-      prose-h3:text-sm prose-h3:mt-4 prose-h3:mb-1.5
-      prose-p:text-text-secondary prose-p:leading-relaxed prose-p:my-1.5 prose-p:text-[13px]
-      prose-strong:text-text-primary
-      prose-code:text-red-600 prose-code:bg-red-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-xs prose-code:font-mono prose-code:before:content-none prose-code:after:content-none
-      prose-ul:my-1.5 prose-li:text-text-secondary prose-li:my-0.5 prose-li:text-[13px]
-      prose-ol:my-1.5
-      prose-a:text-accent
-    ">
+    <div className="rtie-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -191,7 +244,7 @@ function MarkdownBody({ markdown }) {
             if (isBlock) {
               return <CodeBlockWithCopy code={codeStr} language={match ? match[1] : 'sql'} />;
             }
-            return <code className={className} {...props}>{children}</code>;
+            return <code {...props}>{children}</code>;
           },
         }}
       >
@@ -211,30 +264,29 @@ function CodeBlockWithCopy({ code, language }) {
   };
 
   return (
-    <div className="relative group my-2.5 not-prose">
-      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderBottom: 'none', borderRadius: '8px 8px 0 0', padding: '4px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: '10px', fontWeight: 700, color: '#93c5fd', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{language}</span>
-        <button
-          onClick={handleCopy}
-          style={{ fontSize: '10px', fontWeight: 500, color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
-        >
-          {copied ? <Check size={11} style={{ color: '#22c55e' }} /> : <Copy size={11} />}
-          {copied ? 'Copied' : 'Copy'}
+    <div className="rtie-codeblock group">
+      {/* Header: language label left, copy icon right */}
+      <div className="rtie-codeblock-header">
+        <span className="rtie-codeblock-lang">{language}</span>
+        <button onClick={handleCopy} className="rtie-codeblock-copy">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
         </button>
       </div>
-      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderTop: 'none', borderRadius: '0 0 8px 8px', overflow: 'hidden' }}>
+      {/* Code body */}
+      <div className="rtie-codeblock-body">
         <SyntaxHighlighter
           style={codeTheme}
           language={language}
-          showLineNumbers
           wrapLongLines
           customStyle={{
             margin: 0,
             borderRadius: 0,
-            fontSize: '12px',
+            fontSize: '13px',
+            fontFamily: "'Söhne Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace",
             border: 'none',
-            background: '#ffffff',
-            padding: '12px',
+            background: 'transparent',
+            padding: '16px',
+            lineHeight: '1.55',
           }}
         >
           {code}

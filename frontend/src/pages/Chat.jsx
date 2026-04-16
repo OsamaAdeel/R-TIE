@@ -35,7 +35,12 @@ export default function Chat({ session, onSend, loading, provider, model, onProv
         ) : (
           <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
             {session.messages.map((msg, i) => (
-              <MessageBubble key={i} message={msg} />
+              <MessageBubble
+                key={i}
+                message={msg}
+                onRetry={msg.role === 'user' ? () => onSend(msg.content) : undefined}
+                onEdit={msg.role === 'user' ? (newText) => onSend(newText) : undefined}
+              />
             ))}
             <div ref={messagesEndRef} />
           </div>
