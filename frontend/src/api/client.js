@@ -38,7 +38,7 @@ export async function sendQuery(query, sessionId, engineerId, provider, model) {
  * @param {function} onDone     - called once with final payload {confidence, validated, ...}
  * @param {function} onError    - called on error
  */
-export async function streamQuery(query, sessionId, engineerId, provider, model, { onMeta, onToken, onDone, onError }) {
+export async function streamQuery(query, sessionId, engineerId, provider, model, { onStage, onMeta, onToken, onDone, onError }) {
   const body = {
     query,
     session_id: sessionId,
@@ -82,7 +82,9 @@ export async function streamQuery(query, sessionId, engineerId, provider, model,
           const data = line.slice(6);
           try {
             const parsed = JSON.parse(data);
-            if (currentEvent === 'meta') {
+            if (currentEvent === 'stage') {
+              onStage?.(parsed);
+            } else if (currentEvent === 'meta') {
               onMeta?.(parsed);
             } else if (currentEvent === 'token') {
               onToken?.(parsed);

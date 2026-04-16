@@ -494,7 +494,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # First: run classify + search + fetch via the graph (stop before explain)
             state = dict(initial_state)
 
-            # Classify
+            # Stage 1: Classify
+            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Understanding your question...'})}\n\n"
             state = await _orchestrator.classify_query(
                 request.query, state, provider=provider, model=model
             )
@@ -503,7 +504,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
                 return
 
-            # Semantic search
+            # Stage 2: Semantic search
+            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Searching across database schemas...'})}\n\n"
             from langchain_openai import OpenAIEmbeddings
             import ssl as _ssl
             import httpx as _httpx
@@ -521,7 +523,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             state["search_results"] = results
             state["schema"] = state.get("schema") or "OFSMDM"
 
-            # Fetch multi logic
+            # Stage 3: Fetch source code
+            fn_names = [r["function_name"] for r in results[:5]] if results else []
+            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': f'Reading source code for {len(fn_names)} functions...', 'functions': fn_names})}\n\n"
             state = await _metadata_interpreter.fetch_multi_logic(state)
 
             # Send metadata event
@@ -534,7 +538,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             }
             yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
 
-            # Stream the LLM explanation
+            # Stage 4: Generate explanation
+            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating detailed explanation...'})}\n\n"
+
             full_markdown = ""
             if state.get("query_type") == "VARIABLE_TRACE":
                 # Run variable resolver + extraction first (fast, non-streaming)

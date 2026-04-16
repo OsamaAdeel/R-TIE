@@ -46,6 +46,13 @@ export default function App() {
       let meta = null;
 
       await streamQuery(text, sid, ENGINEER_ID, provider, model, {
+        onStage: (stageData) => {
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            stage: stageData,
+          }));
+        },
+
         onMeta: (metaData) => {
           meta = metaData;
           updateLastMessage(sid, (msg) => ({
