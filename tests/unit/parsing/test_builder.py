@@ -1,10 +1,10 @@
 """
-Unit tests for src.tools.graph.builder — Tests 7-12.
+Unit tests for src.parsing.builder — Tests 7-12.
 """
 
 import pytest
 
-from src.tools.graph.builder import build_calculation_block
+from src.parsing.builder import build_calculation_block
 
 
 # -----------------------------------------------------------------------

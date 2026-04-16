@@ -32,8 +32,8 @@ from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
-from src.graph.logic_graph import compile_graph
-from src.graph.state import LogicState
+from src.pipeline.logic_graph import compile_graph
+from src.pipeline.state import LogicState
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
@@ -234,7 +234,7 @@ async def lifespan(app: FastAPI):
     graph_available = False
     try:
         import redis as _redis
-        from src.tools.graph.loader import load_all_functions
+        from src.parsing.loader import load_all_functions
         _graph_redis = _redis.Redis(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),

@@ -18,7 +18,7 @@ import CallTree from './CallTree';
 export default function ResponseCard({ data }) {
   if (!data || !data.explanation) {
     return (
-      <div className="bg-bg-secondary border border-border rounded-2xl rounded-bl-sm px-4 py-3">
+      <div className="bg-bg-secondary border-2 border-border rounded-2xl rounded-bl-sm px-5 py-4 shadow-sm">
         <p className="text-sm text-text-secondary">
           {data?.message || 'No explanation available.'}
         </p>
@@ -29,21 +29,23 @@ export default function ResponseCard({ data }) {
   const { explanation, confidence, validated, warnings, badge, object_name, object_type, schema, cache_hit, source_citations, correlation_id } = data;
 
   return (
-    <div className="bg-bg-secondary border border-border rounded-2xl rounded-bl-sm overflow-hidden">
+    <div className="bg-bg-secondary border-2 border-border rounded-2xl rounded-bl-sm overflow-hidden shadow-sm">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+      <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border bg-gradient-to-r from-accent-soft to-bg-secondary">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <Database size={14} className="text-accent shrink-0" />
-          <span className="font-mono text-sm font-semibold text-text-primary truncate">
+          <div className="w-7 h-7 rounded-lg bg-accent/10 flex items-center justify-center">
+            <Database size={14} className="text-accent" />
+          </div>
+          <span className="font-mono text-sm font-bold text-text-primary truncate">
             {schema}.{object_name}
           </span>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-bg-tertiary border border-border text-text-muted">
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-accent-light text-accent uppercase tracking-wide">
             {object_type}
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {cache_hit && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/25">
+            <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-info-light text-info">
               <Zap size={10} className="inline mr-1" />cached
             </span>
           )}
@@ -53,7 +55,7 @@ export default function ResponseCard({ data }) {
       </div>
 
       {/* Summary */}
-      <div className="px-4 py-3 border-b border-border">
+      <div className="px-5 py-4 border-b border-border">
         <p className="text-sm text-text-primary leading-relaxed">{explanation.summary}</p>
       </div>
 
@@ -62,19 +64,20 @@ export default function ResponseCard({ data }) {
         {explanation.step_by_step?.length > 0 && (
           <CollapsibleSection
             title="Step-by-Step Breakdown"
-            icon={<BookOpen size={14} />}
+            icon={<BookOpen size={14} className="text-accent" />}
+            count={explanation.step_by_step.length}
             defaultOpen
           >
-            <div className="space-y-3">
+            <div className="space-y-4">
               {explanation.step_by_step.map((step, i) => (
                 <div key={i} className="flex gap-3">
-                  <div className="w-6 h-6 rounded-full bg-accent/10 border border-accent/25 flex items-center justify-center shrink-0 mt-0.5">
-                    <span className="text-xs font-semibold text-accent">{step.step || i + 1}</span>
+                  <div className="w-7 h-7 rounded-full bg-gradient-to-br from-accent to-blue-500 flex items-center justify-center shrink-0 mt-0.5 shadow-sm">
+                    <span className="text-xs font-bold text-white">{step.step || i + 1}</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-text-primary">{step.description}</p>
+                    <p className="text-sm text-text-primary font-medium">{step.description}</p>
                     {step.lines?.length > 0 && (
-                      <p className="text-xs text-text-muted mt-1">
+                      <p className="text-xs text-text-muted mt-1 font-mono">
                         Lines: {step.lines.join(', ')}
                       </p>
                     )}
@@ -89,22 +92,22 @@ export default function ResponseCard({ data }) {
         )}
 
         {explanation.formulas?.length > 0 && (
-          <CollapsibleSection title="Formulas" icon={<Hash size={14} />}>
+          <CollapsibleSection title="Formulas" icon={<Hash size={14} className="text-purple" />} count={explanation.formulas.length}>
             <div className="space-y-3">
               {explanation.formulas.map((f, i) => (
-                <div key={i} className="bg-bg-tertiary rounded-lg p-3">
-                  <p className="text-sm font-medium text-text-primary mb-1">{f.name}</p>
-                  <code className="text-sm text-accent block bg-bg-primary rounded p-2 my-2 font-mono">
+                <div key={i} className="bg-purple-light rounded-xl p-4 border border-purple/10">
+                  <p className="text-sm font-semibold text-text-primary mb-2">{f.name}</p>
+                  <code className="text-sm text-purple block bg-white rounded-lg p-3 my-2 font-mono border border-purple/10">
                     {f.formula}
                   </code>
                   {f.lines?.length > 0 && (
-                    <p className="text-xs text-text-muted">Lines: {f.lines.join(', ')}</p>
+                    <p className="text-xs text-text-muted font-mono">Lines: {f.lines.join(', ')}</p>
                   )}
                   {f.variables && Object.keys(f.variables).length > 0 && (
                     <div className="mt-2 space-y-1">
                       {Object.entries(f.variables).map(([k, v]) => (
                         <p key={k} className="text-xs text-text-secondary">
-                          <span className="font-mono text-accent">{k}</span> — {v}
+                          <span className="font-mono font-semibold text-purple">{k}</span> — {v}
                         </p>
                       ))}
                     </div>
@@ -116,14 +119,14 @@ export default function ResponseCard({ data }) {
         )}
 
         {explanation.dependencies_used?.length > 0 && (
-          <CollapsibleSection title="Dependencies" icon={<GitBranch size={14} />}>
+          <CollapsibleSection title="Dependencies" icon={<GitBranch size={14} className="text-info" />} count={explanation.dependencies_used.length}>
             <div className="space-y-2">
               {explanation.dependencies_used.map((dep, i) => (
-                <div key={i} className="flex items-start gap-2 bg-bg-tertiary rounded-lg p-2.5">
-                  <span className="font-mono text-xs text-accent font-semibold shrink-0">{dep.name}</span>
-                  <span className="text-xs text-text-secondary">{dep.purpose}</span>
+                <div key={i} className="flex items-start gap-3 bg-info-light rounded-xl p-3 border border-info/10">
+                  <span className="font-mono text-xs text-info font-bold shrink-0 bg-white px-2 py-0.5 rounded-md">{dep.name}</span>
+                  <span className="text-xs text-text-secondary flex-1">{dep.purpose}</span>
                   {dep.called_at_lines?.length > 0 && (
-                    <span className="text-xs text-text-muted ml-auto shrink-0">
+                    <span className="text-xs text-text-muted ml-auto shrink-0 font-mono">
                       L{dep.called_at_lines.join(', L')}
                     </span>
                   )}
@@ -134,11 +137,12 @@ export default function ResponseCard({ data }) {
         )}
 
         {explanation.regulatory_refs?.length > 0 && (
-          <CollapsibleSection title="Regulatory References" icon={<ShieldCheck size={14} />}>
-            <ul className="space-y-1">
+          <CollapsibleSection title="Regulatory References" icon={<ShieldCheck size={14} className="text-success" />}>
+            <ul className="space-y-1.5">
               {explanation.regulatory_refs.map((ref, i) => (
-                <li key={i} className="text-sm text-text-secondary flex items-start gap-2">
-                  <span className="text-accent mt-1">-</span> {ref}
+                <li key={i} className="text-sm text-text-secondary flex items-start gap-2 bg-success-light rounded-lg px-3 py-2 border border-success/10">
+                  <ShieldCheck size={12} className="text-success mt-0.5 shrink-0" />
+                  {ref}
                 </li>
               ))}
             </ul>
@@ -147,10 +151,10 @@ export default function ResponseCard({ data }) {
 
         {warnings?.length > 0 && (
           <CollapsibleSection title={`Warnings (${warnings.length})`} icon={<AlertTriangle size={14} className="text-warning" />}>
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {warnings.map((w, i) => (
-                <div key={i} className="flex items-start gap-2 text-sm text-warning bg-warning/5 rounded-lg px-3 py-2">
-                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                <div key={i} className="flex items-start gap-2 text-sm text-warning bg-warning-light rounded-xl px-4 py-3 border border-warning/15">
+                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
                   <span>{w}</span>
                 </div>
               ))}
@@ -160,9 +164,9 @@ export default function ResponseCard({ data }) {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs text-text-muted">
-        <span>Correlation: {correlation_id}</span>
-        <span>{source_citations?.length || 0} source citations</span>
+      <div className="px-5 py-3 border-t border-border bg-bg-tertiary flex items-center justify-between text-xs text-text-muted">
+        <span className="font-mono">Correlation: {correlation_id}</span>
+        <span className="font-medium">{source_citations?.length || 0} source citations</span>
       </div>
     </div>
   );
@@ -170,9 +174,9 @@ export default function ResponseCard({ data }) {
 
 function ConfidenceBadge({ confidence }) {
   const pct = Math.round((confidence || 0) * 100);
-  const color = pct >= 85 ? 'text-success' : pct >= 70 ? 'text-warning' : 'text-error';
+  const color = pct >= 85 ? 'bg-success-light text-success' : pct >= 70 ? 'bg-warning-light text-warning' : 'bg-error-light text-error';
   return (
-    <span className={clsx('text-xs font-mono font-semibold', color)}>
+    <span className={clsx('text-xs font-mono font-bold px-2.5 py-1 rounded-full', color)}>
       {pct}%
     </span>
   );
@@ -181,34 +185,37 @@ function ConfidenceBadge({ confidence }) {
 function ValidationBadge({ badge, validated }) {
   if (badge === 'VERIFIED' || validated) {
     return (
-      <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-success/10 text-success border border-success/25">
-        <ShieldCheck size={10} /> Verified
+      <span className="flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-success-light text-success">
+        <ShieldCheck size={11} /> Verified
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-warning/10 text-warning border border-warning/25">
-      <ShieldAlert size={10} /> Unverified
+    <span className="flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-warning-light text-warning">
+      <ShieldAlert size={11} /> Unverified
     </span>
   );
 }
 
-function CollapsibleSection({ title, icon, children, defaultOpen = false }) {
+function CollapsibleSection({ title, icon, children, count, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
     <div>
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover/50 transition-colors"
+        className="w-full flex items-center gap-2 px-5 py-3 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-tertiary/50 transition-all duration-200"
       >
         {icon}
-        <span className="font-medium">{title}</span>
+        <span className="font-semibold">{title}</span>
+        {count && (
+          <span className="text-[10px] font-bold bg-bg-tertiary text-text-muted px-1.5 py-0.5 rounded-full">{count}</span>
+        )}
         <span className="ml-auto">
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
       </button>
-      {open && <div className="px-4 pb-3">{children}</div>}
+      {open && <div className="px-5 pb-4">{children}</div>}
     </div>
   );
 }

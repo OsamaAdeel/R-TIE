@@ -6,13 +6,13 @@ All inputs come from Redis.
 
 from typing import Any
 
-from src.tools.graph.store import (
+from src.parsing.store import (
     get_column_index,
     get_function_graph,
     get_full_graph,
     get_raw_source,
 )
-from src.tools.graph.serializer import from_json
+from src.parsing.serializer import from_json
 from src.logger import get_logger
 
 logger = get_logger(__name__, concern="app")

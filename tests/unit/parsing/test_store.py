@@ -1,11 +1,11 @@
 """
-Stub tests for src.tools.graph.store — store/get with mock Redis.
+Stub tests for src.parsing.store — store/get with mock Redis.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.tools.graph.store import (
+from src.parsing.store import (
     store_function_graph,
     get_function_graph,
     store_column_index,
@@ -13,7 +13,7 @@ from src.tools.graph.store import (
     store_raw_source,
     get_raw_source,
 )
-from src.tools.graph.serializer import to_msgpack, from_msgpack
+from src.parsing.serializer import to_msgpack, from_msgpack
 
 
 _SAMPLE_GRAPH = {

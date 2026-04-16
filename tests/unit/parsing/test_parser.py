@@ -1,10 +1,10 @@
 """
-Unit tests for src.tools.graph.parser — Tests 1-6.
+Unit tests for src.parsing.parser — Tests 1-6.
 """
 
 import pytest
 
-from src.tools.graph.parser import (
+from src.parsing.parser import (
     parse_function,
     is_in_block_comment,
     detect_execution_condition,

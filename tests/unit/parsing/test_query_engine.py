@@ -1,12 +1,12 @@
 """
-Unit tests for src.tools.graph.query_engine — Tests 13-17.
+Unit tests for src.parsing.query_engine — Tests 13-17.
 All Redis interactions are mocked.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.tools.graph.query_engine import (
+from src.parsing.query_engine import (
     resolve_aliases,
     resolve_variable_nodes,
     assemble_llm_payload,
@@ -60,7 +60,7 @@ def test_resolve_variable_nodes_returns_correct_node_ids():
 
     # get_column_index reads from Redis via from_msgpack — we patch it
     with patch(
-        "src.tools.graph.query_engine.get_column_index",
+        "src.parsing.query_engine.get_column_index",
         return_value=column_index,
     ):
         result = resolve_variable_nodes("EAD", "OFSMDM", mock_redis)

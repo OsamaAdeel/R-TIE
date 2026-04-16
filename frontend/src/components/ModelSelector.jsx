@@ -4,8 +4,8 @@ import clsx from 'clsx';
 import { fetchModels } from '../api/client';
 
 const PROVIDER_ICONS = {
-  openai: <Sparkles size={12} className="text-success" />,
-  anthropic: <Cpu size={12} className="text-warning" />,
+  openai: <Sparkles size={12} className="text-emerald-500" />,
+  anthropic: <Cpu size={12} className="text-amber-500" />,
 };
 
 const PROVIDER_LABELS = {
@@ -13,7 +13,6 @@ const PROVIDER_LABELS = {
   anthropic: 'Claude',
 };
 
-// Hardcoded fallback so the selector works even when backend is down
 const FALLBACK_DATA = {
   default_provider: 'openai',
   default_model: 'gpt-4o',
@@ -42,7 +41,7 @@ export default function ModelSelector({ provider, model, onProviderChange, onMod
   useEffect(() => {
     fetchModels()
       .then((data) => setModelsData(data))
-      .catch(() => {/* keep fallback */});
+      .catch(() => {});
   }, []);
 
   const providers = modelsData.providers;
@@ -58,21 +57,21 @@ export default function ModelSelector({ provider, model, onProviderChange, onMod
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border hover:border-accent/40 text-xs transition-colors"
+        className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-bg-tertiary border-2 border-border hover:border-accent/30 text-xs transition-all duration-200 hover:shadow-sm"
       >
         {PROVIDER_ICONS[currentProvider]}
-        <span className="text-text-secondary">
+        <span className="text-text-secondary font-medium">
           {PROVIDER_LABELS[currentProvider] || currentProvider}
         </span>
         <span className="text-text-muted">/</span>
-        <span className="text-text-primary font-mono">{currentModel}</span>
+        <span className="text-text-primary font-mono font-semibold">{currentModel}</span>
         <ChevronDown size={12} className="text-text-muted" />
       </button>
 
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 mb-2 w-72 bg-bg-secondary border border-border rounded-xl shadow-2xl z-20 overflow-hidden">
+          <div className="absolute top-full right-0 mt-2 w-72 bg-bg-secondary border-2 border-border rounded-2xl shadow-xl z-20 overflow-hidden">
             {/* Provider tabs */}
             <div className="flex border-b border-border">
               {availableProviders.map((p) => (
@@ -83,10 +82,10 @@ export default function ModelSelector({ provider, model, onProviderChange, onMod
                     onModelChange(providers[p]?.default_model || '');
                   }}
                   className={clsx(
-                    'flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors',
+                    'flex-1 flex items-center justify-center gap-1.5 px-3 py-3 text-xs font-semibold transition-all duration-200',
                     currentProvider === p
-                      ? 'text-accent border-b-2 border-accent bg-accent/5'
-                      : 'text-text-muted hover:text-text-secondary'
+                      ? 'text-accent border-b-2 border-accent bg-accent-soft'
+                      : 'text-text-muted hover:text-text-secondary hover:bg-bg-tertiary'
                   )}
                 >
                   {PROVIDER_ICONS[p]}
@@ -96,7 +95,7 @@ export default function ModelSelector({ provider, model, onProviderChange, onMod
             </div>
 
             {/* Model list */}
-            <div className="p-1.5 max-h-48 overflow-y-auto">
+            <div className="p-2 max-h-48 overflow-y-auto">
               {currentModels.map((m) => (
                 <button
                   key={m}
@@ -105,10 +104,10 @@ export default function ModelSelector({ provider, model, onProviderChange, onMod
                     setOpen(false);
                   }}
                   className={clsx(
-                    'w-full text-left px-3 py-2 rounded-lg text-xs font-mono transition-colors',
+                    'w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-mono transition-all duration-200',
                     currentModel === m
-                      ? 'bg-accent/10 text-accent'
-                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                      ? 'bg-accent-light text-accent font-bold'
+                      : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
                   )}
                 >
                   {m}

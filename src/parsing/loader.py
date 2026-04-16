@@ -8,16 +8,16 @@ import os
 import traceback
 from typing import Any
 
-from src.tools.graph.parser import parse_function
-from src.tools.graph.builder import build_function_graph
-from src.tools.graph.indexer import (
+from src.parsing.parser import parse_function
+from src.parsing.builder import build_function_graph
+from src.parsing.indexer import (
     build_cross_function_graph,
     build_global_column_index,
     resolve_execution_order,
     build_alias_map,
 )
-from src.tools.graph.serializer import calculate_compression_ratio, to_json
-from src.tools.graph.store import (
+from src.parsing.serializer import calculate_compression_ratio, to_json
+from src.parsing.store import (
     store_function_graph,
     get_function_graph,
     store_full_graph,
@@ -234,7 +234,7 @@ def load_all_functions(
         try:
             alias_map = build_alias_map(all_graphs, schema)
             # Store alias map in Redis using the standard key pattern
-            from src.tools.graph.serializer import to_msgpack
+            from src.parsing.serializer import to_msgpack
             alias_key = f"graph:aliases:{schema}"
             redis_client.set(alias_key, to_msgpack(alias_map))
         except Exception:

@@ -1,18 +1,18 @@
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 const customTheme = {
-  ...oneDark,
+  ...oneLight,
   'pre[class*="language-"]': {
-    ...oneDark['pre[class*="language-"]'],
-    background: '#0f1117',
+    ...oneLight['pre[class*="language-"]'],
+    background: '#f8fafc',
     margin: '8px 0',
-    borderRadius: '8px',
+    borderRadius: '12px',
     fontSize: '13px',
-    border: '1px solid #2a2e3f',
+    border: '2px solid #e2e8f0',
   },
   'code[class*="language-"]': {
-    ...oneDark['code[class*="language-"]'],
+    ...oneLight['code[class*="language-"]'],
     background: 'transparent',
   },
 };

@@ -8,7 +8,7 @@ status, and traceability identifiers.
 
 from typing import Any, Dict
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 

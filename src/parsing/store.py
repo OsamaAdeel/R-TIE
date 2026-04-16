@@ -8,7 +8,7 @@ import os
 import logging
 from datetime import datetime, timezone
 
-from src.tools.graph.serializer import to_msgpack, from_msgpack, to_json, from_json
+from src.parsing.serializer import to_msgpack, from_msgpack, to_json, from_json
 from src.logger import get_logger
 
 logger = get_logger(__name__)

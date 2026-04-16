@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id

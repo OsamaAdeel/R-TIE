@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from src.tools.graph.parser import (
+from src.parsing.parser import (
     parse_function,
     extract_table_names,
     extract_column_maps,

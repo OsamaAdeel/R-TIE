@@ -18,7 +18,7 @@ from langchain_openai import OpenAIEmbeddings
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from src.graph.state import LogicState
+from src.pipeline.state import LogicState
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer

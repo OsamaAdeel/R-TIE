@@ -1,10 +1,10 @@
 """
-Stub tests for src.tools.graph.serializer — roundtrip serialisation.
+Stub tests for src.parsing.serializer — roundtrip serialisation.
 """
 
 import pytest
 
-from src.tools.graph.serializer import (
+from src.parsing.serializer import (
     to_json,
     from_json,
     to_msgpack,
