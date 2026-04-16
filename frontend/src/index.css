@@ -60,3 +60,19 @@ pre code {
   font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
   font-size: 13px !important;
 }
+
+/* Override Tailwind prose dark backgrounds on code blocks */
+.prose pre,
+.prose pre[class*="language-"],
+.prose :where(pre):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+  background: #ffffff !important;
+  color: #334155 !important;
+  border: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.prose code::before,
+.prose code::after {
+  content: none !important;
+}

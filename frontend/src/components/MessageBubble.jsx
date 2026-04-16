@@ -128,52 +128,30 @@ function AgentThinking({ stage }) {
 }
 
 function MarkdownResponse({ data }) {
-  const { explanation, confidence, validated, correlation_id, source_citations, functions_analyzed } = data || {};
+  const { explanation, functions_analyzed } = data || {};
   const markdown = explanation?.markdown || '';
 
   return (
-    <div className="bg-bg-secondary border border-border rounded-xl overflow-hidden">
-      {/* Subtle header */}
+    <div>
+      {/* Subtle context line */}
       {functions_analyzed?.length > 0 && (
-        <div className="px-4 py-2 border-b border-border bg-slate-50/50 flex items-center gap-2 text-[11px] text-text-muted">
+        <div className="flex items-center gap-1.5 text-[11px] text-text-muted mb-3">
           <ChevronRight size={10} />
           Investigated {functions_analyzed.join(', ')} systematically
         </div>
       )}
 
-      {/* Markdown body */}
-      <div className="px-5 py-4">
-        <MarkdownBody markdown={markdown} />
-      </div>
-
-      {/* Footer */}
-      <div className="px-4 py-2.5 border-t border-border bg-slate-50/50 flex items-center justify-between text-[11px] text-text-muted">
-        <span className="font-mono opacity-60">ID: {correlation_id?.slice(0, 8)}</span>
-        <div className="flex items-center gap-2">
-          {confidence != null && (
-            <span className={`font-mono font-bold px-2 py-0.5 rounded-full ${
-              Math.round(confidence * 100) >= 85 ? 'bg-green-50 text-green-600' :
-              Math.round(confidence * 100) >= 70 ? 'bg-yellow-50 text-yellow-600' :
-              'bg-red-50 text-red-600'
-            }`}>
-              {Math.round(confidence * 100)}%
-            </span>
-          )}
-          <span className={`font-semibold px-2 py-0.5 rounded-full ${validated ? 'bg-green-50 text-green-600' : 'bg-yellow-50 text-yellow-600'}`}>
-            {validated ? 'Verified' : 'Unverified'}
-          </span>
-          <span>{source_citations?.length || 0} citations</span>
-        </div>
-      </div>
+      {/* Markdown body — no card, no border, just clean text */}
+      <MarkdownBody markdown={markdown} />
     </div>
   );
 }
 
 function StreamingMarkdown({ markdown, meta, stage }) {
   return (
-    <div className="bg-bg-secondary border border-border rounded-xl overflow-hidden">
+    <div>
       {/* Live indicator */}
-      <div className="px-4 py-2 border-b border-border bg-slate-50/50 flex items-center gap-2 text-[11px] text-text-muted">
+      <div className="flex items-center gap-2 text-[11px] text-text-muted mb-3">
         <span className="relative flex h-2 w-2">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
           <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
@@ -183,11 +161,9 @@ function StreamingMarkdown({ markdown, meta, stage }) {
           : 'Generating response...'}
       </div>
 
-      {/* Streaming body */}
-      <div className="px-5 py-4">
-        <MarkdownBody markdown={markdown} />
-        <span className="inline-block w-1.5 h-4 bg-accent animate-pulse rounded-sm ml-0.5 align-text-bottom" />
-      </div>
+      {/* Streaming body — clean, no card */}
+      <MarkdownBody markdown={markdown} />
+      <span className="inline-block w-1.5 h-4 bg-accent animate-pulse rounded-sm ml-0.5 align-text-bottom" />
     </div>
   );
 }
@@ -235,34 +211,35 @@ function CodeBlockWithCopy({ code, language }) {
   };
 
   return (
-    <div className="relative group my-2.5">
-      <div className="flex items-center justify-between bg-white border border-b-0 border-blue-200 rounded-t-lg px-3.5 py-1">
-        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider">{language}</span>
+    <div className="relative group my-2.5 not-prose">
+      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderBottom: 'none', borderRadius: '8px 8px 0 0', padding: '4px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: '10px', fontWeight: 700, color: '#93c5fd', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{language}</span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 text-[10px] font-medium text-slate-400 hover:text-blue-500 transition-colors"
+          style={{ fontSize: '10px', fontWeight: 500, color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
         >
-          {copied ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
+          {copied ? <Check size={11} style={{ color: '#22c55e' }} /> : <Copy size={11} />}
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <SyntaxHighlighter
-        style={codeTheme}
-        language={language}
-        showLineNumbers
-        wrapLongLines
-        customStyle={{
-          margin: 0,
-          borderRadius: '0 0 8px 8px',
-          fontSize: '12px',
-          border: '1px solid #bfdbfe',
-          borderTop: 'none',
-          background: '#ffffff',
-          padding: '12px',
-        }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderTop: 'none', borderRadius: '0 0 8px 8px', overflow: 'hidden' }}>
+        <SyntaxHighlighter
+          style={codeTheme}
+          language={language}
+          showLineNumbers
+          wrapLongLines
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: '12px',
+            border: 'none',
+            background: '#ffffff',
+            padding: '12px',
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
     </div>
   );
 }
