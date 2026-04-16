@@ -6,10 +6,12 @@ import { Database, Sparkles, ArrowRight } from 'lucide-react';
 
 export default function Chat({ session, onSend, loading, provider, model, onProviderChange, onModelChange }) {
   const messagesEndRef = useRef(null);
+  const messageCount = session?.messages?.length || 0;
 
+  // Only auto-scroll when a new message is added, not during streaming updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [session?.messages]);
+  }, [messageCount]);
 
   return (
     <div className="flex-1 flex flex-col h-screen bg-bg-primary">
