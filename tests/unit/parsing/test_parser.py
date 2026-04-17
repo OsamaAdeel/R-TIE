@@ -169,3 +169,165 @@ def test_extract_conditions_and_clause():
     assert any("FIC_MIS_DATE" in c for c in cond_texts)
     assert any("V_LV_CODE" in c for c in cond_texts)
     assert any("V_GL_CODE" in c for c in cond_texts)
+
+
+# -----------------------------------------------------------------------
+# Test: test_update_block_not_split_by_lines
+# -----------------------------------------------------------------------
+
+def test_update_block_not_split_by_lines():
+    """One logical UPDATE with CASE WHEN should be ONE raw_block."""
+    lines = [
+        "BEGIN",
+        "   UPDATE STG_OPS_RISK_DATA OPS",
+        "      SET OPS.N_ANNUAL_GROSS_INCOME =",
+        "         CASE",
+        "            WHEN OPS.V_LOB_CODE = 'CBA'",
+        "            THEN NVL(OPS.N_ANNUAL_GROSS_INCOME + TOT1 + CBA_DEDUCTION, 0)",
+        "            WHEN OPS.V_LOB_CODE = 'RBA'",
+        "            THEN NVL(OPS.N_ANNUAL_GROSS_INCOME, 0) + LN_DEDUCITON_RATIO_1",
+        "         END",
+        "    WHERE OPS.FIC_MIS_DATE = CQD",
+        "      AND OPS.V_LOB_CODE IN ('CBA', 'RBA')",
+        "      AND OPS.V_LV_CODE <> 'ABLIBG';",
+        "   COMMIT;",
+        "END;",
+    ]
+    result = parse_function(lines, "TEST_FN")
+    update_blocks = [b for b in result["raw_blocks"] if b["block_type"] == "UPDATE"]
+    assert len(update_blocks) == 1, f"Expected 1 UPDATE block, got {len(update_blocks)}"
+
+
+# -----------------------------------------------------------------------
+# Test: test_assignment_detected_as_scalar_compute
+# -----------------------------------------------------------------------
+
+def test_assignment_detected_as_scalar_compute():
+    """PL/SQL := assignment should be detected as SCALAR_COMPUTE."""
+    lines = [
+        "BEGIN",
+        "   TOT1 := LN_TOTAL_DEDUCT + (-1 * LN_DEDUCITON_RATIO_1);",
+        "END;",
+    ]
+    result = parse_function(lines, "TEST_FN")
+    sc_blocks = [b for b in result["raw_blocks"] if b["block_type"] == "SCALAR_COMPUTE"]
+    assert len(sc_blocks) >= 1
+    assert sc_blocks[0].get("output_variable") == "TOT1"
+
+
+# -----------------------------------------------------------------------
+# Test: test_select_into_detected_as_scalar_compute
+# -----------------------------------------------------------------------
+
+def test_select_into_detected_as_select_into():
+    """SELECT INTO should be detected as SELECT_INTO block type."""
+    lines = [
+        "BEGIN",
+        "   SELECT ROUND(SUM(N_AMOUNT_LCY), 2)",
+        "     INTO LN_TOTAL_DEDUCT",
+        "     FROM STG_GL_DATA GLD",
+        "    WHERE GLD.V_GL_CODE = 'DBS';",
+        "END;",
+    ]
+    result = parse_function(lines, "TEST_FN")
+    si_blocks = [b for b in result["raw_blocks"] if b["block_type"] == "SELECT_INTO"]
+    assert len(si_blocks) >= 1
+
+
+# -----------------------------------------------------------------------
+# Test: test_visited_lines_prevents_duplicate_blocks
+# -----------------------------------------------------------------------
+
+def test_visited_lines_prevents_duplicate_blocks():
+    """Scanner should not create duplicate blocks for the same lines."""
+    lines = [
+        "BEGIN",
+        "   UPDATE STG_OPS_RISK_DATA OPS",
+        "      SET OPS.N_ANNUAL_GROSS_INCOME = 100",
+        "    WHERE OPS.FIC_MIS_DATE = CQD;",
+        "   COMMIT;",
+        "END;",
+    ]
+    result = parse_function(lines, "TEST_FN")
+    update_blocks = [b for b in result["raw_blocks"] if b["block_type"] == "UPDATE"]
+    assert len(update_blocks) == 1, f"Expected exactly 1 UPDATE, got {len(update_blocks)}"
+
+
+# -----------------------------------------------------------------------
+# Test: test_commented_line_stripped
+# -----------------------------------------------------------------------
+
+def test_commented_line_stripped():
+    """Single-line -- comment should be cleaned to empty string."""
+    from src.parsing.parser import clean_source_lines
+    lines = [
+        "  WHEN OPS.V_LOB_CODE = 'CBA'",
+        "  --  WHEN OPS.V_LOB_CODE = 'CFI' THEN NVL(...) - LN_RATIO",
+        "  WHEN OPS.V_LOB_CODE = 'RBA'",
+    ]
+    cleaned, _ = clean_source_lines(lines)
+    assert cleaned[1].strip() == "", f"Expected empty, got: '{cleaned[1]}'"
+    assert "CBA" in cleaned[0]
+    assert "RBA" in cleaned[2]
+
+
+# -----------------------------------------------------------------------
+# Test: test_inline_comment_stripped
+# -----------------------------------------------------------------------
+
+def test_inline_comment_stripped():
+    """Inline -- comment should be truncated."""
+    from src.parsing.parser import clean_source_lines
+    lines = ["  WHEN V_LOB = 'CBA' -- this is a comment"]
+    cleaned, _ = clean_source_lines(lines)
+    assert "CBA" in cleaned[0]
+    assert "comment" not in cleaned[0]
+
+
+# -----------------------------------------------------------------------
+# Test: test_block_comment_stripped
+# -----------------------------------------------------------------------
+
+def test_block_comment_stripped():
+    """Lines inside /* */ should be cleaned to empty strings."""
+    from src.parsing.parser import clean_source_lines
+    lines = [
+        "active line 1",
+        "active line 2",
+        "/* start of comment",
+        "inside comment",
+        "still inside",
+        "end of comment */",
+        "active line 3",
+    ]
+    cleaned, ranges = clean_source_lines(lines)
+    assert cleaned[0].strip() != ""
+    assert cleaned[1].strip() != ""
+    assert cleaned[3].strip() == "", f"Line 3 should be empty, got: '{cleaned[3]}'"
+    assert cleaned[4].strip() == "", f"Line 4 should be empty, got: '{cleaned[4]}'"
+    assert cleaned[6].strip() != ""
+
+
+# -----------------------------------------------------------------------
+# Test: test_update_with_case_is_one_block
+# -----------------------------------------------------------------------
+
+def test_update_with_case_is_one_block():
+    """UPDATE with CASE WHEN spanning 15 lines should be ONE block."""
+    from src.parsing.parser import clean_source_lines, find_block_end
+    lines = [
+        "   UPDATE STG_OPS_RISK_DATA OPS",
+        "      SET OPS.N_ANNUAL_GROSS_INCOME =",
+        "         CASE",
+        "            WHEN OPS.V_LOB_CODE = 'CBA'",
+        "            THEN NVL(OPS.N_ANNUAL_GROSS_INCOME + TOT1 + CBA_DEDUCTION, 0)",
+        "            WHEN OPS.V_LOB_CODE = 'RBA'",
+        "            THEN NVL(OPS.N_ANNUAL_GROSS_INCOME, 0) + LN_DEDUCITON_RATIO_1",
+        "         END",
+        "    WHERE OPS.FIC_MIS_DATE = CQD",
+        "      AND OPS.V_LOB_CODE IN ('CBA', 'RBA')",
+        "      AND OPS.V_LV_CODE <> 'ABLIBG';",
+    ]
+    cleaned, _ = clean_source_lines(lines)
+    end = find_block_end(cleaned, 0, "UPDATE")
+    assert end == 10, f"Expected end at line 10, got {end}"

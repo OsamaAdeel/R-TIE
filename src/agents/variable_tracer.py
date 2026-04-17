@@ -71,35 +71,52 @@ Respond with ONLY a valid JSON object — no markdown, no extra text:
 
 
 VARIABLE_TRACE_PROMPT = """\
-You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
+You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
 
 You will receive a **variable transformation chain** — a compact extract showing
 every line across multiple PL/SQL functions where a specific target variable
 (or any of its aliases) is read, written, or transformed.
 
 Your task is to produce a **rich, detailed markdown explanation** of the complete
-calculation lifecycle of the target variable.
+calculation lifecycle of the target variable, focused on BUSINESS MEANING and DATA FLOW — not syntax.
 
-FORMAT RULES:
+RULES:
+1. Never explain what SQL syntax does (do not explain NVL, CASE, TO_NUMBER, DECODE).
+   Instead explain what the VALUE represents and why it changes.
+
+2. For every step, answer these questions:
+   - What is the value at this point?
+   - Where did it come from (which table, which column)?
+   - Why is it being changed?
+   - What does the result mean in business terms?
+
+3. For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
+   - Explain the formula in plain English
+   - Name the source tables and what data they contribute
+   - Show the arithmetic clearly: e.g. "DBS GL balance × deduction ratio"
+
+4. Always include execution conditions prominently:
+   "This entire function ONLY runs when the reporting month is December."
+   Never bury this at the end — state it first for the function.
+
+5. For steps where a value is copied unchanged between tables:
+   State clearly: "The value is passed through without modification."
+
+6. Cite every claim with function name and line numbers.
+
+7. End with a SHORT SUMMARY (4 sentences max) that states:
+   - Where the value originates
+   - What transforms it
+   - What the final value represents
+   - Any important conditions (e.g. December-only)
+
+FORMAT:
 - Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)
-- Use ### for each function that touches the variable.
-- For each step, use a short descriptive header like ### Step 1: Initial Read (Line 43)
-  — put the line number IN the header itself, do NOT repeat it separately below.
-- Use `inline code` for variable names, table names, column names.
-- Include ```sql code blocks with the actual PL/SQL code from the chain.
-- Do NOT add a separate [Line N] citation below a code block if the line number
-  is already in the section header. Never repeat the same line reference twice.
-- Use **bold** for statuses, key findings, and important values.
-- Break down formulas with variable explanations.
-- Show the data flow: origin → transformations → destination.
-- If logic is commented out, mark it: **Commented Out — Deprecated**
-- Be thorough — engineers need the full picture.
-
-STRICT RULES:
-- ONLY reference lines that appear in the provided chain.
-- NEVER repeat information. Each line number should appear exactly once.
-- If a step is unclear, FLAG it rather than guessing.
-- NEVER hallucinate logic not in the source.
+- Use ### for each function/step
+- Include ```sql code blocks with the relevant PL/SQL
+- Put line references in section headers: ### Step 1: Initial Insert (Lines 203-223)
+- Do NOT repeat line references separately below code blocks
+- Show the data flow: origin → transformations → destination
 """
 
 

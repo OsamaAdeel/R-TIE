@@ -82,34 +82,44 @@ Output JSON schema:
 """
 
 
-SEMANTIC_EXPLANATION_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
-You are answering a user's question by analyzing MULTIPLE PL/SQL functions found via semantic search.
+SEMANTIC_EXPLANATION_PROMPT = """You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
+You receive source code from one or more PL/SQL functions and must explain the BUSINESS MEANING and DATA FLOW — not the syntax.
 
-You will receive:
-1. The user's original question.
-2. Multiple functions with their source code, descriptions, and relevance scores.
+RULES:
+1. Never explain what SQL syntax does (do not explain NVL, CASE, TO_NUMBER, DECODE).
+   Instead explain what the VALUE represents and why it changes.
 
-Your task is to produce a **rich, detailed markdown explanation** that a database engineer would find useful.
+2. For every step, answer these questions:
+   - What is the value at this point?
+   - Where did it come from (which table, which column)?
+   - Why is it being changed?
+   - What does the result mean in business terms?
 
-FORMAT RULES:
-- Use ## for the main topic, ### for each function or section.
-- For each operation, use a descriptive header that includes the line reference:
-  ### INSERT into STG_PRODUCT_PROCESSOR (Lines 157-520)
-  Do NOT add a separate [Lines ...] citation below — the header IS the citation.
-- Use `inline code` for function names, table names, column names, variable names.
-- Include ```sql code blocks with relevant PL/SQL snippets from the source.
-- Use **bold** for important concepts, statuses, and key findings.
-- If logic is commented out, state **Commented Out — Deprecated** and show the SQL.
-- Explain formulas with variable breakdowns.
-- If a function is not relevant, say so briefly and move on.
-- Explain the data flow across functions if applicable.
-- Be thorough — engineers need the full picture.
+3. For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
+   - Explain the formula in plain English
+   - Name the source tables and what data they contribute
+   - Show the arithmetic clearly: e.g. "DBS GL balance × deduction ratio"
 
-STRICT RULES:
-- ONLY reference code that exists in the provided sources.
-- NEVER repeat the same line reference twice. Each line citation appears once (in the header).
-- NEVER hallucinate logic, functions, or formulas not in the source.
-- If something is unclear, flag it explicitly.
+4. Always include execution conditions prominently:
+   "This entire function ONLY runs when the reporting month is December."
+   Never bury this at the end — state it first for the function.
+
+5. For steps where a value is copied unchanged between tables:
+   State clearly: "The value is passed through without modification."
+
+6. Cite every claim with function name and line numbers.
+
+7. End with a SHORT SUMMARY (4 sentences max) that states:
+   - Where the value originates
+   - What transforms it
+   - What the final value represents
+   - Any important conditions (e.g. December-only)
+
+FORMAT:
+- Use ## for main heading, ### for each function/step
+- Include ```sql code blocks with the relevant PL/SQL
+- Put line references in section headers: ### Step 1: Initial Insert (Lines 203-223)
+- Do NOT repeat line references separately below code blocks
 """
 
 
@@ -274,26 +284,39 @@ class LogicExplainer:
 
         llm = self._get_llm(provider, model)
 
-        # Format all function sources
-        function_sections = []
-        for fn_name, fn_data in multi_source.items():
-            source_text = self._format_source_code(fn_data.get("source_code", []))
-            section = (
-                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
-                f"Description: {fn_data.get('description', 'N/A')}\n"
-                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
-                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
-                f"Source Code:\n{source_text}\n"
+        # Check if graph pipeline produced a structured payload
+        llm_payload = state.get("llm_payload")
+        if llm_payload and state.get("graph_available"):
+            logger.info("explain_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
+            user_prompt = (
+                f"User Question: {query}\n\n"
+                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}\n\n"
+                "Answer the user's question with a detailed markdown explanation. "
+                "Cite specific function names and line numbers for every claim."
             )
-            function_sections.append(section)
+        else:
+            logger.info("explain_semantic: falling back to raw source")
+            # Format all function sources
+            function_sections = []
+            for fn_name, fn_data in multi_source.items():
+                source_text = self._format_source_code(fn_data.get("source_code", []))
+                section = (
+                    f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                    f"Description: {fn_data.get('description', 'N/A')}\n"
+                    f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                    f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                    f"Source Code:\n{source_text}\n"
+                )
+                function_sections.append(section)
 
-        user_prompt = (
-            f"User Question: {query}\n\n"
-            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
-            + "\n".join(function_sections)
-            + "\n\nAnswer the user's question with a detailed markdown explanation. "
-            "Cite specific function names and line numbers for every claim."
-        )
+            user_prompt = (
+                f"User Question: {query}\n\n"
+                f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+                + "\n".join(function_sections)
+                + "\n\nAnswer the user's question with a detailed markdown explanation. "
+                "Cite specific function names and line numbers for every claim."
+            )
 
         # Use non-JSON mode for markdown responses
         llm = create_llm(
@@ -345,27 +368,40 @@ class LogicExplainer:
             String chunks of the markdown response.
         """
         query = state["raw_query"]
-        multi_source = state.get("multi_source", {})
 
-        function_sections = []
-        for fn_name, fn_data in multi_source.items():
-            source_text = self._format_source_code(fn_data.get("source_code", []))
-            section = (
-                f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
-                f"Description: {fn_data.get('description', 'N/A')}\n"
-                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
-                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
-                f"Source Code:\n{source_text}\n"
+        # Check if graph pipeline produced a structured payload
+        llm_payload = state.get("llm_payload")
+        if llm_payload and state.get("graph_available"):
+            logger.info("stream_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
+            user_prompt = (
+                f"User Question: {query}\n\n"
+                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}\n\n"
+                "Answer the user's question with a detailed markdown explanation. "
+                "Cite specific function names and line numbers for every claim."
             )
-            function_sections.append(section)
+        else:
+            logger.info("stream_semantic: falling back to raw source")
+            multi_source = state.get("multi_source", {})
+            function_sections = []
+            for fn_name, fn_data in multi_source.items():
+                source_text = self._format_source_code(fn_data.get("source_code", []))
+                section = (
+                    f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                    f"Description: {fn_data.get('description', 'N/A')}\n"
+                    f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                    f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                    f"Source Code:\n{source_text}\n"
+                )
+                function_sections.append(section)
 
-        user_prompt = (
-            f"User Question: {query}\n\n"
-            f"The following {len(multi_source)} functions were found via semantic search:\n\n"
-            + "\n".join(function_sections)
-            + "\n\nAnswer the user's question with a detailed markdown explanation. "
-            "Cite specific function names and line numbers for every claim."
-        )
+            user_prompt = (
+                f"User Question: {query}\n\n"
+                f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+                + "\n".join(function_sections)
+                + "\n\nAnswer the user's question with a detailed markdown explanation. "
+                "Cite specific function names and line numbers for every claim."
+            )
 
         llm = create_llm(
             provider=provider,

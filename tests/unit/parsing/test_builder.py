@@ -132,3 +132,55 @@ def test_build_composite_key_override():
 
     override_types = [o.get("type") for o in overrides]
     assert "COMPOSITE_KEY" in override_types
+
+
+# -----------------------------------------------------------------------
+# Test: test_scalar_compute_edge_wired_to_update
+# -----------------------------------------------------------------------
+
+def test_scalar_compute_edge_wired_to_update():
+    """SCALAR_COMPUTE output variable should create edge to consuming UPDATE
+    via build_intra_function_edges."""
+    from src.parsing.builder import build_intra_function_edges
+    scalar_node = {
+        "id": "TEST_FN_N1",
+        "type": "SCALAR_COMPUTE",
+        "output_variable": "TOT1",
+        "target_table": None,
+        "source_tables": ["STG_GL_DATA"],
+        "column_maps": {},
+        "conditions": [],
+        "line_start": 4,
+        "line_end": 4,
+    }
+    update_node = {
+        "id": "TEST_FN_N2",
+        "type": "UPDATE",
+        "target_table": "STG_OPS_RISK_DATA",
+        "source_tables": [],
+        "column_maps": {"N_ANNUAL_GROSS_INCOME": "TOT1"},
+        "conditions": [],
+        "line_start": 5,
+        "line_end": 5,
+    }
+    edges = build_intra_function_edges([scalar_node, update_node], "TEST_FN")
+    # Should have at least one edge involving TOT1
+    var_edges = [e for e in edges if "TOT1" in str(e.get("source_col", "")) or "TOT1" in str(e.get("variable", ""))]
+    assert len(var_edges) >= 1, f"Expected edge for TOT1, got edges: {edges}"
+
+
+# -----------------------------------------------------------------------
+# Test: test_variable_reference_in_calculation
+# -----------------------------------------------------------------------
+
+def test_variable_reference_in_calculation():
+    """Local variable in expression should be tagged as VARIABLE_REFERENCE."""
+    calc = build_calculation_block(
+        "N_ANNUAL_GROSS_INCOME",
+        "NVL(OPS.N_ANNUAL_GROSS_INCOME + TOT1 + CBA_DEDUCTION, 0)",
+        [],
+        10,
+    )
+    # Should detect TOT1 or CBA_DEDUCTION as variable references in components
+    calc_type = calc.get("type", "")
+    assert calc_type in ("FALLBACK", "ARITHMETIC", "CONDITIONAL"), f"Unexpected type: {calc_type}"

@@ -113,8 +113,16 @@ def resolve_variable_nodes(
     schema: str,
     redis_client: Any,
 ) -> list[str]:
-    """Resolve a variable/column name to node IDs via alias expansion and
-    column-index lookup.
+    """Resolve a variable/column name to node IDs via alias expansion,
+    column-index lookup, and cross-function edge traversal.
+
+    After finding direct matches in the column index, the full graph is
+    checked for ALL edges — if any edge's ``from_node`` or ``to_node`` is
+    in the direct-match set, the OTHER end of that edge is added to the
+    result.  Additionally, function-name prefix matching is used: if a
+    direct match belongs to ``FN_A`` and an edge connects ``FN_A:node_Y``
+    to ``FN_B:node_Z``, then ``FN_B:node_Z`` is added when ``FN_B`` has
+    the target variable in its column index.
 
     Returns a deduplicated list of node IDs.
     """
@@ -126,7 +134,7 @@ def resolve_variable_nodes(
         return []
 
     seen: set[str] = set()
-    result: list[str] = []
+    direct_nodes: list[str] = []
 
     for alias in aliases:
         alias_upper = alias.upper()
@@ -134,7 +142,47 @@ def resolve_variable_nodes(
         for nid in node_ids:
             if nid not in seen:
                 seen.add(nid)
-                result.append(nid)
+                direct_nodes.append(nid)
+
+    logger.debug("resolve_variable_nodes: aliases=%s, direct_matches=%s", aliases, direct_nodes)
+
+    result: list[str] = list(direct_nodes)
+
+    # --- Cross-function traversal (column-aware) ---
+    # Only follow cross-function edges whose matching_columns overlap
+    # with the target variable's aliases.  This prevents pulling in
+    # every node from functions that merely share a table.
+    if result:
+        full_graph = get_full_graph(redis_client, schema)
+        if full_graph is not None:
+            edges = full_graph.get("edges", [])
+            direct_ids: set[str] = set(result)
+            for nid in list(direct_ids):
+                direct_ids.add(nid.split(":", 1)[1] if ":" in nid else nid)
+
+            alias_set = {a.upper() for a in aliases}
+            alias_set.add(target_variable.strip().upper())
+
+            for edge in edges:
+                from_node = edge.get("from_node", edge.get("from", ""))
+                to_node = edge.get("to_node", edge.get("to", ""))
+
+                # Only follow edges whose matching_columns overlap the aliases
+                matching_cols = edge.get("matching_columns", [])
+                matching_upper = {c.upper() for c in matching_cols} if matching_cols else set()
+                if not (matching_upper & alias_set):
+                    continue
+
+                from_matches = from_node in direct_ids
+                to_matches = to_node in direct_ids
+                if from_matches and to_node not in seen:
+                    seen.add(to_node)
+                    result.append(to_node)
+                if to_matches and from_node not in seen:
+                    seen.add(from_node)
+                    result.append(from_node)
+
+    logger.debug("resolve_variable_nodes: after edge walk, total=%d", len(result))
 
     return result
 
@@ -228,10 +276,20 @@ def fetch_nodes_by_ids(
     node_ids: list[str],
     schema: str,
     redis_client: Any,
+    include_upstream: bool = True,
 ) -> list[dict]:
     """Fetch node dicts for each ID, grouped by function.
 
-    Returns a list of ``{"function": fn_name, "node": node_dict}``.
+    Returns a list of
+    ``{"function": fn_name, "node": node_dict, "execution_condition": dict|None}``.
+    The ``execution_condition`` is the function-level execution condition
+    (e.g. IF/CASE guard) stored at the top of the function graph.
+
+    When *include_upstream* is True, the full graph is inspected for edges
+    whose ``to_node`` matches one of the requested *node_ids*.  If the
+    ``from_node`` of such an edge corresponds to a ``SCALAR_COMPUTE`` node,
+    that node is fetched and included in the result with
+    ``"is_upstream": True``.
     """
     # Group node IDs by function name
     fn_groups: dict[str, list[str]] = {}
@@ -249,10 +307,113 @@ def fetch_nodes_by_ids(
             logger.warning("No graph for function %s in schema %s", fn_name, schema)
             continue
 
+        # Extract function-level execution_condition (may be None)
+        exec_cond = graph.get("execution_condition", None)
+
         id_set = set(ids_in_fn)
         for node in graph.get("nodes", []):
             if node.get("id") in id_set:
-                results.append({"function": fn_name, "node": node})
+                results.append({
+                    "function": fn_name,
+                    "node": node,
+                    "execution_condition": exec_cond,
+                })
+
+    # --- Upstream SCALAR_COMPUTE discovery ---
+    if include_upstream:
+        # Phase 1: edge-based discovery (original logic)
+        full_graph = get_full_graph(redis_client, schema)
+        if full_graph is not None:
+            requested_bare: set[str] = set()
+            for nid in node_ids:
+                requested_bare.add(nid.split(":", 1)[1] if ":" in nid else nid)
+
+            upstream_ids: set[str] = set()
+            for edge in full_graph.get("edges", []):
+                to_n = edge.get("to_node", edge.get("to", ""))
+                from_n = edge.get("from_node", edge.get("from", ""))
+                if to_n in requested_bare and from_n not in requested_bare:
+                    upstream_ids.add(from_n)
+
+            if upstream_ids:
+                up_fn_groups: dict[str, list[str]] = {}
+                for uid in upstream_ids:
+                    fn_name = _extract_function_name(uid)
+                    up_fn_groups.setdefault(fn_name, []).append(uid)
+
+                for fn_name, ids_in_fn in up_fn_groups.items():
+                    graph = get_function_graph(redis_client, schema, fn_name)
+                    if graph is None:
+                        continue
+                    exec_cond = graph.get("execution_condition", None)
+                    id_set = set(ids_in_fn)
+                    for node in graph.get("nodes", []):
+                        if node.get("id") in id_set and node.get("type", "").upper() == "SCALAR_COMPUTE":
+                            results.append({
+                                "function": fn_name,
+                                "node": node,
+                                "execution_condition": exec_cond,
+                                "is_upstream": True,
+                            })
+
+        # Phase 2: text-matching discovery — finds SCALAR_COMPUTE nodes
+        # whose output_variable appears in the column_maps or calculations
+        # of the main (non-upstream) nodes.  Runs iteratively to catch
+        # transitive references (e.g. TOT1 references LN_TOTAL_DEDUCT).
+        found_upstream_ids: set[str] = {
+            entry["node"]["id"] for entry in results if entry.get("is_upstream")
+        }
+        main_ids: set[str] = {
+            nid.split(":", 1)[1] if ":" in nid else nid for nid in node_ids
+        }
+
+        for fn_name in list(fn_groups.keys()):
+            graph = get_function_graph(redis_client, schema, fn_name)
+            if graph is None:
+                continue
+
+            # Collect all SCALAR_COMPUTE nodes in this function
+            sc_nodes: list[dict] = []
+            for node in graph.get("nodes", []):
+                nid = node.get("id", "")
+                if (node.get("type", "").upper() == "SCALAR_COMPUTE"
+                        and nid not in found_upstream_ids
+                        and nid not in main_ids):
+                    sc_nodes.append(node)
+
+            if not sc_nodes:
+                continue
+
+            # Build reference text from main + already-found upstream nodes
+            ref_text = ""
+            for entry in results:
+                n = entry.get("node", entry)
+                if entry.get("function") == fn_name:
+                    ref_text += str(n.get("column_maps", {})).upper() + " "
+                    for calc in (n.get("calculation") or []):
+                        if isinstance(calc, dict):
+                            ref_text += (calc.get("expression", "") + " ").upper()
+
+            exec_cond = graph.get("execution_condition")
+            changed = True
+            while changed:
+                changed = False
+                for node in list(sc_nodes):
+                    out_var = (node.get("output_variable") or "").upper()
+                    if out_var and out_var in ref_text:
+                        results.append({
+                            "function": fn_name,
+                            "node": node,
+                            "execution_condition": exec_cond,
+                            "is_upstream": True,
+                        })
+                        found_upstream_ids.add(node["id"])
+                        sc_nodes.remove(node)
+                        # Add this node's expression to ref_text for transitive lookup
+                        for calc in (node.get("calculation") or []):
+                            if isinstance(calc, dict):
+                                ref_text += (calc.get("expression", "") + " ").upper()
+                        changed = True
 
     return results
 
@@ -266,25 +427,72 @@ def fetch_relevant_edges(
     schema: str,
     redis_client: Any,
 ) -> list[dict]:
-    """Return edges from the full graph where either endpoint is in *node_ids*."""
-    graph = get_full_graph(redis_client, schema)
-    if graph is None:
-        logger.warning("No full graph found for schema %s", schema)
-        return []
+    """Return ALL edges (intra-function and cross-function) from the full
+    graph where either ``from_node`` or ``to_node`` is in *node_ids*.
 
+    Matching is done both by exact node ID and by function-name prefix so
+    that cross-function edges are not missed when only one end of the edge
+    was resolved.
+
+    Both the full merged graph and per-function graphs are consulted so
+    that intra-function edges are never missed.
+    """
     # Normalise IDs: strip "FN:" prefix
     normalised: set[str] = set()
     for nid in node_ids:
         normalised.add(nid.split(":", 1)[1] if ":" in nid else nid)
 
-    relevant: list[dict] = []
-    for edge in graph.get("edges", []):
-        from_node = edge.get("from", "")
-        to_node = edge.get("to", "")
-        if from_node in normalised or to_node in normalised:
-            relevant.append(edge)
+    # Collect function-name prefixes from the node IDs
+    fn_prefixes: set[str] = set()
+    for nid in node_ids:
+        fn = nid.split(":")[0]
+        fn_prefixes.add(fn)
 
-    return relevant
+    node_id_set = normalised  # alias for clarity in matching
+
+    seen_edges: set[tuple[str, str]] = set()
+    matching: list[dict] = []
+
+    def _collect(edges: list[dict]) -> None:
+        for edge in edges:
+            from_n = edge.get("from_node", edge.get("from", ""))
+            to_n = edge.get("to_node", edge.get("to", ""))
+            edge_key = (from_n, to_n)
+            if edge_key in seen_edges:
+                continue
+            # Exact match
+            if from_n in node_id_set or to_n in node_id_set:
+                seen_edges.add(edge_key)
+                matching.append(edge)
+                continue
+            # Function-level match
+            for nid in node_ids:
+                fn = nid.split(":")[0]
+                if fn in from_n or fn in to_n:
+                    seen_edges.add(edge_key)
+                    matching.append(edge)
+                    break
+
+    # 1. Full (merged) graph — contains cross-function edges
+    full_graph = get_full_graph(redis_client, schema)
+    if full_graph is not None:
+        _collect(full_graph.get("edges", []))
+    else:
+        logger.warning("No full graph found for schema %s", schema)
+
+    # 2. Per-function graphs — may contain intra-function edges not in full graph
+    fn_names: set[str] = set()
+    for nid in normalised:
+        fn_names.add(_extract_function_name(nid))
+
+    for fn_name in fn_names:
+        fn_graph = get_function_graph(redis_client, schema, fn_name)
+        if fn_graph is not None:
+            _collect(fn_graph.get("edges", []))
+
+    logger.debug("fetch_relevant_edges: %d edges found for %d nodes", len(matching), len(node_ids))
+
+    return matching
 
 
 # ---------------------------------------------------------------------------
@@ -297,17 +505,65 @@ def determine_execution_order(
 ) -> list[dict]:
     """Order *nodes* by data-flow using a topological sort on *edges*.
 
+    Nodes from functions earlier in the dependency chain appear first.
+    Cross-function edges are used to determine function-level ordering;
+    within a function nodes are further sorted by ``line_start``.
+
     Falls back to ordering by ``line_start`` when no edges connect the nodes.
     Returns a list of node dicts in execution order.
     """
-    # Build adjacency from the filtered edge set
+    # Build node map keyed by bare node ID
     node_map: dict[str, dict] = {}
     for entry in nodes:
         node = entry.get("node", entry)
         nid = node.get("id", "")
         node_map[nid] = entry
 
-    # Kahn's algorithm
+    # --- Determine function-level ordering from edges ---
+    # Collect which function each node belongs to
+    node_fn: dict[str, str] = {}
+    for nid, entry in node_map.items():
+        fn = entry.get("function", _extract_function_name(nid))
+        node_fn[nid] = fn
+
+    # Build a function-level DAG from edges (cross-function edges imply
+    # the source function must execute before the target function)
+    fn_adj: dict[str, set[str]] = {}
+    fn_in: dict[str, int] = {}
+    all_fns: set[str] = set(node_fn.values())
+    for fn in all_fns:
+        fn_adj.setdefault(fn, set())
+        fn_in.setdefault(fn, 0)
+
+    for edge in edges:
+        src = edge.get("from", "")
+        dst = edge.get("to", "")
+        src_fn = node_fn.get(src, _extract_function_name(src))
+        dst_fn = node_fn.get(dst, _extract_function_name(dst))
+        if src_fn != dst_fn and dst_fn not in fn_adj.get(src_fn, set()):
+            fn_adj.setdefault(src_fn, set()).add(dst_fn)
+            fn_in[dst_fn] = fn_in.get(dst_fn, 0) + 1
+
+    # Topological sort of functions (Kahn's)
+    fn_queue = sorted([f for f, d in fn_in.items() if d == 0])
+    fn_order: list[str] = []
+    while fn_queue:
+        fn = fn_queue.pop(0)
+        fn_order.append(fn)
+        for neighbour in sorted(fn_adj.get(fn, set())):
+            fn_in[neighbour] -= 1
+            if fn_in[neighbour] == 0:
+                fn_queue.append(neighbour)
+        fn_queue.sort()
+
+    # Append any functions missed (cycles / disconnected)
+    for fn in sorted(all_fns):
+        if fn not in fn_order:
+            fn_order.append(fn)
+
+    fn_rank: dict[str, int] = {fn: idx for idx, fn in enumerate(fn_order)}
+
+    # --- Kahn's algorithm on the node-level graph ---
     in_degree: dict[str, int] = {nid: 0 for nid in node_map}
     adj: dict[str, list[str]] = {nid: [] for nid in node_map}
 
@@ -318,31 +574,31 @@ def determine_execution_order(
             adj[src].append(dst)
             in_degree[dst] = in_degree.get(dst, 0) + 1
 
-    # Seed the queue with zero in-degree nodes, sorted by line_start for
-    # deterministic ordering
-    def _line_start(nid: str) -> int:
+    def _sort_key(nid: str) -> tuple[int, int]:
+        """Sort by function rank first, then by line_start within the function."""
         entry = node_map.get(nid, {})
         node = entry.get("node", entry)
-        return node.get("line_start", 0) or 0
+        line = node.get("line_start", 0) or 0
+        fn = node_fn.get(nid, "")
+        return (fn_rank.get(fn, 999), line)
 
     queue: list[str] = sorted(
         [nid for nid, deg in in_degree.items() if deg == 0],
-        key=_line_start,
+        key=_sort_key,
     )
 
     ordered: list[dict] = []
     while queue:
         nid = queue.pop(0)
         ordered.append(node_map[nid])
-        for neighbour in sorted(adj.get(nid, []), key=_line_start):
+        for neighbour in sorted(adj.get(nid, []), key=_sort_key):
             in_degree[neighbour] -= 1
             if in_degree[neighbour] == 0:
                 queue.append(neighbour)
-        # Re-sort to maintain line_start ordering among equal-depth nodes
-        queue.sort(key=_line_start)
+        queue.sort(key=_sort_key)
 
-    # If topological sort missed nodes (cycles or disconnected), append them
-    # sorted by line_start
+    # Append any nodes missed (cycles or disconnected), ordered by function
+    # rank then line_start
     ordered_ids = {
         (entry.get("node", entry)).get("id", "") for entry in ordered
     }
@@ -350,7 +606,7 @@ def determine_execution_order(
         node_map[nid] for nid in node_map
         if nid not in ordered_ids
     ]
-    remaining.sort(key=lambda e: _line_start((e.get("node", e)).get("id", "")))
+    remaining.sort(key=lambda e: _sort_key((e.get("node", e)).get("id", "")))
     ordered.extend(remaining)
 
     return ordered
@@ -360,8 +616,84 @@ def determine_execution_order(
 # 9. Assemble LLM payload
 # ---------------------------------------------------------------------------
 
-_MAX_PAYLOAD_CHARS = 2000
+_MAX_PAYLOAD_CHARS = 4000
 _COLUMN_MAP_TRUNCATE_THRESHOLD = 8
+
+
+def _node_mentions_variable(node: dict, aliases: set[str]) -> bool:
+    """Return True if *node* references any alias in column_maps,
+    calculation, output_variable, or conditions."""
+    # column_maps (serialised to string for broad matching)
+    column_maps = node.get("column_maps", {})
+    if column_maps and isinstance(column_maps, dict):
+        text = str(column_maps).upper()
+        for alias in aliases:
+            if alias in text:
+                return True
+
+    # calculation expressions
+    for calc in (node.get("calculation") or []):
+        if isinstance(calc, dict):
+            expr = calc.get("expression", "")
+            if expr:
+                expr_upper = expr.upper()
+                for alias in aliases:
+                    if alias in expr_upper:
+                        return True
+
+    # output_variable (SCALAR_COMPUTE nodes)
+    out_var = (node.get("output_variable") or "").upper()
+    if out_var and out_var in aliases:
+        return True
+
+    # conditions
+    for cond in (node.get("conditions") or []):
+        cond_text = (cond if isinstance(cond, str) else cond.get("expression", "")).upper()
+        for alias in aliases:
+            if alias in cond_text:
+                return True
+
+    return False
+
+
+def _is_passthrough_node(node: dict, target_var_upper: str) -> bool:
+    """Return True if *node* copies the target variable without modification."""
+    cm = node.get("column_maps", {})
+    if not cm or not isinstance(cm, dict):
+        return True
+
+    mapping = cm.get("mapping", {})
+    if mapping:
+        val = mapping.get(target_var_upper)
+        if val is None:
+            # Also try case-insensitive
+            for k, v in mapping.items():
+                if k.strip().upper() == target_var_upper:
+                    val = v
+                    break
+        if val is None:
+            return True  # column not in mapping — copied unchanged
+        if str(val).strip().upper() == target_var_upper:
+            return True  # direct copy
+        return False
+
+    assignments = cm.get("assignments", [])
+    for col, expr in assignments:
+        if col.strip().upper() == target_var_upper:
+            if expr.strip().upper() == target_var_upper:
+                return True
+            return False
+
+    return True
+
+
+def _build_incoming_edge_index(edges: list[dict]) -> dict[str, list[dict]]:
+    """Return a mapping from ``to_node`` to list of edges targeting it."""
+    index: dict[str, list[dict]] = {}
+    for edge in edges:
+        to_node = edge.get("to", "")
+        index.setdefault(to_node, []).append(edge)
+    return index
 
 
 def assemble_llm_payload(
@@ -374,21 +706,210 @@ def assemble_llm_payload(
     """Build a compact text payload for the LLM.
 
     The payload is structured for easy comprehension by the model, with each
-    relevant node rendered as a numbered step.  Column mappings are truncated
-    when there are too many entries to keep the total under ~2000 characters.
+    relevant node rendered as a numbered step.  Includes:
+
+    * **Execution condition** at the top of each function's section.
+    * **Intermediate variables** when a node has incoming edges from
+      ``SCALAR_COMPUTE`` nodes.
+    * **PASS-THROUGH** label for steps where a column is copied unchanged
+      (``DIRECT`` type).
+
+    Column mappings are truncated when there are too many entries to keep
+    the total under ~2000 characters.
     """
     lines: list[str] = []
     lines.append(f"Query: {user_query}")
     lines.append(f"Target variable: {target_variable}")
     lines.append("")
 
-    # Track which functions had nodes vs. which were checked but empty
-    functions_with_nodes: set[str] = set()
+    # Use execution_order if provided, otherwise fall back to nodes
+    effective_order = execution_order if execution_order else nodes
 
-    for step_num, entry in enumerate(execution_order, start=1):
+    # Pre-build a lookup of all nodes by ID (for intermediate-variable resolution)
+    all_node_lookup: dict[str, dict] = {}
+    for entry in effective_order:
+        node = entry.get("node", entry)
+        all_node_lookup[node.get("id", "")] = node
+
+    # Also include upstream SCALAR_COMPUTE nodes that were fetched via
+    # include_upstream=True in fetch_nodes_by_ids — they carry
+    # ``is_upstream: True`` on the entry dict.
+    upstream_entries: list[dict] = []
+    non_upstream_order: list[dict] = []
+    for entry in effective_order:
+        if entry.get("is_upstream"):
+            upstream_entries.append(entry)
+            node = entry.get("node", entry)
+            all_node_lookup[node.get("id", "")] = node
+        else:
+            non_upstream_order.append(entry)
+
+    # --- Relevance filter: drop nodes that don't mention the target variable ---
+    target_aliases: set[str] = {target_variable.strip().upper()}
+    filtered_order: list[dict] = []
+    for entry in non_upstream_order:
+        node = entry.get("node", entry)
+        if _node_mentions_variable(node, target_aliases):
+            filtered_order.append(entry)
+    if filtered_order:
+        non_upstream_order = filtered_order
+
+    # --- Build upstream lookup by output_variable for text-based matching ---
+    upstream_by_var: dict[str, dict] = {}  # output_variable_upper -> node
+    for entry in upstream_entries:
+        node = entry.get("node", entry)
+        all_node_lookup[node.get("id", "")] = node
+        out_var = (node.get("output_variable") or "").upper()
+        if out_var:
+            upstream_by_var[out_var] = node
+
+    incoming_idx = _build_incoming_edge_index(edges)
+    tv_upper = target_variable.strip().upper()
+
+    # --- Consolidate consecutive same-function pass-through nodes ---
+    consolidated: list = []  # entries or {"consolidated": True, ...} dicts
+    i = 0
+    while i < len(non_upstream_order):
+        entry = non_upstream_order[i]
+        node = entry.get("node", entry)
+        fn = entry.get("function", "")
+
+        if _is_passthrough_node(node, tv_upper):
+            group = [entry]
+            j = i + 1
+            while j < len(non_upstream_order):
+                nxt = non_upstream_order[j]
+                nxt_node = nxt.get("node", nxt)
+                nxt_fn = nxt.get("function", "")
+                if nxt_fn == fn and _is_passthrough_node(nxt_node, tv_upper):
+                    group.append(nxt)
+                    j += 1
+                else:
+                    break
+            if len(group) > 1:
+                # Merge into one consolidated pass-through entry
+                all_src: list[str] = []
+                all_tgt: list[str] = []
+                min_line = 999999
+                max_line = 0
+                for g in group:
+                    gn = g.get("node", g)
+                    for s in (gn.get("source_tables") or []):
+                        if s not in all_src:
+                            all_src.append(s)
+                    t = gn.get("target_table", "")
+                    if t and t not in all_tgt:
+                        all_tgt.append(t)
+                    ls = gn.get("line_start", 0) or 0
+                    le = gn.get("line_end", 0) or 0
+                    if ls and ls < min_line:
+                        min_line = ls
+                    if le and le > max_line:
+                        max_line = le
+                consolidated.append({
+                    "consolidated": True,
+                    "function": fn,
+                    "execution_condition": entry.get("execution_condition"),
+                    "source_tables": all_src,
+                    "target_tables": all_tgt,
+                    "line_start": min_line,
+                    "line_end": max_line,
+                    "count": len(group),
+                })
+            else:
+                consolidated.append(entry)
+            i = j
+        else:
+            consolidated.append(entry)
+            i += 1
+
+    # Track which functions already had their header emitted
+    fn_header_emitted: set[str] = set()
+
+    for step_num, entry in enumerate(consolidated, start=1):
+        # --- Handle consolidated pass-through ---
+        if isinstance(entry, dict) and entry.get("consolidated"):
+            fn_name = entry["function"]
+            if fn_name not in fn_header_emitted:
+                fn_header_emitted.add(fn_name)
+                lines.append(f"--- FUNCTION: {fn_name} ---")
+                exec_cond = entry.get("execution_condition")
+                if exec_cond and isinstance(exec_cond, dict):
+                    plain = exec_cond.get("plain_text", exec_cond.get("description", ""))
+                    if plain:
+                        lines.append(f"EXECUTION CONDITION: {plain}")
+                elif exec_cond and isinstance(exec_cond, str):
+                    lines.append(f"EXECUTION CONDITION: {exec_cond}")
+                lines.append("")
+
+            _sql_funcs = {"TO_DATE", "TO_NUMBER", "TO_CHAR", "ADD_MONTHS", "NVL",
+                          "SYSDATE", "DECODE", "TRUNC", "ROUND", "FIC_MIS_DATE"}
+            tables = [t for t in entry["source_tables"] + entry["target_tables"]
+                      if t.upper() not in _sql_funcs]
+            lines.append(f"--- STEP {step_num} [PASS-THROUGH]: {fn_name} ---")
+            lines.append(f"Copies {target_variable} unchanged through: {', '.join(tables)}")
+            lines.append(f"The value is not transformed -- this function date-adjusts historical records.")
+            lines.append(f"Source: lines {entry['line_start']}-{entry['line_end']}")
+            lines.append("")
+            continue
+
         node = entry.get("node", entry)
         fn_name = entry.get("function", _extract_function_name(node.get("id", "")))
-        functions_with_nodes.add(fn_name)
+
+        # --- Function header with execution condition (once per function) ---
+        if fn_name not in fn_header_emitted:
+            fn_header_emitted.add(fn_name)
+            lines.append(f"--- FUNCTION: {fn_name} ---")
+            exec_cond = entry.get("execution_condition")
+            if exec_cond and isinstance(exec_cond, dict):
+                plain = exec_cond.get("plain_text", exec_cond.get("description", ""))
+                expr = exec_cond.get("expression", "")
+                if plain:
+                    lines.append(f"EXECUTION CONDITION: {plain}")
+                if expr:
+                    lines.append(f"Expression: {expr}")
+            elif exec_cond and isinstance(exec_cond, str):
+                lines.append(f"EXECUTION CONDITION: {exec_cond}")
+            lines.append("")
+
+        # --- Intermediate variables (text-matching against upstream SCALAR_COMPUTE) ---
+        nid = node.get("id", "")
+        # Build text from this node's column_maps + calculations
+        node_text = str(node.get("column_maps", {})).upper()
+        for calc in (node.get("calculation") or []):
+            if isinstance(calc, dict):
+                node_text += " " + (calc.get("expression", "")).upper()
+
+        intermediates: list[dict] = []
+        seen_vars: set[str] = set()
+        # Find upstream vars referenced in this node's text
+        for var_upper, sc_node in upstream_by_var.items():
+            if var_upper in node_text and var_upper not in seen_vars:
+                intermediates.append(sc_node)
+                seen_vars.add(var_upper)
+
+        if intermediates:
+            lines.append(f"--- INTERMEDIATE VARIABLES (used in Step {step_num}) ---")
+            for inode in intermediates:
+                var_name = inode.get("output_variable", inode.get("variable_name", inode.get("id", "?")))
+                formula = ""
+                i_calcs = inode.get("calculation", [])
+                if i_calcs:
+                    first = i_calcs[0] if isinstance(i_calcs, list) else i_calcs
+                    formula = first.get("expression", str(first)) if isinstance(first, dict) else str(first)
+                i_sources = inode.get("source_tables", [])
+                i_conds = inode.get("conditions", [])
+                i_line = inode.get("line_start", "?")
+                lines.append(f"{var_name} = {formula}")
+                if i_sources:
+                    lines.append(f"  Source: {', '.join(i_sources)}")
+                if i_conds:
+                    cond_strs = []
+                    for c in i_conds:
+                        cond_strs.append(c if isinstance(c, str) else c.get("expression", str(c)))
+                    lines.append(f"  Filter: {'; '.join(cond_strs)}")
+                lines.append(f"  (line {i_line})")
+            lines.append("")
 
         node_type = node.get("type", "UNKNOWN")
         target_table = node.get("target_table", "")
@@ -400,29 +921,37 @@ def assemble_llm_payload(
         line_start = node.get("line_start", "?")
         line_end = node.get("line_end", "?")
 
-        lines.append(f"--- STEP {step_num}: {fn_name} ---")
+        step_label = f"STEP {step_num}"
+
+        lines.append(f"--- {step_label}: {fn_name} ---")
         lines.append(f"Operation: {node_type}")
 
-        # Tables
         source_str = ", ".join(source_tables) if source_tables else "N/A"
         target_str = target_table or "N/A"
         lines.append(f"Tables: {source_str} -> {target_str}")
 
-        # Column mapping
-        if column_maps:
-            lines.append("Column mapping:")
-            map_items = list(column_maps.items()) if isinstance(column_maps, dict) else []
-            display_items = map_items
-            truncated = False
-            if len(map_items) > _COLUMN_MAP_TRUNCATE_THRESHOLD:
-                display_items = map_items[:_COLUMN_MAP_TRUNCATE_THRESHOLD]
-                truncated = True
-            for col, src in display_items:
-                lines.append(f"  {col} <- {src}")
-            if truncated:
-                lines.append(f"  ... (+{len(map_items) - _COLUMN_MAP_TRUNCATE_THRESHOLD} more)")
+        if column_maps and isinstance(column_maps, dict):
+            actual_map: dict = {}
+            if "mapping" in column_maps:
+                actual_map = column_maps.get("mapping", {})
+            elif "assignments" in column_maps:
+                actual_map = {col: expr for col, expr in column_maps.get("assignments", [])}
+            else:
+                actual_map = column_maps
 
-        # Calculations
+            if actual_map:
+                lines.append("Column mapping:")
+                map_items = list(actual_map.items())
+                display_items = map_items
+                truncated = False
+                if len(map_items) > _COLUMN_MAP_TRUNCATE_THRESHOLD:
+                    display_items = map_items[:_COLUMN_MAP_TRUNCATE_THRESHOLD]
+                    truncated = True
+                for col, src in display_items:
+                    lines.append(f"  {col} <- {src}")
+                if truncated:
+                    lines.append(f"  ... (+{len(map_items) - _COLUMN_MAP_TRUNCATE_THRESHOLD} more)")
+
         if calculations:
             lines.append("Calculation:")
             for calc in calculations:
@@ -433,29 +962,16 @@ def assemble_llm_payload(
                     if expr:
                         lines.append(f"  {_truncate(expr, 120)}")
 
-        # Conditions
         if conditions:
             lines.append("Conditions:")
             for cond in conditions:
                 cond_text = cond if isinstance(cond, str) else cond.get("expression", str(cond))
                 lines.append(f"  {_truncate(cond_text, 100)}")
 
-        # Commit status and source location
         lines.append(f"Committed after: {'yes' if committed else 'no'}")
         lines.append(f"Source: lines {line_start}-{line_end}")
+
         lines.append("")
-
-    # Add NOTE for edges referencing functions that had no matching nodes
-    edge_functions: set[str] = set()
-    for edge in edges:
-        for endpoint in (edge.get("from", ""), edge.get("to", "")):
-            fn = _extract_function_name(endpoint)
-            edge_functions.add(fn)
-
-    missing_fns = edge_functions - functions_with_nodes
-    for fn in sorted(missing_fns):
-        if fn:
-            lines.append(f"NOTE: Function {fn} was checked but had no matching nodes.")
 
     payload = "\n".join(lines)
 

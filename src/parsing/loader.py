@@ -205,7 +205,7 @@ def load_all_functions(
 
     if all_graphs:
         try:
-            full_graph = build_cross_function_graph(all_graphs, schema)
+            full_graph = build_cross_function_graph(list(all_graphs.values()))
             store_full_graph(redis_client, schema, full_graph)
         except Exception:
             tb = traceback.format_exc()
@@ -213,7 +213,7 @@ def load_all_functions(
             logger.error("Error building cross-function graph:\n%s", tb)
 
         try:
-            column_index = build_global_column_index(all_graphs, schema)
+            column_index = build_global_column_index(list(all_graphs.values()))
             store_column_index(redis_client, schema, column_index)
         except Exception:
             tb = traceback.format_exc()
@@ -221,14 +221,14 @@ def load_all_functions(
             logger.error("Error building global column index:\n%s", tb)
 
         try:
-            execution_order = resolve_execution_order(all_graphs, schema)
+            execution_order = resolve_execution_order(list(all_graphs.values()))
         except Exception:
             tb = traceback.format_exc()
             errors.append(f"Failed to resolve execution order: {tb}")
             logger.error("Error resolving execution order:\n%s", tb)
 
         try:
-            alias_map = build_alias_map(all_graphs, schema)
+            alias_map = build_alias_map()
             # Store alias map in Redis using the standard key pattern
             from src.parsing.serializer import to_msgpack
             alias_key = f"graph:aliases:{schema}"
@@ -241,7 +241,8 @@ def load_all_functions(
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
-    status = "success" if not errors else "partial" if parsed_count > 0 else "error"
+    total_usable = parsed_count + skipped_count
+    status = "success" if not errors else "partial" if total_usable > 0 else "error"
 
     summary = {
         "status": status,
