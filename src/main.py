@@ -30,6 +30,7 @@ from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
 from src.agents.variable_tracer import VariableTracer
+from src.agents.value_tracer import ValueTracerAgent
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -106,6 +107,7 @@ _orchestrator: Orchestrator = None
 _metadata_interpreter: MetadataInterpreter = None
 _logic_explainer: LogicExplainer = None
 _variable_tracer: VariableTracer = None
+_value_tracer: ValueTracerAgent = None
 _validator: Validator = None
 _cache_manager: CacheManager = None
 _indexer: IndexerAgent = None
@@ -130,7 +132,7 @@ async def lifespan(app: FastAPI):
     """
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
-    global _variable_tracer, _validator, _cache_manager, _indexer, _renderer
+    global _variable_tracer, _value_tracer, _validator, _cache_manager, _indexer, _renderer
     global _compiled_graph, _health_checker, _settings, _graph_available, _graph_redis
 
     _settings = _load_settings()
@@ -189,6 +191,9 @@ async def lifespan(app: FastAPI):
         temperature=llm_cfg["temperature"],
         max_tokens=llm_cfg["max_tokens"],
     )
+
+    # Phase 2 value tracer -- constructed after _graph_redis is set below,
+    # see lifespan completion of graph pipeline initialisation.
 
     _validator = Validator(
         schema_tools=_schema_tools,
@@ -267,6 +272,21 @@ async def lifespan(app: FastAPI):
                 _graph_available = True
     except Exception as exc:
         logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
+
+    # Phase 2 value tracer -- needs schema_tools, the sync Redis client
+    # used by the graph pipeline, and SQLGuardian for SELECT validation.
+    try:
+        from src.tools.sql_guardian import SQLGuardian
+        _value_tracer = ValueTracerAgent(
+            schema_tools=_schema_tools,
+            redis_client=_graph_redis,
+            sql_guardian=SQLGuardian(),
+            temperature=llm_cfg["temperature"],
+            max_tokens=llm_cfg["max_tokens"],
+        )
+        logger.info("Phase 2 value tracer initialised")
+    except Exception as exc:
+        logger.warning(f"Phase 2 value tracer init failed (non-fatal): {exc}")
 
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
@@ -487,6 +507,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "llm_payload": "",
                 "graph_node_ids": [],
                 "graph_available": _graph_available,
+                "phase2_filters": {},
+                "phase2_expected_value": None,
+                "phase2_actual_value": None,
                 "output": {},
                 "partial_flag": False,
             }
@@ -512,6 +535,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
 
             if state.get("partial_flag"):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
+                return
+
+            # --- Phase 2 routing: data-trace queries skip the standard
+            # semantic-search + raw-source fetch stages and go directly to
+            # the ValueTracerAgent, which runs its own graph resolve +
+            # Oracle value fetch + LLM narration.
+            if state.get("query_type") in ("VALUE_TRACE", "DIFFERENCE_EXPLANATION", "RECONCILIATION"):
+                async for event in _phase2_stream(state, request.query, correlation_id, provider, model):
+                    yield event
                 return
 
             # Stage 2: Semantic search
@@ -670,6 +702,130 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             "X-Correlation-ID": correlation_id,
         },
     )
+
+
+async def _phase2_stream(state, user_query, correlation_id, provider, model):
+    """Stream a Phase 2 VALUE_TRACE/DIFFERENCE/RECONCILIATION response as SSE.
+
+    Runs the ValueTracerAgent, which resolves graph nodes, fetches
+    actual Oracle values, builds a proof chain, identifies any delta,
+    generates verification SQL, and finally streams an LLM narration.
+    """
+    query_type = state["query_type"]
+    filters = dict(state.get("phase2_filters") or {})
+    target = (state.get("target_variable") or "").strip()
+    schema = state.get("schema") or "OFSMDM"
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as ' + query_type})}\n\n"
+
+    if _value_tracer is None:
+        yield f"event: error\ndata: {json_mod.dumps({'error': 'Phase 2 value tracer not available'})}\n\n"
+        return
+
+    # Enforce mis_date requirement configurably. Without it the trace
+    # cannot be scoped to a specific run, so we fail fast with a clear
+    # clarification event rather than producing a misleading answer.
+    require_mis_date = (_settings.get("phase2") or {}).get("require_mis_date", True)
+    if require_mis_date and not filters.get("mis_date"):
+        payload = {
+            "type": "clarification",
+            "message": (
+                "This looks like a data trace query but no MIS date was detected. "
+                "Please include the date (e.g. 'on 2025-12-31')."
+            ),
+        }
+        yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
+        return
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Resolving graph subgraph...'})}\n\n"
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Fetching actual Oracle values for each step...'})}\n\n"
+
+    try:
+        if query_type == "DIFFERENCE_EXPLANATION":
+            result = await _value_tracer.explain_difference(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                bank_value=float(state.get("phase2_expected_value") or 0.0),
+                system_value=float(state.get("phase2_actual_value") or 0.0),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+        elif query_type == "RECONCILIATION":
+            result = await _value_tracer.reconcile(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+        else:
+            result = await _value_tracer.trace_value(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                expected_value=state.get("phase2_expected_value"),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+    except Exception as exc:
+        logger.error(f"Phase 2 trace failed: {exc}\n{traceback.format_exc()}")
+        yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        return
+
+    proof_chain = result.get("proof_chain") or {}
+    meta = {
+        "schema": schema,
+        "query_type": query_type,
+        "target_variable": target,
+        "filters": filters,
+        "final_value": proof_chain.get("final_value"),
+        "origin_value": proof_chain.get("origin_value"),
+        "total_delta": proof_chain.get("total_delta"),
+        "step_count": len(proof_chain.get("steps") or []),
+        "confidence": result.get("confidence"),
+        "correlation_id": correlation_id,
+    }
+    yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating explanation...'})}\n\n"
+
+    # Stream the LLM narration
+    full_markdown = ""
+    try:
+        async for token in _value_tracer.stream_explanation(
+            user_query=user_query,
+            proof_chain=proof_chain,
+            delta_analysis=result.get("delta_analysis"),
+            missing=result.get("missing_upstream"),
+            provider=provider,
+            model=model,
+        ):
+            full_markdown += token
+            yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+    except Exception as exc:
+        # Fall back to the pre-rendered explanation if streaming fails.
+        logger.warning(f"Phase 2 LLM stream failed, using fallback: {exc}")
+        fallback = result.get("explanation") or "(no explanation available)"
+        full_markdown = fallback
+        yield f"event: token\ndata: {json_mod.dumps(fallback)}\n\n"
+
+    done_payload = {
+        "type": query_type.lower(),
+        "confidence": result.get("confidence", 0.0),
+        "validated": True,
+        "badge": "VERIFIED",
+        "correlation_id": correlation_id,
+        "explanation": {"markdown": full_markdown},
+        "proof_chain": proof_chain,
+        "delta_analysis": result.get("delta_analysis"),
+        "verification_sql": result.get("verification_sql"),
+        "data_completeness": result.get("data_completeness"),
+    }
+    yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
 
 
 async def _handle_command(

@@ -62,6 +62,10 @@ class LogicState(TypedDict):
     llm_payload: str
     graph_node_ids: list
     graph_available: bool
+    # Phase 2 fields (data-trace queries)
+    phase2_filters: dict
+    phase2_expected_value: Optional[float]
+    phase2_actual_value: Optional[float]
     # Final output
     output: dict
     partial_flag: bool
