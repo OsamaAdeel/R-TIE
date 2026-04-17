@@ -1,0 +1,14 @@
+flowchart TD
+    SQL[(".sql files")]
+    P["1. PARSER\nparser.py\nRegex block extraction\nComment stripping"]
+    B["2. BUILDER\nbuilder.py\nTyped nodes + column_maps\nPer-function column_index"]
+    I["3. INDEXER\nindexer.py\nCross-function edges\nGlobal column index\nTopological sort"]
+    R[("4. REDIS STORE\nMessagePack compressed")]
+
+    SQL --> P --> B --> I --> R
+
+    style SQL fill:#6b7280,color:#fff,stroke:none
+    style P fill:#7c3aed,color:#fff,stroke:none
+    style B fill:#0369a1,color:#fff,stroke:none
+    style I fill:#059669,color:#fff,stroke:none
+    style R fill:#dc2626,color:#fff,stroke:none

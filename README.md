@@ -16,11 +16,10 @@ RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that expl
 
 ## Quick Start
 
-### 1. Clone and switch to this branch
+### 1. Clone the repository
 ```bash
 git clone <repository-url>
 cd RTIE
-git checkout feature/graph-pipeline
 ```
 
 ### 2. Start infrastructure
@@ -126,7 +125,7 @@ RTIE/
       vector_store.py          Redis vector search (RediSearch)
     middleware/               Correlation ID, retry
     monitoring/               Health checks
-  tests/unit/parsing/        28 unit tests for the graph parser
+  tests/unit/parsing/        44 unit tests for the graph parser
   frontend/                  React + Vite web UI
   cli.py                     CLI testing tool
   run.py                     Backend launcher (Windows-compatible)
@@ -136,55 +135,258 @@ RTIE/
 
 ## Architecture
 
+### High-Level System Overview
+
+```mermaid
+graph TB
+    UI["React + Vite Frontend<br/><i>localhost:5173</i>"]
+    API["FastAPI Backend<br/><i>localhost:8000 &bull; /v1/stream</i>"]
+    ORC["Orchestrator<br/><i>classify + route</i>"]
+    GP["Graph Pipeline<br/><i>query engine</i>"]
+    LLM["LLM Layer<br/><i>OpenAI / Claude</i>"]
+    SS["Semantic Search<br/><i>embeddings + KNN</i>"]
+    MI["Metadata Interpreter<br/><i>fetch source code</i>"]
+    LE["Logic Explainer /<br/>Variable Tracer"]
+    REDIS[("Redis<br/><i>Graph store &bull; Column index<br/>Vector index &bull; Source cache</i>")]
+    PG[("PostgreSQL<br/><i>LangGraph checkpointer</i>")]
+    ORACLE[("Oracle OFSAA<br/><i>read-only</i>")]
+
+    UI -- "SSE streaming" --> API
+    API --> ORC
+    API --> GP
+    API --> LLM
+    ORC --> SS
+    SS --> MI
+    GP --> REDIS
+    LLM --> LE
+    MI --> REDIS
+    MI --> ORACLE
+    SS --> REDIS
+    API --> PG
+
+    style UI fill:#4f46e5,color:#fff,stroke:none
+    style API fill:#0f766e,color:#fff,stroke:none
+    style ORC fill:#7c3aed,color:#fff,stroke:none
+    style GP fill:#0369a1,color:#fff,stroke:none
+    style LLM fill:#b45309,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style MI fill:#059669,color:#fff,stroke:none
+    style LE fill:#d97706,color:#fff,stroke:none
+    style REDIS fill:#dc2626,color:#fff,stroke:none
+    style PG fill:#2563eb,color:#fff,stroke:none
+    style ORACLE fill:#9333ea,color:#fff,stroke:none
+```
+
 ### LLM Provider
-All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown.
 
-### Query Pipeline (7 nodes with conditional routing)
+All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported -- switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB).
 
+---
+
+### Request Pipeline (SSE Streaming)
+
+When a user asks a question, the `/v1/stream` endpoint processes it through 4 stages, streaming Server-Sent Events (SSE) to the frontend at each stage:
+
+```mermaid
+flowchart TD
+    Q(["User Query"])
+    C["1. CLASSIFY<br/><i>Orchestrator LLM call</i>"]
+    S["2. SEARCH<br/><i>Embed query + KNN</i>"]
+    F["3. FETCH<br/><i>Redis / Oracle / disk</i>"]
+    G{"Graph<br/>available?"}
+    GR["3b. GRAPH RESOLVE<br/><i>Column index lookup<br/>Node fetch + payload assembly</i>"]
+    RAW["Raw source<br/>fallback"]
+    E["4. EXPLAIN<br/><i>LLM streams markdown tokens</i>"]
+    D(["Done"])
+
+    SSE1["stage: classify"]
+    SSE2["stage: search"]
+    SSE3["stage: fetch<br/>meta: functions"]
+    SSE4["stage: explain<br/>token: markdown<br/>done: confidence"]
+
+    Q --> C
+    C --> S
+    S --> F
+    F --> G
+    G -- "Yes" --> GR
+    G -- "No" --> RAW
+    GR --> E
+    RAW --> E
+    E --> D
+
+    C -.- SSE1
+    S -.- SSE2
+    F -.- SSE3
+    E -.- SSE4
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style C fill:#7c3aed,color:#fff,stroke:none
+    style S fill:#6d28d9,color:#fff,stroke:none
+    style F fill:#059669,color:#fff,stroke:none
+    style GR fill:#0369a1,color:#fff,stroke:none
+    style RAW fill:#6b7280,color:#fff,stroke:none
+    style E fill:#b45309,color:#fff,stroke:none
+    style D fill:#4f46e5,color:#fff,stroke:none
+    style G fill:#0f766e,color:#fff,stroke:none
+    style SSE1 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE2 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE3 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE4 fill:#f3f4f6,color:#666,stroke:#ddd
 ```
-parse_query --> semantic_search --> fetch_multi_logic
-                                        |
-                              +---------+---------+
-                              |                   |
-                       VARIABLE_TRACE       COLUMN_LOGIC
-                              |                   |
-                       variable_trace      explain_semantic
-                              |                   |
-                              +---------+---------+
-                                        |
-                                output_validator --> render_response
+
+**Routing logic at Stage 4:**
+- If graph pipeline produced `llm_payload` -- `stream_semantic()` with structured payload
+- Else if `VARIABLE_TRACE` -- Variable Tracer (3-stage extraction pipeline)
+- Else -- `stream_semantic()` with raw source fallback
+
+### LangGraph StateGraph (7 nodes, conditional routing)
+
+The `/v1/query` (non-streaming) endpoint uses a compiled LangGraph pipeline with PostgreSQL checkpointing:
+
+```mermaid
+flowchart LR
+    PQ["parse_query"] --> SS["semantic_search"] --> FM["fetch_multi_logic"]
+    FM --> R{"route"}
+    R -- "VARIABLE_TRACE" --> VT["variable_trace"]
+    R -- "COLUMN_LOGIC" --> ES["explain_semantic"]
+    VT --> OV["output_validator"]
+    ES --> OV
+    OV --> RR["render_response"]
+
+    style PQ fill:#7c3aed,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style FM fill:#059669,color:#fff,stroke:none
+    style R fill:#0f766e,color:#fff,stroke:none
+    style VT fill:#d97706,color:#fff,stroke:none
+    style ES fill:#b45309,color:#fff,stroke:none
+    style OV fill:#dc2626,color:#fff,stroke:none
+    style RR fill:#4f46e5,color:#fff,stroke:none
 ```
 
-1. **Orchestrator** — Classifies query type (VARIABLE_TRACE or COLUMN_LOGIC), extracts search terms
-2. **Semantic Search** — Embeds query via OpenAI, searches Redis vector index (KNN)
-3. **Metadata Interpreter** — Fetches source code for top-K functions
-4. **Variable Tracer** (VARIABLE_TRACE only) — LLM resolves business names to code variables, pure Python extracts relevant lines, LLM explains compact chain
-5. **Logic Explainer** (COLUMN_LOGIC only) — Cross-function explanation with citations
-6. **Validator** — Verifies referenced functions exist, computes confidence score
-7. **Renderer** — Assembles final response with citations, confidence badge, warnings
+| Node | Agent | Purpose |
+|------|-------|---------|
+| parse_query | Orchestrator | Classify query type, extract search terms |
+| semantic_search | Embeddings + VectorStore | KNN lookup for relevant functions |
+| fetch_multi_logic | MetadataInterpreter | Fetch source from Redis/Oracle/disk |
+| variable_trace | VariableTracer | 3-stage variable lineage pipeline |
+| explain_semantic | LogicExplainer | Cross-function explanation with citations |
+| output_validator | Validator | Verify referenced functions, compute confidence |
+| render_response | Renderer | Assemble final response with badges and warnings |
 
-### Graph-Based Parsing Pipeline (startup)
+---
 
-On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs:
+### Graph Parsing Pipeline (Startup)
 
+On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis:
+
+```mermaid
+flowchart TD
+    SQL[(".sql files")]
+    P["1. PARSER<br/><i>parser.py</i><br/>Regex block extraction<br/>Comment stripping"]
+    B["2. BUILDER<br/><i>builder.py</i><br/>Typed nodes + column_maps<br/>Per-function column_index"]
+    I["3. INDEXER<br/><i>indexer.py</i><br/>Cross-function edges<br/>Global column index<br/>Topological sort"]
+    R[("4. REDIS STORE<br/><i>MessagePack compressed</i><br/>graph:{schema}:{fn}<br/>graph:full:{schema}<br/>graph:index:{schema}")]
+
+    SQL --> P --> B --> I --> R
+
+    style SQL fill:#6b7280,color:#fff,stroke:none
+    style P fill:#7c3aed,color:#fff,stroke:none
+    style B fill:#0369a1,color:#fff,stroke:none
+    style I fill:#059669,color:#fff,stroke:none
+    style R fill:#dc2626,color:#fff,stroke:none
 ```
-.sql files --> parser (regex) --> builder (typed nodes) --> indexer (cross-function graph)
-                                                              |
-                                                    Redis (MessagePack compressed)
-```
 
-At query time, the column index finds relevant nodes in microseconds and assembles a ~300-token payload for the LLM — instead of sending ~17,000 tokens of raw PL/SQL.
+**Node types:** INSERT, UPDATE, MERGE, DELETE, SCALAR_COMPUTE, WHILE_LOOP, FOR_LOOP, SELECT_INTO
 
-**Node types:** INSERT, UPDATE, MERGE, DELETE, SCALAR_COMPUTE, WHILE_LOOP, FOR_LOOP
 **Calculation types:** DIRECT, ARITHMETIC, CONDITIONAL, FALLBACK, OVERRIDE
 
-### Variable Tracer (3-stage pipeline)
+---
 
-When a user asks "How is EAD_AMOUNT calculated?":
+### Query Engine Pipeline (Query-Time)
 
-1. **LLM Variable Resolver** (~500 chars) — maps "EAD_AMOUNT" to actual code names like `LN_EXP_AMOUNT`
-2. **Pure Python Extraction** — builds alias map, extracts ~60-80 relevant lines from 5000+
-3. **LLM Explanation** (~300 tokens) — explains the compact transformation chain
+When the graph is available, the query engine resolves a user question to a compact structured payload in microseconds -- replacing ~17,000 tokens of raw PL/SQL with a ~2-4KB focused payload:
+
+```mermaid
+flowchart TD
+    TV(["Target Variable<br/><i>e.g. N_ANNUAL_GROSS_INCOME</i>"])
+    AR["1. ALIAS RESOLUTION<br/><i>Business terms to column names</i>"]
+    CI["2. COLUMN INDEX LOOKUP<br/><i>Microsecond: column -> node_ids</i>"]
+    CF["3. CROSS-FUNCTION TRAVERSAL<br/><i>Column-aware edge following</i>"]
+    RF["4. RELEVANCE FILTER<br/><i>Drop nodes without target variable</i>"]
+    UD["5. UPSTREAM DISCOVERY<br/><i>SCALAR_COMPUTE text-matching<br/>Transitive variable lookup</i>"]
+    PA["6. PAYLOAD ASSEMBLY<br/><i>Pass-through consolidation<br/>Intermediate vars + conditions</i>"]
+    OUT(["Structured payload ~2-4KB<br/><i>sent to LLM</i>"])
+
+    TV --> AR --> CI --> CF --> RF --> UD --> PA --> OUT
+
+    style TV fill:#4f46e5,color:#fff,stroke:none
+    style AR fill:#7c3aed,color:#fff,stroke:none
+    style CI fill:#6d28d9,color:#fff,stroke:none
+    style CF fill:#0369a1,color:#fff,stroke:none
+    style RF fill:#059669,color:#fff,stroke:none
+    style UD fill:#b45309,color:#fff,stroke:none
+    style PA fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Example output structure (4 steps instead of raw 500+ lines):**
+```
+Step 1: INSERT seed from ABL_OPS_RISK_DATA into STG_OPS_RISK_DATA
+Step 2: UPDATE CBA/RBA with CASE expression (intermediate vars: TOT1, CBA_DEDUCTION)
+Step 3: UPDATE ABLIBG with CASE expression
+Step 4: [PASS-THROUGH] TLX_OPS_ADJ_MISDATE -- copies value unchanged through staging table
+```
+
+---
+
+### Variable Tracer (3-Stage Pipeline)
+
+When a user asks "How is EAD_AMOUNT calculated?" and the graph pipeline has no matches, the Variable Tracer extracts relevant lines using a hybrid LLM + Python approach:
+
+```mermaid
+flowchart TD
+    UQ(["How is EAD_AMOUNT calculated?"])
+    S1["Stage 1: LLM RESOLVER<br/><i>~500 char prompt</i><br/>EAD_AMOUNT -> LN_EXP_AMOUNT, N_EAD"]
+    S2["Stage 2: PYTHON EXTRACTION<br/><i>Pure Python, no LLM</i><br/>Build alias map + extract ~60-80 lines<br/>Tags: SEED, TRANSFORM, COMMENTED_OUT"]
+    S3["Stage 3: LLM EXPLANATION<br/><i>~300 token prompt, streamed via SSE</i><br/>Business meaning, not SQL syntax"]
+    OUT(["Markdown response<br/><i>with citations</i>"])
+
+    UQ --> S1 --> S2 --> S3 --> OUT
+
+    style UQ fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#b45309,color:#fff,stroke:none
+    style S2 fill:#059669,color:#fff,stroke:none
+    style S3 fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+---
+
+### Frontend Architecture
+
+```
+React + Vite + Tailwind CSS v4
+    |
+    +-- App.jsx              Main app with model selector
+    +-- pages/Chat.jsx       Chat interface, auto-scroll control
+    +-- components/
+    |     MessageBubble.jsx  User messages (edit, retry, copy)
+    |     |                  Assistant messages (streaming markdown)
+    |     |                  AgentThinking (4-stage pipeline indicator)
+    |     |                  CodeBlockWithCopy (syntax highlighted)
+    |     ResponseCard.jsx   Structured response cards
+    |     CommandResult.jsx  Slash command output
+    +-- api/client.js        SSE streaming via fetch + ReadableStream
+```
+
+**SSE event flow:**
+```
+event: stage  -> Updates pipeline stage indicator (classify/search/fetch/explain)
+event: meta   -> Populates function list and metadata
+event: token  -> Appends to streaming markdown (rendered incrementally)
+event: done   -> Final metadata (confidence, citations, badge)
+event: error  -> Error display
+```
 
 ---
 
@@ -266,4 +468,4 @@ When a user asks "How is EAD_AMOUNT calculated?":
 python -m pytest tests/unit/parsing/ -v
 ```
 
-28 tests covering: parser, builder, indexer, serializer, store, loader, query engine.
+44 tests covering: parser, builder, indexer, serializer, store, loader, query engine.

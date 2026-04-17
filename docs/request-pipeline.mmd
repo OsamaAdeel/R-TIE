@@ -1,0 +1,44 @@
+flowchart TD
+    Q(["User Query"])
+    C["1. CLASSIFY\nOrchestrator LLM call"]
+    S["2. SEARCH\nEmbed query + KNN"]
+    F["3. FETCH\nRedis / Oracle / disk"]
+    G{"Graph\navailable?"}
+    GR["3b. GRAPH RESOLVE\nColumn index lookup\nNode fetch + payload assembly"]
+    RAW["Raw source\nfallback"]
+    E["4. EXPLAIN\nLLM streams markdown tokens"]
+    D(["Done"])
+
+    SSE1["stage: classify"]
+    SSE2["stage: search"]
+    SSE3["stage: fetch\nmeta: functions"]
+    SSE4["stage: explain\ntoken: markdown\ndone: confidence"]
+
+    Q --> C
+    C --> S
+    S --> F
+    F --> G
+    G -- "Yes" --> GR
+    G -- "No" --> RAW
+    GR --> E
+    RAW --> E
+    E --> D
+
+    C -.- SSE1
+    S -.- SSE2
+    F -.- SSE3
+    E -.- SSE4
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style C fill:#7c3aed,color:#fff,stroke:none
+    style S fill:#6d28d9,color:#fff,stroke:none
+    style F fill:#059669,color:#fff,stroke:none
+    style GR fill:#0369a1,color:#fff,stroke:none
+    style RAW fill:#6b7280,color:#fff,stroke:none
+    style E fill:#b45309,color:#fff,stroke:none
+    style D fill:#4f46e5,color:#fff,stroke:none
+    style G fill:#0f766e,color:#fff,stroke:none
+    style SSE1 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE2 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE3 fill:#f3f4f6,color:#666,stroke:#ddd
+    style SSE4 fill:#f3f4f6,color:#666,stroke:#ddd

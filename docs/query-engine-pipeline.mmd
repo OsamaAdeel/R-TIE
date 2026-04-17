@@ -1,0 +1,20 @@
+flowchart TD
+    TV(["Target Variable\ne.g. N_ANNUAL_GROSS_INCOME"])
+    AR["1. ALIAS RESOLUTION\nBusiness terms to column names"]
+    CI["2. COLUMN INDEX LOOKUP\nMicrosecond: column to node_ids"]
+    CF["3. CROSS-FUNCTION TRAVERSAL\nColumn-aware edge following"]
+    RF["4. RELEVANCE FILTER\nDrop nodes without target variable"]
+    UD["5. UPSTREAM DISCOVERY\nSCALAR_COMPUTE text-matching\nTransitive variable lookup"]
+    PA["6. PAYLOAD ASSEMBLY\nPass-through consolidation\nIntermediate vars + conditions"]
+    OUT(["Structured payload ~2-4KB\nsent to LLM"])
+
+    TV --> AR --> CI --> CF --> RF --> UD --> PA --> OUT
+
+    style TV fill:#4f46e5,color:#fff,stroke:none
+    style AR fill:#7c3aed,color:#fff,stroke:none
+    style CI fill:#6d28d9,color:#fff,stroke:none
+    style CF fill:#0369a1,color:#fff,stroke:none
+    style RF fill:#059669,color:#fff,stroke:none
+    style UD fill:#b45309,color:#fff,stroke:none
+    style PA fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none

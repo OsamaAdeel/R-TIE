@@ -1,0 +1,14 @@
+flowchart TD
+    UQ(["How is EAD_AMOUNT calculated?"])
+    S1["Stage 1: LLM RESOLVER\n~500 char prompt\nEAD_AMOUNT to LN_EXP_AMOUNT, N_EAD"]
+    S2["Stage 2: PYTHON EXTRACTION\nPure Python, no LLM\nBuild alias map + extract ~60-80 lines\nTags: SEED, TRANSFORM, COMMENTED_OUT"]
+    S3["Stage 3: LLM EXPLANATION\n~300 token prompt, streamed via SSE\nBusiness meaning, not SQL syntax"]
+    OUT(["Markdown response\nwith citations"])
+
+    UQ --> S1 --> S2 --> S3 --> OUT
+
+    style UQ fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#b45309,color:#fff,stroke:none
+    style S2 fill:#059669,color:#fff,stroke:none
+    style S3 fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none

@@ -1,0 +1,17 @@
+flowchart LR
+    PQ["parse_query"] --> SS["semantic_search"] --> FM["fetch_multi_logic"]
+    FM --> R{"route"}
+    R -- "VARIABLE_TRACE" --> VT["variable_trace"]
+    R -- "COLUMN_LOGIC" --> ES["explain_semantic"]
+    VT --> OV["output_validator"]
+    ES --> OV
+    OV --> RR["render_response"]
+
+    style PQ fill:#7c3aed,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style FM fill:#059669,color:#fff,stroke:none
+    style R fill:#0f766e,color:#fff,stroke:none
+    style VT fill:#d97706,color:#fff,stroke:none
+    style ES fill:#b45309,color:#fff,stroke:none
+    style OV fill:#dc2626,color:#fff,stroke:none
+    style RR fill:#4f46e5,color:#fff,stroke:none
