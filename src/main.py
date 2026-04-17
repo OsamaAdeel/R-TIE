@@ -36,6 +36,13 @@ from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
 from src.pipeline.logic_graph import compile_graph
 from src.pipeline.state import LogicState
+from src.parsing.query_engine import (
+    resolve_query_to_nodes,
+    fetch_nodes_by_ids,
+    fetch_relevant_edges,
+    determine_execution_order,
+    assemble_llm_payload,
+)
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
@@ -105,6 +112,7 @@ _indexer: IndexerAgent = None
 _renderer: Renderer = None
 _compiled_graph = None
 _graph_available: bool = False
+_graph_redis = None
 _health_checker: HealthChecker = None
 _settings: Dict[str, Any] = {}
 
@@ -123,7 +131,7 @@ async def lifespan(app: FastAPI):
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
     global _variable_tracer, _validator, _cache_manager, _indexer, _renderer
-    global _compiled_graph, _health_checker, _settings, _graph_available
+    global _compiled_graph, _health_checker, _settings, _graph_available, _graph_redis
 
     _settings = _load_settings()
     oracle_cfg = _settings["oracle"]
@@ -279,6 +287,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _graph_redis:
+        _graph_redis.close()
     await _vector_store.close()
     await _cache_client.close()
     await _schema_tools.close()
@@ -524,7 +534,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             state["schema"] = state.get("schema") or "OFSMDM"
 
             # Stage 3: Fetch source code
-            fn_names = [r["function_name"] for r in results[:5]] if results else []
+            fn_names = list(dict.fromkeys(r["function_name"] for r in results)) if results else []
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': f'Reading source code for {len(fn_names)} functions...', 'functions': fn_names})}\n\n"
             state = await _metadata_interpreter.fetch_multi_logic(state)
 
@@ -538,11 +548,63 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             }
             yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
 
+            # --- Graph pipeline: resolve nodes for structured LLM payload ---
+            if _graph_available and _graph_redis:
+                try:
+                    target_var = state.get("target_variable", "").strip()
+                    obj_name = state.get("object_name", "").strip()
+                    g_schema = state.get("schema", "OFSMDM")
+
+                    if target_var:
+                        g_query_type = "variable"
+                        g_search_term = target_var
+                    elif obj_name:
+                        g_query_type = "function"
+                        g_search_term = obj_name
+                    else:
+                        g_query_type = "variable"
+                        g_search_term = state["raw_query"]
+
+                    node_ids = resolve_query_to_nodes(
+                        query_type=g_query_type,
+                        target_variable=g_search_term if g_query_type == "variable" else "",
+                        function_name=g_search_term if g_query_type == "function" else "",
+                        table_name="",
+                        schema=g_schema,
+                        redis_client=_graph_redis,
+                    )
+
+                    if node_ids:
+                        fetched_nodes = fetch_nodes_by_ids(node_ids, g_schema, _graph_redis)
+                        relevant_edges = fetch_relevant_edges(node_ids, g_schema, _graph_redis)
+                        exec_order = determine_execution_order(fetched_nodes, relevant_edges)
+                        payload = assemble_llm_payload(
+                            nodes=fetched_nodes,
+                            edges=relevant_edges,
+                            target_variable=g_search_term,
+                            user_query=state["raw_query"],
+                            execution_order=exec_order,
+                        )
+                        state["llm_payload"] = payload
+                        state["graph_available"] = True
+                        logger.info("Using graph pipeline for query: %s", state.get("raw_query"))
+                    else:
+                        logger.info("Graph returned no nodes, falling back to raw source for query: %s", state.get("raw_query"))
+                except Exception as exc:
+                    logger.warning("Graph pipeline failed (non-fatal), falling back to raw source: %s", exc)
+
             # Stage 4: Generate explanation
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating detailed explanation...'})}\n\n"
 
             full_markdown = ""
-            if state.get("query_type") == "VARIABLE_TRACE":
+            if state.get("llm_payload"):
+                # Graph pipeline produced a structured payload — use it
+                async for token in _logic_explainer.stream_semantic(
+                    state, provider, model
+                ):
+                    full_markdown += token
+                    yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+            elif state.get("query_type") == "VARIABLE_TRACE":
                 # Run variable resolver + extraction first (fast, non-streaming)
                 target_var = state.get("target_variable", "").strip()
                 functions_source = {}
