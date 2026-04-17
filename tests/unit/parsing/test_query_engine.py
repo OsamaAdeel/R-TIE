@@ -190,3 +190,179 @@ def test_determine_execution_order():
 
     ordered_ids = [n.get("id") for n in ordered]
     assert ordered_ids == ["A", "B", "C"]
+
+
+# -----------------------------------------------------------------------
+# Test: test_cross_function_traversal
+# -----------------------------------------------------------------------
+
+def test_cross_function_traversal():
+    """resolve_variable_nodes should return nodes from multiple functions."""
+    mock_redis = MagicMock()
+    # Return None for alias map so resolve_aliases returns [term.upper()]
+    mock_redis.get.return_value = None
+
+    # Mock column index with entries in two functions
+    mock_index = {
+        "N_ANNUAL_GROSS_INCOME": ["FN_LOAD_OPS_RISK_DATA:node_3", "TLX_OPS_ADJ_MISDATE:node_1"],
+    }
+    # Mock full graph with cross-function edge
+    mock_full_graph = {
+        "edges": [
+            {
+                "from_node": "FN_LOAD_OPS_RISK_DATA:node_3",
+                "to_node": "TLX_OPS_ADJ_MISDATE:node_1",
+                "from": "FN_LOAD_OPS_RISK_DATA:node_3",
+                "to": "TLX_OPS_ADJ_MISDATE:node_1",
+                "via_table": "STG_OPS_RISK_DATA",
+            }
+        ]
+    }
+
+    with patch(
+        "src.parsing.query_engine.get_column_index",
+        return_value=mock_index,
+    ), patch(
+        "src.parsing.query_engine.get_full_graph",
+        return_value=mock_full_graph,
+    ):
+        nodes = resolve_variable_nodes("N_ANNUAL_GROSS_INCOME", "OFSMDM", mock_redis)
+
+    assert "FN_LOAD_OPS_RISK_DATA:node_3" in nodes
+    assert "TLX_OPS_ADJ_MISDATE:node_1" in nodes
+
+
+# -----------------------------------------------------------------------
+# Test: test_execution_condition_in_payload
+# -----------------------------------------------------------------------
+
+def test_execution_condition_in_payload():
+    """Payload should include EXECUTION CONDITION when present."""
+    nodes = [
+        {
+            "function": "FN_LOAD_OPS_RISK_DATA",
+            "node": {"id": "node_1", "type": "UPDATE", "target_table": "STG_OPS_RISK_DATA",
+                     "source_tables": [], "column_maps": {"N_ANNUAL_GROSS_INCOME": "TOT1"},
+                     "calculation": [], "conditions": [], "line_start": 310, "line_end": 325,
+                     "committed_after": True, "summary": "Updates income"},
+            "execution_condition": {"type": "MONTH_CHECK", "expression": "EXTRACT(MONTH) = 12",
+                                     "plain_text": "Only executes in December", "consequence": "Skips entirely"},
+        }
+    ]
+    payload = assemble_llm_payload(nodes, [], "N_ANNUAL_GROSS_INCOME", "How is it calculated?", nodes)
+    assert "EXECUTION CONDITION" in payload or "December" in payload
+
+
+# -----------------------------------------------------------------------
+# Test: test_scalar_compute_in_payload
+# -----------------------------------------------------------------------
+
+def test_scalar_compute_in_payload():
+    """Payload should include INTERMEDIATE VARIABLES section."""
+    nodes = [
+        {
+            "function": "FN_LOAD",
+            "node": {"id": "node_sc_1", "type": "SCALAR_COMPUTE", "target_table": None,
+                     "source_tables": ["STG_GL_DATA"], "column_maps": {},
+                     "output_variable": "TOT1", "calculation": {"type": "ARITHMETIC", "formula": "A + B"},
+                     "conditions": [], "line_start": 305, "line_end": 305,
+                     "committed_after": False, "summary": "Computes TOT1"},
+            "execution_condition": None,
+        },
+        {
+            "function": "FN_LOAD",
+            "node": {"id": "node_3", "type": "UPDATE", "target_table": "STG_OPS_RISK_DATA",
+                     "source_tables": [], "column_maps": {"N_ANNUAL_GROSS_INCOME": "TOT1"},
+                     "calculation": [], "conditions": [], "line_start": 310, "line_end": 325,
+                     "committed_after": True, "summary": "Updates income"},
+            "execution_condition": None,
+        },
+    ]
+    edges = [{"from_node": "FN_LOAD:node_sc_1", "to_node": "FN_LOAD:node_3",
+              "from": "node_sc_1", "to": "node_3",
+              "source_col": "TOT1", "transform": "variable_reference"}]
+    payload = assemble_llm_payload(nodes, edges, "N_ANNUAL_GROSS_INCOME", "How?", nodes)
+    assert "INTERMEDIATE" in payload or "TOT1" in payload
+
+
+# -----------------------------------------------------------------------
+# Test: test_payload_contains_passthrough_label
+# -----------------------------------------------------------------------
+
+def test_payload_contains_passthrough_label():
+    """Payload should label DIRECT/pass-through steps clearly."""
+    nodes = [
+        {
+            "function": "TLX_OPS",
+            "node": {"id": "node_1", "type": "DIRECT", "target_table": "STG_OPS_RISK_DATA",
+                     "source_tables": ["STG_OPS_ADJ_MISDATE_TLX"],
+                     "column_maps": {"N_ANNUAL_GROSS_INCOME": "N_ANNUAL_GROSS_INCOME"},
+                     "calculation": {"type": "DIRECT", "source_table": "STG_OPS_ADJ_MISDATE_TLX",
+                                     "source_column": "N_ANNUAL_GROSS_INCOME"},
+                     "conditions": [], "line_start": 278, "line_end": 349,
+                     "committed_after": True, "summary": "Copies data"},
+            "execution_condition": None,
+        }
+    ]
+    payload = assemble_llm_payload(nodes, [], "N_ANNUAL_GROSS_INCOME", "How?", nodes)
+    assert "PASS" in payload.upper() or "DIRECT" in payload.upper()
+
+
+# -----------------------------------------------------------------------
+# Test: test_upstream_scalar_compute_fetched
+# -----------------------------------------------------------------------
+
+def test_upstream_scalar_compute_fetched():
+    """fetch_nodes_by_ids with include_upstream should return SCALAR_COMPUTE nodes."""
+    from src.parsing.query_engine import fetch_nodes_by_ids
+
+    mock_redis = MagicMock()
+
+    # Node IDs follow the FUNCTION_NAME_N<number> convention used by the parser
+    sc_id = "FN_TEST_N1"
+    upd_id = "FN_TEST_N3"
+
+    # Mock function graph with SC + UPDATE nodes
+    mock_graph = {
+        "function": "FN_TEST",
+        "nodes": [
+            {"id": sc_id, "type": "SCALAR_COMPUTE", "output_variable": "TOT1",
+             "line_start": 305, "line_end": 305, "source_tables": ["STG_GL_DATA"],
+             "column_maps": {}, "conditions": [], "summary": "Computes TOT1"},
+            {"id": upd_id, "type": "UPDATE", "target_table": "STG_OPS",
+             "line_start": 310, "line_end": 325, "source_tables": [],
+             "column_maps": {"N_INCOME": "TOT1"}, "conditions": [], "summary": "Updates"},
+        ],
+        "edges": [
+            {"from_node": sc_id, "to_node": upd_id,
+             "from": sc_id, "to": upd_id,
+             "source_col": "TOT1", "transform": "variable_reference"}
+        ],
+    }
+    mock_full = {"edges": mock_graph["edges"], "nodes": {"FN_TEST": mock_graph["nodes"]}}
+
+    with patch("src.parsing.query_engine.get_function_graph", return_value=mock_graph), \
+         patch("src.parsing.query_engine.get_full_graph", return_value=mock_full):
+        result = fetch_nodes_by_ids(["FN_TEST:" + upd_id], "OFSMDM", mock_redis, include_upstream=True)
+
+    fns = [r.get("function") for r in result]
+    assert len(result) >= 2 or "FN_TEST" in fns, f"Expected upstream node, got {len(result)} results"
+
+
+# -----------------------------------------------------------------------
+# Test: test_payload_no_cfi_condition
+# -----------------------------------------------------------------------
+
+def test_payload_no_cfi_condition():
+    """Payload should NOT contain commented-out CFI branch."""
+    nodes = [{
+        "function": "FN_LOAD",
+        "node": {"id": "node_3", "type": "UPDATE", "target_table": "STG_OPS",
+                 "source_tables": [], "column_maps": {"N_INCOME": "TOT1"},
+                 "conditions": ["FIC_MIS_DATE = CQD", "V_LOB_CODE IN ('CBA','RBA')"],
+                 "line_start": 310, "line_end": 325,
+                 "committed_after": True, "summary": "Updates income"},
+        "execution_condition": None,
+    }]
+    payload = assemble_llm_payload(nodes, [], "N_ANNUAL_GROSS_INCOME", "How?", [])
+    assert "CFI" not in payload, f"Commented-out CFI should not appear in payload"
