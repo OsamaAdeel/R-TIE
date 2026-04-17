@@ -1,6 +1,37 @@
 # RTIE — Regulatory Trace & Intelligence Engine
 
+> **Explain every number. Trace every transformation. Touch nothing.**
+
 RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that explains the complete logic behind regulatory capital computations — tracing PL/SQL functions, column lineage, and data flows to give engineers instant, fully cited answers without touching the underlying system.
+
+---
+
+## How It Works
+
+An engineer asks a question like *"How is N_ANNUAL_GROSS_INCOME calculated?"* — RTIE parses all PL/SQL functions at startup into a compressed graph representation (86.6% smaller than raw source), looks up exactly which nodes across which functions touch that variable, and sends a compact ~300 token subgraph to the LLM instead of ~17,000 tokens of raw PL/SQL. The LLM explains the business logic with exact line references. The entire round trip takes ~2 seconds at ~$0.005 per query.
+
+---
+
+## Sample Output
+
+**Query:** *"How is N_ANNUAL_GROSS_INCOME calculated?"*
+
+**Response:**
+
+> **Execution Condition:** This entire function ONLY runs when the reporting month is December.
+>
+> **Step 1: Initial Insert** (FN_LOAD_OPS_RISK_DATA, lines 203-222)
+> Data is inserted from ABL_OPS_RISK_DATA into STG_OPS_RISK_DATA. The base value is typed in manually via Excel upload and loaded as-is.
+>
+> **Step 2: CBA/RBA Deduction Adjustment** (FN_LOAD_OPS_RISK_DATA, lines 309-324)
+> N_ANNUAL_GROSS_INCOME is adjusted using TOT1 + CBA_DEDUCTION for CBA, and LN_DEDUCITON_RATIO_1 for RBA.
+> *Intermediate variables: TOT1 = LN_TOTAL_DEDUCT + (-1 × LN_DEDUCITON_RATIO_1), CBA_DEDUCTION = SUM(N_AMOUNT_ACY) from 3 specific GL codes*
+>
+> **Step 3: ABLIBG Adjustment** (FN_LOAD_OPS_RISK_DATA, lines 329-344)
+> Same deduction logic applied separately for the ABLIBG entity using branch-filtered GL data.
+>
+> **Step 4: Pass-Through** (TLX_OPS_ADJ_MISDATE)
+> Copies N_ANNUAL_GROSS_INCOME unchanged through STG_OPS_ADJ_MISDATE_TLX and back. Purpose: date-adjusts historical records so the engine can average 3 years of gross income.
 
 ---
 
@@ -108,13 +139,13 @@ RTIE/
       cache_manager.py         Cache slash commands
       indexer.py               Vector index builder (OpenAI embeddings)
     parsing/                 PL/SQL graph parser (pure Python, no LLM)
-      parser.py                Regex-based block extractor
+      parser.py                Regex-based block extractor + comment stripping
       builder.py               Typed node + calculation builder
       indexer.py               Cross-function graph + column index
       serializer.py            JSON + MessagePack serialization
       store.py                 Redis graph storage
       loader.py                Startup pipeline orchestrator
-      query_engine.py          Query-time subgraph filtering
+      query_engine.py          Query-time subgraph filtering + payload assembly
     pipeline/                LangGraph orchestration
       logic_graph.py           StateGraph definition + conditional edges
       state.py                 LogicState TypedDict
@@ -179,7 +210,7 @@ graph TB
 
 ### LLM Provider
 
-All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported -- switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB).
+All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB).
 
 ---
 
@@ -235,9 +266,9 @@ flowchart TD
 ```
 
 **Routing logic at Stage 4:**
-- If graph pipeline produced `llm_payload` -- `stream_semantic()` with structured payload
-- Else if `VARIABLE_TRACE` -- Variable Tracer (3-stage extraction pipeline)
-- Else -- `stream_semantic()` with raw source fallback
+- If graph pipeline produced `llm_payload` — `stream_semantic()` with structured payload (~300 tokens)
+- Else if `VARIABLE_TRACE` — Variable Tracer (3-stage extraction pipeline)
+- Else — `stream_semantic()` with raw source fallback
 
 ### LangGraph StateGraph (7 nodes, conditional routing)
 
@@ -277,7 +308,7 @@ flowchart LR
 
 ### Graph Parsing Pipeline (Startup)
 
-On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis:
+On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis. A 1,500-line function (67,721 chars) compresses to ~288 lines (9,084 chars) — **86.6% reduction**. At query time, only the relevant subgraph is sent to the LLM (~300 tokens instead of ~17,000).
 
 ```mermaid
 flowchart TD
@@ -300,11 +331,22 @@ flowchart TD
 
 **Calculation types:** DIRECT, ARITHMETIC, CONDITIONAL, FALLBACK, OVERRIDE
 
+**Parser handles these patterns:**
+| Pattern | What it captures |
+|---------|-----------------|
+| Function-level execution conditions | `IF EXTRACT(MONTH...) = 12` — December-only functions |
+| Intermediate variable calculations | `SELECT INTO` and `:=` assignments (SCALAR_COMPUTE nodes) |
+| Composite key overrides | `DECODE(V_GL_CODE \|\| '-' \|\| V_BRANCH_CODE, ...)` |
+| NVL/COALESCE fallback logic | Primary subquery lookup with column fallback |
+| WHILE loop iteration detail | Counter range, what data each iteration processes |
+| Transaction boundaries | `committed_after` flag on every node for failure analysis |
+| Commented-out blocks | Flagged as `commented_out_nodes` — never treated as active logic |
+
 ---
 
 ### Query Engine Pipeline (Query-Time)
 
-When the graph is available, the query engine resolves a user question to a compact structured payload in microseconds -- replacing ~17,000 tokens of raw PL/SQL with a ~2-4KB focused payload:
+When the graph is available, the query engine resolves a user question to a compact structured payload in microseconds — replacing ~17,000 tokens of raw PL/SQL with a ~2-4KB focused payload:
 
 ```mermaid
 flowchart TD
@@ -329,19 +371,29 @@ flowchart TD
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
 
-**Example output structure (4 steps instead of raw 500+ lines):**
+**Example: "How is N_ANNUAL_GROSS_INCOME calculated?"**
+
+| What happens | Tool | Time | Cost |
+|---|---|---|---|
+| Alias resolution | Redis | < 1ms | Free |
+| Column index lookup | Redis | < 1ms | Free |
+| Fetch 6 nodes + edges | Redis | < 1ms | Free |
+| Assemble payload | Python | < 1ms | Free |
+| LLM explanation | GPT-4o (1 call, ~500 tokens) | ~2s | ~$0.005 |
+
+**Output structure (4 steps instead of raw 500+ lines):**
 ```
 Step 1: INSERT seed from ABL_OPS_RISK_DATA into STG_OPS_RISK_DATA
 Step 2: UPDATE CBA/RBA with CASE expression (intermediate vars: TOT1, CBA_DEDUCTION)
-Step 3: UPDATE ABLIBG with CASE expression
-Step 4: [PASS-THROUGH] TLX_OPS_ADJ_MISDATE -- copies value unchanged through staging table
+Step 3: UPDATE ABLIBG with CASE expression (intermediate vars: LN_SUB_TOTAL_ABLIBG)
+Step 4: [PASS-THROUGH] TLX_OPS_ADJ_MISDATE — copies value unchanged through staging table
 ```
 
 ---
 
 ### Variable Tracer (3-Stage Pipeline)
 
-When a user asks "How is EAD_AMOUNT calculated?" and the graph pipeline has no matches, the Variable Tracer extracts relevant lines using a hybrid LLM + Python approach:
+When a user asks "How is EAD_AMOUNT calculated?" and the graph pipeline has no matches, the Variable Tracer is the fallback. It extracts relevant lines using a hybrid LLM + Python approach:
 
 ```mermaid
 flowchart TD
@@ -359,6 +411,10 @@ flowchart TD
     style S3 fill:#d97706,color:#fff,stroke:none
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
+
+**Primary path vs fallback:**
+- **Graph pipeline** (primary) — used when the target variable is found in the column index. Produces a structured ~300 token payload. No raw source sent to LLM.
+- **Variable Tracer** (fallback) — used when the graph has no matches. Extracts relevant lines from raw source using regex + LLM hybrid approach.
 
 ---
 
@@ -390,6 +446,20 @@ event: error  -> Error display
 
 ---
 
+## Safety Principles
+
+RTIE is strictly read-only. It never modifies any database object, function, or table.
+
+| Layer | Protection |
+|---|---|
+| Database | Oracle service account has SELECT-only privileges |
+| Code | SQL Guardian validates every query via AST parse-tree — rejects DML/DDL |
+| LLM | Never writes SQL, never computes numbers, never modifies any object |
+| Parameters | All Oracle queries use bind variables — no string interpolation |
+| Limits | FETCH FIRST N ROWS ONLY injected on all unbounded queries |
+
+---
+
 ## CLI Reference
 
 | Command | Description |
@@ -405,13 +475,13 @@ event: error  -> Error display
 
 | Command | Description |
 |---------|-------------|
-| `/refresh-cache <name>` | Refresh one object's source cache |
+| `/refresh-cache <n>` | Refresh one object's source cache |
 | `/refresh-cache-all` | Re-sync all functions for the schema |
-| `/cache-status <name>` | Show cache timestamps and version hash |
+| `/cache-status <n>` | Show cache timestamps and version hash |
 | `/cache-list` | List all cached keys |
-| `/cache-clear <name>` | Delete one cache entry |
+| `/cache-clear <n>` | Delete one cache entry |
 | `/refresh-schema` | Detect Oracle DDL changes and sync |
-| `/index-module <name> [--force]` | Index one module's functions |
+| `/index-module <n> [--force]` | Index one module's functions |
 | `/index-all [--force]` | Index all modules |
 | `/index-status` | Show vector index statistics |
 
@@ -432,7 +502,12 @@ event: error  -> Error display
    python cli.py index --force
    ```
 
-3. Ask questions about it immediately.
+3. Restart the backend (graph pipeline re-parses on startup):
+   ```bash
+   python run.py
+   ```
+
+4. Ask questions about it immediately.
 
 ---
 
@@ -469,3 +544,22 @@ python -m pytest tests/unit/parsing/ -v
 ```
 
 44 tests covering: parser, builder, indexer, serializer, store, loader, query engine.
+
+---
+
+## What's Excluded (by design)
+
+| Item | Reason |
+|---|---|
+| Proactive batch detection | Phase 1 is reactive only — engineers ask, system answers |
+| pgvector / RAG | Not needed — all knowledge is in queryable Oracle tables and parsed graphs |
+| AutoGen / CrewAI | Insufficient determinism for regulated BASEL environment |
+| Any write operations | RTIE is strictly read-only — no exceptions |
+
+---
+
+## Roadmap
+
+**Phase 1 (current):** Logic-only — explain functions, procedures, variable lineage across the DATA_PREPARATION batch.
+
+**Phase 2 (planned):** Value lineage — trace actual account-level values from staging through to final FCT output. Connect to live Oracle data. Show mathematical proof with real numbers.
