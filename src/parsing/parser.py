@@ -46,6 +46,7 @@ PATTERNS = {
     "WHERE": re.compile(r'\bWHERE\b', re.IGNORECASE),
     "UNION": re.compile(r'\bUNION\b', re.IGNORECASE),
     "SET_CLAUSE": re.compile(r'^\s*SET\b', re.IGNORECASE),
+    "ASSIGNMENT": re.compile(r'^\s*(\w+)\s*:=\s*(.+?)\s*;', re.IGNORECASE),
 }
 
 # DML keywords that start a new operation block
@@ -66,6 +67,135 @@ _RESERVED_WORDS = frozenset({
 def _is_table_name(name: str) -> bool:
     """Return True if *name* looks like a real table name (not a keyword)."""
     return name.upper() not in _RESERVED_WORDS
+
+
+# ---------------------------------------------------------------------------
+# Comment stripping
+# ---------------------------------------------------------------------------
+
+def clean_source_lines(
+    raw_lines: list[str],
+) -> tuple[list[str], list[tuple[int, int]]]:
+    """Return cleaned source lines with comments stripped, plus block-comment ranges.
+
+    Processing rules
+    ----------------
+    * Lines that start with ``--`` (after stripping whitespace) are replaced
+      with ``""``.
+    * Inline ``--`` comments are truncated at the ``--`` position **unless**
+      the ``--`` appears inside a string literal (delimited by single quotes).
+    * ``/* … */`` block comments that span multiple lines cause every line
+      between (and including) the opener and closer to be replaced with ``""``.
+    * ``/* … */`` on the same line: just that portion is removed.
+    * **No line is ever deleted** — the returned list has the same length as
+      *raw_lines* so that original line numbers remain valid.
+
+    Returns
+    -------
+    (cleaned_lines, comment_ranges)
+        *comment_ranges* is a list of ``(start_idx, end_idx)`` tuples (both
+        0-based, inclusive) for every ``/* … */`` block that spans at least two
+        lines.
+    """
+    cleaned: list[str] = []
+    comment_ranges: list[tuple[int, int]] = []
+    in_block = False
+    block_start = 0
+
+    for i, line in enumerate(raw_lines):
+        if in_block:
+            # Inside a multi-line block comment — look for the closer.
+            close_pos = line.find("*/")
+            if close_pos != -1:
+                in_block = False
+                # Keep whatever follows the closing */
+                remainder = line[close_pos + 2:]
+                # The remainder may itself have inline -- comments
+                cleaned.append(_strip_inline_dash(remainder))
+                comment_ranges.append((block_start, i))
+            else:
+                cleaned.append("")
+            continue
+
+        # Not currently inside a block comment.
+        # First, handle /* ... */ that opens (and maybe closes) on this line.
+        result = _strip_block_and_inline(line)
+        if result is None:
+            # The line opens a block comment that is NOT closed on this line.
+            block_start = i
+            in_block = True
+            cleaned.append("")
+        else:
+            cleaned.append(result)
+
+    # If we ended while still inside a block comment, close it at the last line.
+    if in_block:
+        comment_ranges.append((block_start, len(raw_lines) - 1))
+
+    return cleaned, comment_ranges
+
+
+def _strip_inline_dash(line: str) -> str:
+    """Remove an inline ``--`` comment from *line*, respecting string literals."""
+    in_string = False
+    for i, ch in enumerate(line):
+        if ch == "'" :
+            in_string = not in_string
+        elif not in_string and line[i:i + 2] == "--":
+            return line[:i].rstrip()
+    return line
+
+
+def _strip_block_and_inline(line: str) -> str | None:
+    """Process a single line for ``/* */`` and ``--`` comments.
+
+    Returns the cleaned string, or ``None`` if the line opens a block comment
+    that is **not** closed on the same line (signalling the caller to enter
+    block-comment mode).
+    """
+    result_parts: list[str] = []
+    in_string = False
+    i = 0
+    length = len(line)
+
+    while i < length:
+        ch = line[i]
+
+        # Track string literals (single-quote delimited).
+        if ch == "'":
+            in_string = not in_string
+            result_parts.append(ch)
+            i += 1
+            continue
+
+        if in_string:
+            result_parts.append(ch)
+            i += 1
+            continue
+
+        # -- single-line comment: discard the rest of the line.
+        if line[i:i + 2] == "--":
+            break
+
+        # /* block comment opener
+        if line[i:i + 2] == "/*":
+            close_pos = line.find("*/", i + 2)
+            if close_pos != -1:
+                # Same-line close — skip from /* to */
+                i = close_pos + 2
+                continue
+            else:
+                # Block comment opened but not closed on this line.
+                return None
+
+        result_parts.append(ch)
+        i += 1
+
+    built = "".join(result_parts).rstrip()
+    # If the original line (stripped) was purely a -- comment, return "".
+    if not built.strip():
+        return ""
+    return built
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +373,39 @@ def find_block_end(lines: list[str], start: int, block_type: str) -> int:
             idx += 1
         return total - 1
 
-    # ---- UPDATE / DELETE / SELECT_INTO: end at the top-level semicolon ----
+    # ---- UPDATE: paren + CASE depth aware, ends at FIRST semicolon at depth 0 ----
+    if block_type == "UPDATE":
+        paren_depth = 0
+        case_depth = 0
+        in_string = False
+        idx = start
+        while idx < total:
+            line = lines[idx]
+            for ch in line:
+                if ch == "'" and not in_string:
+                    in_string = True
+                elif ch == "'" and in_string:
+                    in_string = False
+                elif not in_string:
+                    if ch == '(':
+                        paren_depth += 1
+                    elif ch == ')':
+                        paren_depth -= 1
+                    elif ch == ';' and paren_depth <= 0 and case_depth <= 0:
+                        return idx
+            # Track CASE/END keywords (only outside strings)
+            upper_line = line.upper()
+            if not in_string:
+                case_depth += len(re.findall(r'\bCASE\b', upper_line))
+                # END that is NOT followed by LOOP or IF decrements case_depth
+                for m in re.finditer(r'\bEND\b', upper_line):
+                    after = upper_line[m.end():].strip()
+                    if not after.startswith('LOOP') and not after.startswith('IF'):
+                        case_depth -= 1
+            idx += 1
+        return total - 1
+
+    # ---- DELETE / SELECT_INTO: end at the top-level semicolon ----
     paren_depth = 0
     idx = start
     while idx < total:
@@ -603,31 +765,53 @@ def parse_function(
         ``is_commented_out``.
     """
     total_lines = len(source_lines)
+
+    # --- Clean source lines: strip comments while preserving line numbers ---
+    cleaned_lines, comment_ranges = clean_source_lines(source_lines)
     comment_map = _build_comment_map(source_lines)
     execution_condition = detect_execution_condition(source_lines)
 
+    # Build a set of line indices that fall inside /* */ block-comment ranges
+    block_comment_lines: set[int] = set()
+    for cr_start, cr_end in comment_ranges:
+        for li in range(cr_start, cr_end + 1):
+            block_comment_lines.add(li)
+
     raw_blocks: list[dict[str, Any]] = []
     idx = 0
+    visited_lines: set[int] = set()
+
+    # Regex for simple stage/counter assignments to skip (e.g., LV_STAGE := 3)
+    _STAGE_COUNTER_RE = re.compile(
+        r'^\s*(LV_STAGE|LN_COUNTER|LN_CNT|LN_IDX|LN_INDEX|LN_STEP)\s*:=\s*\d+\s*;',
+        re.IGNORECASE,
+    )
 
     # Track commit positions for preceded_by / followed_by logic
     commit_indices: set[int] = set()
-    for ci, line in enumerate(source_lines):
+    for ci, line in enumerate(cleaned_lines):
         if PATTERNS["COMMIT"].match(line) and not comment_map[ci]:
             commit_indices.add(ci)
 
     while idx < total_lines:
-        line = source_lines[idx]
+        # Skip lines already consumed by a previous block
+        if idx in visited_lines:
+            idx += 1
+            continue
+
+        # Use cleaned_lines for all keyword detection / block scanning
+        line = cleaned_lines[idx]
 
         # Skip blank / pure-comment lines for block detection
         stripped = line.strip()
         if not stripped:
             idx += 1
             continue
-        if _is_comment_line(line) and not comment_map[idx]:
+        if _is_comment_line(source_lines[idx]) and not comment_map[idx]:
             idx += 1
             continue
 
-        is_commented = comment_map[idx]
+        is_commented = comment_map[idx] or idx in block_comment_lines
 
         # --- Detect SELECT INTO across current + next few lines ---
         select_into_detected = False
@@ -637,7 +821,7 @@ def parse_function(
             # Peek ahead up to 5 lines to see if INTO follows
             peek_text = line
             for pi in range(1, min(6, total_lines - idx)):
-                peek_text += " " + source_lines[idx + pi]
+                peek_text += " " + cleaned_lines[idx + pi]
                 if re.search(r'\bINTO\b', peek_text, re.IGNORECASE):
                     select_into_detected = True
                     break
@@ -650,31 +834,62 @@ def parse_function(
         if select_into_detected and block_type is None:
             block_type = "SELECT_INTO"
 
+        # --- Detect PL/SQL variable assignments (VAR := expr;) ---
+        if block_type is None:
+            assign_match = PATTERNS["ASSIGNMENT"].match(line)
+            if assign_match and not _STAGE_COUNTER_RE.match(line):
+                variable_name = assign_match.group(1)
+                right_side = assign_match.group(2).strip()
+                raw_blocks.append({
+                    "block_type": "SCALAR_COMPUTE",
+                    "line_start": idx + 1,        # 1-based
+                    "line_end": idx + 1,           # 1-based
+                    "raw_lines": [source_lines[idx]],
+                    "output_variable": variable_name,
+                    "expression": right_side,
+                    "preceded_by_commit": False,    # filled in below
+                    "followed_by_commit": False,    # filled in below
+                    "is_commented_out": is_commented,
+                })
+                visited_lines.add(idx)
+                idx += 1
+                continue
+
         if block_type is None:
             idx += 1
             continue
 
         block_start = idx
-        block_end = find_block_end(source_lines, block_start, block_type)
+        # Use cleaned_lines for block-end detection (comment-free scanning)
+        block_end = find_block_end(cleaned_lines, block_start, block_type)
 
-        # Determine whether any line in the block is commented out
+        # Add all lines in the block range to visited_lines
+        for vl in range(block_start, block_end + 1):
+            visited_lines.add(vl)
+
+        # Determine whether block is commented out using comment_ranges
         block_is_commented = is_commented
         if not block_is_commented:
-            # Check if ALL lines are inside block comments
+            # Check if ALL lines are inside block comments or the comment map
             all_commented = all(
-                comment_map[j] for j in range(block_start, block_end + 1)
+                (comment_map[j] or j in block_comment_lines)
+                for j in range(block_start, block_end + 1)
                 if j < len(comment_map)
             )
             if all_commented:
                 block_is_commented = True
 
+        # Store ORIGINAL source_lines as raw_lines (preserving original text)
+        # Store cleaned_lines for parsing (comments stripped)
         raw_lines = source_lines[block_start:block_end + 1]
+        block_cleaned_lines = cleaned_lines[block_start:block_end + 1]
 
         raw_blocks.append({
             "block_type": block_type,
             "line_start": block_start + 1,   # 1-based
             "line_end": block_end + 1,        # 1-based
             "raw_lines": raw_lines,
+            "cleaned_lines": block_cleaned_lines,
             "preceded_by_commit": False,       # filled in below
             "followed_by_commit": False,       # filled in below
             "is_commented_out": block_is_commented,

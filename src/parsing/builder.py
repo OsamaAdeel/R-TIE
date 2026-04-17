@@ -35,6 +35,19 @@ _COL_REF_RE = re.compile(
     r"(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)",
 )
 
+# PL/SQL keywords that should not be treated as variable references
+_PLSQL_KEYWORDS = frozenset({
+    "SELECT", "FROM", "WHERE", "SET", "INTO", "VALUES", "ON", "AND", "OR",
+    "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE", "EXISTS", "CASE", "WHEN",
+    "THEN", "ELSE", "END", "AS", "ALL", "DUAL", "MATCHED", "USING",
+    "LOOP", "IF", "ELSIF", "BEGIN", "RETURN", "EXCEPTION", "COMMIT",
+    "ROLLBACK", "DECLARE", "CURSOR", "OPEN", "FETCH", "CLOSE", "FOR",
+    "WHILE", "EXIT", "PRAGMA", "SYSDATE", "SYSTIMESTAMP", "TRUE", "FALSE",
+    "INSERT", "UPDATE", "DELETE", "MERGE", "JOIN", "LEFT", "RIGHT",
+    "INNER", "OUTER", "FULL", "CROSS", "GROUP", "BY", "ORDER", "HAVING",
+    "UNION", "NVL", "COALESCE", "DECODE", "EXTRACT", "MONTH", "YEAR",
+})
+
 
 # ===================================================================
 # 1. Main entry
@@ -58,9 +71,12 @@ def build_function_graph(
     """
     parsed = parse_function(source_lines, function_name)
 
-    raw_blocks = parsed.get("blocks", [])
+    raw_blocks = parsed.get("raw_blocks", [])
     execution_condition = parsed.get("execution_condition", None)
-    commented_blocks = parsed.get("commented_blocks", [])
+
+    # Separate active blocks from commented-out blocks
+    commented_blocks = [b for b in raw_blocks if b.get("is_commented_out")]
+    raw_blocks = [b for b in raw_blocks if not b.get("is_commented_out")]
 
     nodes: list[dict] = []
     commented_out_nodes: list[dict] = []
@@ -121,25 +137,26 @@ def build_insert_node(raw_block: dict, node_id: str) -> dict:
     Detects UNION arms when the SELECT half contains UNION / UNION ALL
     and builds per-arm column maps.
     """
-    raw_lines: list[str] = raw_block.get("raw_lines", [])
+    raw_lines: list[str] = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "INSERT")
     body = "\n".join(raw_lines)
 
-    tables = extract_table_names(raw_lines)
-    target_table = tables.get("target", "")
-    source_tables = tables.get("sources", [])
+    tables = extract_table_names(raw_lines, block_type)
+    target_table = tables.get("target_table", "")
+    source_tables = tables.get("source_tables", [])
 
     union_arms = build_union_arms(raw_lines)
 
     if union_arms:
         # Build column maps / calculations per arm
         for arm in union_arms:
-            arm_maps = extract_column_maps(arm.get("raw_lines", []))
+            arm_maps = extract_column_maps(arm.get("raw_lines", []), "INSERT")
             arm["column_maps"] = arm_maps
             arm["calculations"] = _build_calculations_from_maps(
                 arm_maps, arm.get("raw_lines", []), arm.get("line_start", 0),
             )
     # Overall column maps from the full block
-    column_maps = extract_column_maps(raw_lines)
+    column_maps = extract_column_maps(raw_lines, block_type)
     conditions = extract_conditions(raw_lines)
     calculations = _build_calculations_from_maps(
         column_maps, raw_lines, raw_block.get("line_start", 0),
@@ -172,12 +189,13 @@ def build_insert_node(raw_block: dict, node_id: str) -> dict:
 
 def build_update_node(raw_block: dict, node_id: str) -> dict:
     """Build graph node for an UPDATE / SET statement."""
-    raw_lines = raw_block.get("raw_lines", [])
-    tables = extract_table_names(raw_lines)
-    target_table = tables.get("target", "")
-    source_tables = tables.get("sources", [])
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "UPDATE")
+    tables = extract_table_names(raw_lines, block_type)
+    target_table = tables.get("target_table", "")
+    source_tables = tables.get("source_tables", [])
 
-    column_maps = extract_column_maps(raw_lines)
+    column_maps = extract_column_maps(raw_lines, block_type)
     conditions = extract_conditions(raw_lines)
     calculations = _build_calculations_from_maps(
         column_maps, raw_lines, raw_block.get("line_start", 0),
@@ -210,18 +228,19 @@ def build_merge_node(raw_block: dict, node_id: str) -> dict:
 
     Extracts WHEN MATCHED and WHEN NOT MATCHED clauses.
     """
-    raw_lines = raw_block.get("raw_lines", [])
-    tables = extract_table_names(raw_lines)
-    target_table = tables.get("target", "")
-    source_tables = tables.get("sources", [])
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "MERGE")
+    tables = extract_table_names(raw_lines, block_type)
+    target_table = tables.get("target_table", "")
+    source_tables = tables.get("source_tables", [])
 
-    column_maps = extract_column_maps(raw_lines)
+    column_maps = extract_column_maps(raw_lines, block_type)
     conditions = extract_conditions(raw_lines)
 
     matched_block, not_matched_block = _split_merge_clauses(raw_lines)
 
-    matched_maps = extract_column_maps(matched_block) if matched_block else {}
-    not_matched_maps = extract_column_maps(not_matched_block) if not_matched_block else {}
+    matched_maps = extract_column_maps(matched_block, "MERGE") if matched_block else {}
+    not_matched_maps = extract_column_maps(not_matched_block, "MERGE") if not_matched_block else {}
 
     line_start = raw_block.get("line_start", 0)
     matched_calcs = _build_calculations_from_maps(matched_maps, matched_block or [], line_start)
@@ -260,16 +279,29 @@ def build_merge_node(raw_block: dict, node_id: str) -> dict:
 # ===================================================================
 
 def build_scalar_compute_node(raw_block: dict, node_id: str) -> dict:
-    """Build graph node for a SELECT ... INTO variable assignment."""
-    raw_lines = raw_block.get("raw_lines", [])
+    """Build graph node for a SELECT ... INTO or VAR := expr assignment."""
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "SCALAR_COMPUTE")
     body = "\n".join(raw_lines)
 
-    tables = extract_table_names(raw_lines)
-    source_tables = tables.get("sources", [])
-    conditions = extract_conditions(raw_lines)
+    # Check if this is a direct assignment block (from parser ASSIGNMENT detection)
+    direct_output_var = raw_block.get("output_variable")
+    direct_expression = raw_block.get("expression")
 
-    output_variable = _extract_into_variable(body)
-    expression = _extract_select_expression(body)
+    if direct_output_var and direct_expression:
+        # Assignment-style SCALAR_COMPUTE (VAR := expr;)
+        output_variable = direct_output_var
+        expression = direct_expression
+        source_tables: list[str] = []
+        conditions: list[str] = []
+    else:
+        # SELECT ... INTO style
+        tables = extract_table_names(raw_lines, block_type)
+        source_tables = tables.get("source_tables", [])
+        conditions = extract_conditions(raw_lines)
+        output_variable = _extract_into_variable(body)
+        expression = _extract_select_expression(body)
+
     line_start = raw_block.get("line_start", 0)
     calculation = build_calculation_block(
         output_variable or "result", expression, raw_lines, line_start,
@@ -300,7 +332,8 @@ def build_scalar_compute_node(raw_block: dict, node_id: str) -> dict:
 
 def build_while_loop_node(raw_block: dict, node_id: str) -> dict:
     """Build graph node for a WHILE loop construct."""
-    raw_lines = raw_block.get("raw_lines", [])
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "WHILE")
     body = "\n".join(raw_lines)
 
     loop_definition = _extract_while_definition(body, raw_lines)
@@ -312,7 +345,7 @@ def build_while_loop_node(raw_block: dict, node_id: str) -> dict:
         inner_id = f"{node_id}_INNER"
         inner_node = build_node(inner_blocks[0], inner_id)
 
-    tables = extract_table_names(raw_lines)
+    tables = extract_table_names(raw_lines, block_type)
     conditions = extract_conditions(raw_lines)
 
     summary = _summarise_while(loop_definition, inner_node)
@@ -323,8 +356,8 @@ def build_while_loop_node(raw_block: dict, node_id: str) -> dict:
         "line_start": raw_block.get("line_start"),
         "line_end": raw_block.get("line_end"),
         "committed_after": raw_block.get("committed_after", False),
-        "target_table": tables.get("target"),
-        "source_tables": tables.get("sources", []),
+        "target_table": tables.get("target_table"),
+        "source_tables": tables.get("source_tables", []),
         "column_maps": {},
         "calculation": [],
         "conditions": conditions,
@@ -342,7 +375,8 @@ def build_while_loop_node(raw_block: dict, node_id: str) -> dict:
 
 def build_for_loop_node(raw_block: dict, node_id: str) -> dict:
     """Build graph node for a FOR loop (cursor-based)."""
-    raw_lines = raw_block.get("raw_lines", [])
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "FOR_LOOP")
     body = "\n".join(raw_lines)
 
     cursor_query = _extract_cursor_query(body)
@@ -354,7 +388,7 @@ def build_for_loop_node(raw_block: dict, node_id: str) -> dict:
         if inner_op is not None:
             inner_operations.append(inner_op)
 
-    tables = extract_table_names(raw_lines)
+    tables = extract_table_names(raw_lines, block_type)
     conditions = extract_conditions(raw_lines)
 
     summary = _summarise_for(cursor_query, inner_operations)
@@ -365,8 +399,8 @@ def build_for_loop_node(raw_block: dict, node_id: str) -> dict:
         "line_start": raw_block.get("line_start"),
         "line_end": raw_block.get("line_end"),
         "committed_after": raw_block.get("committed_after", False),
-        "target_table": tables.get("target"),
-        "source_tables": tables.get("sources", []),
+        "target_table": tables.get("target_table"),
+        "source_tables": tables.get("source_tables", []),
         "column_maps": {},
         "calculation": [],
         "conditions": conditions,
@@ -445,7 +479,21 @@ def build_calculation_block(
             "line": line_num,
         }
 
-    # --- 4. DIRECT ---
+    # --- 4. VARIABLE_REFERENCE: local variable (no dot, not a known literal) ---
+    expr_stripped = expression.strip()
+    if (re.match(r'^[A-Za-z_]\w*$', expr_stripped)
+            and '.' not in expr_stripped
+            and not _is_literal(expr_stripped)
+            and expr_stripped.upper() not in _PLSQL_KEYWORDS):
+        return {
+            "column": column,
+            "type": "VARIABLE_REFERENCE",
+            "expression": expr_stripped,
+            "variable": expr_stripped,
+            "line": line_num,
+        }
+
+    # --- 5. DIRECT ---
     source_table, source_column = _parse_direct_ref(expression)
     return {
         "column": column,
@@ -526,15 +574,25 @@ def build_intra_function_edges(nodes: list[dict], function_name: str) -> list[di
         for j in range(i + 1, len(nodes)):
             tgt_node = nodes[j]
 
-            # --- variable-flow edge ---
+            # --- variable-flow edge (SCALAR_COMPUTE -> consumer) ---
             if src_node.get("type") == "SCALAR_COMPUTE":
                 out_var = src_node.get("output_variable", "")
                 if out_var and _node_references_variable(tgt_node, out_var):
+                    sc_node_id = src_node["id"]
+                    consuming_node_id = tgt_node["id"]
                     edge_idx += 1
                     edges.append({
                         "id": f"{function_name}_E{edge_idx}",
-                        "from": src_node["id"],
-                        "to": tgt_node["id"],
+                        "from_node": f"{function_name}:{sc_node_id}",
+                        "to_node": f"{function_name}:{consuming_node_id}",
+                        "via_table": None,
+                        "source_col": out_var,
+                        "target_col": "computed",
+                        "transform": "variable_reference",
+                        "description": f"Variable {out_var} computed in {sc_node_id} consumed by {consuming_node_id}",
+                        # Legacy keys for backward compatibility
+                        "from": sc_node_id,
+                        "to": consuming_node_id,
                         "type": "VARIABLE_FLOW",
                         "variable": out_var,
                     })
@@ -576,13 +634,39 @@ def build_function_column_index(nodes: list[dict], function_name: str) -> dict:
     for node in nodes:
         nid = node["id"]
 
-        # column_maps keys (target columns) and values (source expressions)
-        for target_col, src_expr in (node.get("column_maps") or {}).items():
-            _register(target_col, nid)
-            # If the source is a plain column reference, register it too
-            if isinstance(src_expr, str):
-                for ref in _extract_column_names_from_expr(src_expr):
-                    _register(ref, nid)
+        # column_maps — handle both INSERT format (has "mapping" sub-dict)
+        # and UPDATE format (flat dict of col: expr)
+        col_maps_raw = node.get("column_maps") or {}
+        if isinstance(col_maps_raw, dict):
+            # INSERT format: {"columns": [...], "values": [...], "mapping": {...}}
+            if "mapping" in col_maps_raw:
+                actual_map = col_maps_raw.get("mapping", {})
+                # Also register column names from the "columns" list
+                for col_name in col_maps_raw.get("columns", []):
+                    if isinstance(col_name, str):
+                        _register(col_name, nid)
+                # Also register values
+                for val in col_maps_raw.get("values", []):
+                    if isinstance(val, str):
+                        for ref in _extract_column_names_from_expr(val):
+                            _register(ref, nid)
+            # UPDATE format: {"assignments": [(col, expr), ...]}
+            elif "assignments" in col_maps_raw:
+                actual_map = {}
+                for col, expr in col_maps_raw.get("assignments", []):
+                    actual_map[col] = expr
+            else:
+                actual_map = col_maps_raw
+            for target_col, src_expr in actual_map.items():
+                _register(target_col, nid)
+                if isinstance(src_expr, str):
+                    for ref in _extract_column_names_from_expr(src_expr):
+                        _register(ref, nid)
+
+        # Also register output_variable for SCALAR_COMPUTE nodes
+        ov = node.get("output_variable")
+        if ov:
+            _register(ov, nid)
 
         # conditions
         for cond in (node.get("conditions") or []):
@@ -597,6 +681,48 @@ def build_function_column_index(nodes: list[dict], function_name: str) -> dict:
                 expr = calc.get("expression", "")
                 for ref in _extract_column_names_from_expr(expr):
                     _register(ref, nid)
+
+        # For WHILE_LOOP: recurse into inner_node
+        inner = node.get("inner_node")
+        if inner and isinstance(inner, dict):
+            inner_maps = inner.get("column_maps") or {}
+            if isinstance(inner_maps, dict):
+                if "mapping" in inner_maps:
+                    for col in inner_maps.get("columns", []):
+                        if isinstance(col, str):
+                            _register(col, nid)
+                    for val in inner_maps.get("values", []):
+                        if isinstance(val, str):
+                            for ref in _extract_column_names_from_expr(val):
+                                _register(ref, nid)
+                    for col in inner_maps.get("mapping", {}).keys():
+                        _register(col, nid)
+                elif "assignments" in inner_maps:
+                    for col, expr in inner_maps.get("assignments", []):
+                        _register(col, nid)
+                        if isinstance(expr, str):
+                            for ref in _extract_column_names_from_expr(expr):
+                                _register(ref, nid)
+                else:
+                    for col, expr in inner_maps.items():
+                        _register(col, nid)
+                        if isinstance(expr, str):
+                            for ref in _extract_column_names_from_expr(expr):
+                                _register(ref, nid)
+            for src in (inner.get("source_tables") or []):
+                _register(src, nid)
+            if inner.get("target_table"):
+                _register(inner["target_table"], nid)
+
+        # For FOR_LOOP: recurse into inner_operations
+        for inner_op in (node.get("inner_operations") or []):
+            if isinstance(inner_op, dict):
+                for col in (inner_op.get("column_maps") or {}).keys():
+                    _register(col, nid)
+                for src in (inner_op.get("source_tables") or []):
+                    _register(src, nid)
+                if inner_op.get("target_table"):
+                    _register(inner_op["target_table"], nid)
 
     return index
 
@@ -660,6 +786,8 @@ _BUILDER_DISPATCH.update({
     "MERGE": build_merge_node,
     "DELETE": build_update_node,  # DELETE uses same structure as UPDATE
     "SCALAR_COMPUTE": build_scalar_compute_node,
+    "SELECT_INTO": build_scalar_compute_node,  # SELECT INTO → SCALAR_COMPUTE
+    "WHILE": build_while_loop_node,
     "WHILE_LOOP": build_while_loop_node,
     "FOR_LOOP": build_for_loop_node,
 })
@@ -791,7 +919,11 @@ def _parse_case_when(expression: str, base_line: int) -> list[dict]:
 
 
 def _parse_arithmetic_components(expression: str) -> list[dict]:
-    """Break an arithmetic expression into operand/operator components."""
+    """Break an arithmetic expression into operand/operator components.
+
+    Operands that look like local variables (no dot qualifier, not a
+    literal, not a keyword) are tagged as ``VARIABLE_REFERENCE``.
+    """
     components: list[dict] = []
     # Tokenise on operators while keeping them
     tokens = re.split(r"(\s*[+\-*/]\s*)", expression)
@@ -802,7 +934,14 @@ def _parse_arithmetic_components(expression: str) -> list[dict]:
         if token in ("+", "-", "*", "/"):
             components.append({"type": "operator", "value": token})
         else:
-            components.append({"type": "operand", "value": token})
+            # Detect local variable references (plain identifier, no dot)
+            if (re.match(r'^[A-Za-z_]\w*$', token)
+                    and '.' not in token
+                    and not _is_literal(token)
+                    and token.upper() not in _PLSQL_KEYWORDS):
+                components.append({"type": "VARIABLE_REFERENCE", "value": token})
+            else:
+                components.append({"type": "operand", "value": token})
     return components
 
 
