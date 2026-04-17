@@ -193,9 +193,16 @@ function AgentThinking({ stage }) {
 function MarkdownResponse({ data }) {
   const { explanation, functions_analyzed } = data || {};
   const markdown = explanation?.markdown || '';
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(markdown);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
-    <div>
+    <div className="group/response">
       {/* Subtle context line */}
       {functions_analyzed?.length > 0 && (
         <div className="flex items-center gap-1.5 text-[11px] text-text-muted mb-3">
@@ -204,8 +211,19 @@ function MarkdownResponse({ data }) {
         </div>
       )}
 
-      {/* Markdown body — no card, no border, just clean text */}
+      {/* Markdown body */}
       <MarkdownBody markdown={markdown} />
+
+      {/* Action bar — visible on hover */}
+      <div className="flex items-center gap-1 mt-3 opacity-0 group-hover/response:opacity-100 transition-opacity duration-150">
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium text-[#aaa] hover:text-[#555] hover:bg-[#f5f5f5] transition-colors"
+        >
+          {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
     </div>
   );
 }

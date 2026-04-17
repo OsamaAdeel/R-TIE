@@ -421,6 +421,10 @@ class VariableTracer:
         for fn_name, source_lines in functions_source.items():
             for line_info in source_lines:
                 text = line_info.get("text", "")
+                stripped = text.strip()
+
+                # Skip commented-out lines — they are not active code
+                is_commented = stripped.startswith("--") or stripped.startswith("/*")
                 text_upper = text.upper()
 
                 matched = [
@@ -431,13 +435,16 @@ class VariableTracer:
                     continue
 
                 operation = self._classify_operation(text_upper, matched)
+                if is_commented:
+                    operation = "COMMENTED_OUT"
 
                 tagged_lines.append({
                     "function": fn_name,
                     "line": line_info.get("line", 0),
-                    "text": text.rstrip("\n").strip(),
+                    "text": stripped,
                     "aliases_matched": matched,
                     "operation": operation,
+                    "commented": is_commented,
                 })
 
         tagged_lines.sort(key=lambda x: (x["function"], x["line"]))
@@ -498,22 +505,41 @@ class VariableTracer:
             by_function.setdefault(fn, []).append(line)
 
         parts = []
+        active_lines = [l for l in tagged_lines if not l.get("commented")]
+        commented_lines = [l for l in tagged_lines if l.get("commented")]
+
         parts.append(f"TARGET VARIABLE: {target_variable}")
         parts.append(f"RESOLVED CODE VARIABLES: {', '.join(seed_variables)}")
         parts.append(f"ALL ALIASES (including transitive): {', '.join(sorted(all_aliases))}")
         parts.append(f"FUNCTIONS INVOLVED: {', '.join(sorted(by_function.keys()))}")
-        parts.append(f"TOTAL RELEVANT LINES: {len(tagged_lines)}")
+        parts.append(f"ACTIVE LINES: {len(active_lines)}")
+        if commented_lines:
+            parts.append(f"COMMENTED-OUT LINES: {len(commented_lines)} (deprecated — do NOT treat as active logic)")
         parts.append("")
 
         for fn_name, lines in sorted(by_function.items()):
-            parts.append(f"=== {fn_name} ({len(lines)} relevant lines) ===")
-            for line in lines:
-                aliases_str = ",".join(line["aliases_matched"])
-                parts.append(
-                    f"  L{line['line']:>4} [{line['operation']:<12}] "
-                    f"({aliases_str}) | {line['text']}"
-                )
-            parts.append("")
+            active = [l for l in lines if not l.get("commented")]
+            commented = [l for l in lines if l.get("commented")]
+
+            if active:
+                parts.append(f"=== {fn_name} ({len(active)} active lines) ===")
+                for line in active:
+                    aliases_str = ",".join(line["aliases_matched"])
+                    parts.append(
+                        f"  L{line['line']:>4} [{line['operation']:<12}] "
+                        f"({aliases_str}) | {line['text']}"
+                    )
+                parts.append("")
+
+            if commented:
+                parts.append(f"=== {fn_name} — COMMENTED OUT (deprecated, not executed) ===")
+                for line in commented:
+                    aliases_str = ",".join(line["aliases_matched"])
+                    parts.append(
+                        f"  L{line['line']:>4} [COMMENTED_OUT ] "
+                        f"({aliases_str}) | {line['text']}"
+                    )
+                parts.append("")
 
         chain_text = "\n".join(parts)
         logger.info(
