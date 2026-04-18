@@ -620,6 +620,16 @@ _MAX_PAYLOAD_CHARS = 4000
 _COLUMN_MAP_TRUNCATE_THRESHOLD = 8
 
 
+def _date_predicate(column: str, bind_key: str) -> str:
+    """Build a WHERE clause predicate that binds a DATE column safely.
+
+    Oracle DATE columns require TO_DATE conversion when the bind value
+    is a string. This helper keeps the behaviour consistent across the
+    query_engine and phase2 SQL generation paths.
+    """
+    return f"{column} = TO_DATE(:{bind_key}, 'YYYY-MM-DD')"
+
+
 def _node_mentions_variable(node: dict, aliases: set[str]) -> bool:
     """Return True if *node* references any alias in column_maps,
     calculation, output_variable, or conditions."""

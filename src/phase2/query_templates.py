@@ -17,7 +17,9 @@ from typing import Any
 # state. Adding a field here lets generate_query() automatically emit a
 # WHERE clause for it.
 _STANDARD_FILTERS: tuple[tuple[str, str, str], ...] = (
-    ("mis_date",       "FIC_MIS_DATE",    ":mis_date"),
+    # Key, column, placeholder -- FIC_MIS_DATE is a DATE column so it
+    # uses TO_DATE. All other columns are VARCHAR2 and bind as-is.
+    ("mis_date",       "FIC_MIS_DATE",    "TO_DATE(:mis_date, 'YYYY-MM-DD')"),
     ("account_number", "V_ACCOUNT_NUMBER", ":account_number"),
     ("gl_code",        "V_GL_CODE",       ":gl_code"),
     ("lob_code",       "V_LOB_CODE",      ":lob_code"),

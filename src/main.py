@@ -270,6 +270,17 @@ async def lifespan(app: FastAPI):
             )
             if result["status"] in ("success", "partial"):
                 _graph_available = True
+
+        if _graph_available:
+            from src.phase2.origins_catalog import build_catalog
+            catalog = build_catalog(_graph_redis, schema=oracle_cfg["schema"])
+            logger.info(
+                f"Origins catalog built: "
+                f"{len(catalog.plsql_origins)} PLSQL origins, "
+                f"{len(catalog.etl_origins)} ETL origins, "
+                f"{len(catalog.gl_block_list)} blocked GL codes, "
+                f"{len(catalog.gl_eop_overrides)} EOP overrides"
+            )
     except Exception as exc:
         logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
 
@@ -776,56 +787,56 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
         return
 
-    proof_chain = result.get("proof_chain") or {}
+    # Row-first result shape (new): status, row, origin, route, evidence,
+    # explanation, sanity_warnings, used_fallback, verification_sql
+    origin = result.get("origin") or {}
+    row = result.get("row") or {}
     meta = {
         "schema": schema,
         "query_type": query_type,
         "target_variable": target,
         "filters": filters,
-        "final_value": proof_chain.get("final_value"),
-        "origin_value": proof_chain.get("origin_value"),
-        "total_delta": proof_chain.get("total_delta"),
-        "step_count": len(proof_chain.get("steps") or []),
-        "confidence": result.get("confidence"),
+        "status": result.get("status"),
+        "route": result.get("route"),
+        "origin_category": origin.get("origin_category"),
+        "origin_value": origin.get("origin_value"),
+        "traceable_via_graph": origin.get("traceable_via_graph"),
+        "row_found": bool(row),
         "correlation_id": correlation_id,
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
 
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating explanation...'})}\n\n"
 
-    # Stream the LLM narration
-    full_markdown = ""
-    try:
-        async for token in _value_tracer.stream_explanation(
-            user_query=user_query,
-            proof_chain=proof_chain,
-            delta_analysis=result.get("delta_analysis"),
-            missing=result.get("missing_upstream"),
-            provider=provider,
-            model=model,
-        ):
-            full_markdown += token
-            yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
-    except Exception as exc:
-        # Fall back to the pre-rendered explanation if streaming fails.
-        logger.warning(f"Phase 2 LLM stream failed, using fallback: {exc}")
-        fallback = result.get("explanation") or "(no explanation available)"
-        full_markdown = fallback
-        yield f"event: token\ndata: {json_mod.dumps(fallback)}\n\n"
+    # The explanation is already produced + sanity-checked. Stream it as
+    # whitespace-preserving chunks so the frontend renders it progressively.
+    full_markdown = result.get("explanation") or "(no explanation available)"
+    for chunk in _chunk_text(full_markdown):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
 
     done_payload = {
         "type": query_type.lower(),
-        "confidence": result.get("confidence", 0.0),
-        "validated": True,
-        "badge": "VERIFIED",
+        "status": result.get("status"),
+        "route": result.get("route"),
+        "validated": not result.get("sanity_warnings"),
+        "sanity_warnings": result.get("sanity_warnings") or [],
+        "used_fallback": bool(result.get("used_fallback")),
+        "badge": "VERIFIED" if not result.get("sanity_warnings") else "REVIEW",
         "correlation_id": correlation_id,
         "explanation": {"markdown": full_markdown},
-        "proof_chain": proof_chain,
-        "delta_analysis": result.get("delta_analysis"),
+        "origin": origin,
+        "evidence": result.get("evidence"),
         "verification_sql": result.get("verification_sql"),
-        "data_completeness": result.get("data_completeness"),
     }
     yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+
+
+def _chunk_text(text: str, chunk_size: int = 4):
+    """Split text into small chunks for progressive SSE delivery."""
+    if not text:
+        return
+    for i in range(0, len(text), chunk_size):
+        yield text[i:i + chunk_size]
 
 
 async def _handle_command(

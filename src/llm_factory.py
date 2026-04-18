@@ -102,6 +102,9 @@ def create_llm(
             max_tokens=max_tokens,
             http_client=httpx.Client(verify=ssl_ctx, timeout=120),
             http_async_client=httpx.AsyncClient(verify=ssl_ctx, timeout=120),
+            # Retry transient TLS/proxy failures (SSLV3_ALERT_BAD_RECORD_MAC,
+            # connection reset) before surfacing the error to the user.
+            max_retries=5,
             **kwargs,
         )
 

@@ -67,9 +67,11 @@ class SchemaTools:
     async def initialize(self) -> None:
         """Create the async Oracle connection pool and load SQL templates.
 
-        Must be called before executing any queries.
+        Uses Oracle Easy Connect DSN format (``host:port/service_or_sid``)
+        which accepts both SIDs and service names (including PDB service
+        names like ``orclpdb``). Must be called before executing any queries.
         """
-        dsn = oracledb.makedsn(self._host, self._port, sid=self._sid)
+        dsn = f"{self._host}:{self._port}/{self._sid}"
         self._pool = oracledb.create_pool_async(
             user=self._user,
             password=self._password,
@@ -78,7 +80,7 @@ class SchemaTools:
             max=self._pool_max,
         )
         logger.info(
-            f"Oracle async pool created: {self._host}:{self._port}/{self._sid} "
+            f"Oracle async pool created: {dsn} "
             f"(min={self._pool_min}, max={self._pool_max})"
         )
         self._load_templates()
