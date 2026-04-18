@@ -42,3 +42,10 @@ embedding:
 langsmith:
   project: RTIE
   tracing: true
+
+phase2:
+  enabled: true
+  max_rows_per_node: 100
+  verification_tolerance: 0.01
+  oracle_query_timeout_seconds: 10
+  require_mis_date: true

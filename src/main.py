@@ -30,6 +30,7 @@ from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
 from src.agents.variable_tracer import VariableTracer
+from src.agents.value_tracer import ValueTracerAgent
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -106,6 +107,7 @@ _orchestrator: Orchestrator = None
 _metadata_interpreter: MetadataInterpreter = None
 _logic_explainer: LogicExplainer = None
 _variable_tracer: VariableTracer = None
+_value_tracer: ValueTracerAgent = None
 _validator: Validator = None
 _cache_manager: CacheManager = None
 _indexer: IndexerAgent = None
@@ -130,7 +132,7 @@ async def lifespan(app: FastAPI):
     """
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
-    global _variable_tracer, _validator, _cache_manager, _indexer, _renderer
+    global _variable_tracer, _value_tracer, _validator, _cache_manager, _indexer, _renderer
     global _compiled_graph, _health_checker, _settings, _graph_available, _graph_redis
 
     _settings = _load_settings()
@@ -189,6 +191,9 @@ async def lifespan(app: FastAPI):
         temperature=llm_cfg["temperature"],
         max_tokens=llm_cfg["max_tokens"],
     )
+
+    # Phase 2 value tracer -- constructed after _graph_redis is set below,
+    # see lifespan completion of graph pipeline initialisation.
 
     _validator = Validator(
         schema_tools=_schema_tools,
@@ -265,8 +270,34 @@ async def lifespan(app: FastAPI):
             )
             if result["status"] in ("success", "partial"):
                 _graph_available = True
+
+        if _graph_available:
+            from src.phase2.origins_catalog import build_catalog
+            catalog = build_catalog(_graph_redis, schema=oracle_cfg["schema"])
+            logger.info(
+                f"Origins catalog built: "
+                f"{len(catalog.plsql_origins)} PLSQL origins, "
+                f"{len(catalog.etl_origins)} ETL origins, "
+                f"{len(catalog.gl_block_list)} blocked GL codes, "
+                f"{len(catalog.gl_eop_overrides)} EOP overrides"
+            )
     except Exception as exc:
         logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
+
+    # Phase 2 value tracer -- needs schema_tools, the sync Redis client
+    # used by the graph pipeline, and SQLGuardian for SELECT validation.
+    try:
+        from src.tools.sql_guardian import SQLGuardian
+        _value_tracer = ValueTracerAgent(
+            schema_tools=_schema_tools,
+            redis_client=_graph_redis,
+            sql_guardian=SQLGuardian(),
+            temperature=llm_cfg["temperature"],
+            max_tokens=llm_cfg["max_tokens"],
+        )
+        logger.info("Phase 2 value tracer initialised")
+    except Exception as exc:
+        logger.warning(f"Phase 2 value tracer init failed (non-fatal): {exc}")
 
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
@@ -487,6 +518,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "llm_payload": "",
                 "graph_node_ids": [],
                 "graph_available": _graph_available,
+                "phase2_filters": {},
+                "phase2_expected_value": None,
+                "phase2_actual_value": None,
                 "output": {},
                 "partial_flag": False,
             }
@@ -512,6 +546,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
 
             if state.get("partial_flag"):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
+                return
+
+            # --- Phase 2 routing: data-trace queries skip the standard
+            # semantic-search + raw-source fetch stages and go directly to
+            # the ValueTracerAgent, which runs its own graph resolve +
+            # Oracle value fetch + LLM narration.
+            if state.get("query_type") in ("VALUE_TRACE", "DIFFERENCE_EXPLANATION", "RECONCILIATION"):
+                async for event in _phase2_stream(state, request.query, correlation_id, provider, model):
+                    yield event
                 return
 
             # Stage 2: Semantic search
@@ -670,6 +713,130 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             "X-Correlation-ID": correlation_id,
         },
     )
+
+
+async def _phase2_stream(state, user_query, correlation_id, provider, model):
+    """Stream a Phase 2 VALUE_TRACE/DIFFERENCE/RECONCILIATION response as SSE.
+
+    Runs the ValueTracerAgent, which resolves graph nodes, fetches
+    actual Oracle values, builds a proof chain, identifies any delta,
+    generates verification SQL, and finally streams an LLM narration.
+    """
+    query_type = state["query_type"]
+    filters = dict(state.get("phase2_filters") or {})
+    target = (state.get("target_variable") or "").strip()
+    schema = state.get("schema") or "OFSMDM"
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as ' + query_type})}\n\n"
+
+    if _value_tracer is None:
+        yield f"event: error\ndata: {json_mod.dumps({'error': 'Phase 2 value tracer not available'})}\n\n"
+        return
+
+    # Enforce mis_date requirement configurably. Without it the trace
+    # cannot be scoped to a specific run, so we fail fast with a clear
+    # clarification event rather than producing a misleading answer.
+    require_mis_date = (_settings.get("phase2") or {}).get("require_mis_date", True)
+    if require_mis_date and not filters.get("mis_date"):
+        payload = {
+            "type": "clarification",
+            "message": (
+                "This looks like a data trace query but no MIS date was detected. "
+                "Please include the date (e.g. 'on 2025-12-31')."
+            ),
+        }
+        yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
+        return
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Resolving graph subgraph...'})}\n\n"
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Fetching actual Oracle values for each step...'})}\n\n"
+
+    try:
+        if query_type == "DIFFERENCE_EXPLANATION":
+            result = await _value_tracer.explain_difference(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                bank_value=float(state.get("phase2_expected_value") or 0.0),
+                system_value=float(state.get("phase2_actual_value") or 0.0),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+        elif query_type == "RECONCILIATION":
+            result = await _value_tracer.reconcile(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+        else:
+            result = await _value_tracer.trace_value(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                expected_value=state.get("phase2_expected_value"),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+            )
+    except Exception as exc:
+        logger.error(f"Phase 2 trace failed: {exc}\n{traceback.format_exc()}")
+        yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        return
+
+    # Row-first result shape (new): status, row, origin, route, evidence,
+    # explanation, sanity_warnings, used_fallback, verification_sql
+    origin = result.get("origin") or {}
+    row = result.get("row") or {}
+    meta = {
+        "schema": schema,
+        "query_type": query_type,
+        "target_variable": target,
+        "filters": filters,
+        "status": result.get("status"),
+        "route": result.get("route"),
+        "origin_category": origin.get("origin_category"),
+        "origin_value": origin.get("origin_value"),
+        "traceable_via_graph": origin.get("traceable_via_graph"),
+        "row_found": bool(row),
+        "correlation_id": correlation_id,
+    }
+    yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating explanation...'})}\n\n"
+
+    # The explanation is already produced + sanity-checked. Stream it as
+    # whitespace-preserving chunks so the frontend renders it progressively.
+    full_markdown = result.get("explanation") or "(no explanation available)"
+    for chunk in _chunk_text(full_markdown):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+
+    done_payload = {
+        "type": query_type.lower(),
+        "status": result.get("status"),
+        "route": result.get("route"),
+        "validated": not result.get("sanity_warnings"),
+        "sanity_warnings": result.get("sanity_warnings") or [],
+        "used_fallback": bool(result.get("used_fallback")),
+        "badge": "VERIFIED" if not result.get("sanity_warnings") else "REVIEW",
+        "correlation_id": correlation_id,
+        "explanation": {"markdown": full_markdown},
+        "origin": origin,
+        "evidence": result.get("evidence"),
+        "verification_sql": result.get("verification_sql"),
+    }
+    yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+
+
+def _chunk_text(text: str, chunk_size: int = 4):
+    """Split text into small chunks for progressive SSE delivery."""
+    if not text:
+        return
+    for i in range(0, len(text), chunk_size):
+        yield text[i:i + chunk_size]
 
 
 async def _handle_command(

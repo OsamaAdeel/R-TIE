@@ -44,6 +44,15 @@ class ClassificationResult(BaseModel):
     target_variable: Optional[str] = None
     schema_name: str
     confidence: float
+    # Phase 2 fields -- populated only for data-trace queries.
+    account_number: Optional[str] = None
+    mis_date: Optional[str] = None
+    expected_value: Optional[float] = None
+    actual_value: Optional[float] = None
+    lob_code: Optional[str] = None
+    lv_code: Optional[str] = None
+    gl_code: Optional[str] = None
+    branch_code: Optional[str] = None
 
 
 class CommandResult(BaseModel):
@@ -68,35 +77,57 @@ Your job is to understand user queries about Oracle OFSAA PL/SQL objects, tables
 You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no extra text.
 
 {
-  "query_type": "COLUMN_LOGIC" or "VARIABLE_TRACE",
+  "query_type": "COLUMN_LOGIC" | "VARIABLE_TRACE" | "VALUE_TRACE" | "DIFFERENCE_EXPLANATION" | "RECONCILIATION",
   "intent": "<concise description of what the user wants to know>",
   "search_terms": ["<keyword1>", "<keyword2>", "..."],
-  "target_variable": "<variable/column name if query_type is VARIABLE_TRACE, else null>",
+  "target_variable": "<variable/column name, or null>",
   "schema_name": "<Oracle schema name, default OFSMDM>",
-  "confidence": <float between 0.0 and 1.0>
+  "confidence": <float between 0.0 and 1.0>,
+  "account_number": "<account number mentioned in the query, or null>",
+  "mis_date": "<MIS date in YYYY-MM-DD format, or null>",
+  "expected_value": <number the user says is expected / what the bank reports, or null>,
+  "actual_value": <number the user says the system shows, or null>,
+  "lob_code": "<line-of-business code, or null>",
+  "lv_code": "<LV code, or null>",
+  "gl_code": "<GL code, or null>",
+  "branch_code": "<branch code, or null>"
 }
 
+Query types:
+- VARIABLE_TRACE:         how is X calculated -- logic only, no data needed.
+- COLUMN_LOGIC:           what does X do, explain function X -- logic only.
+- VALUE_TRACE:            why is X showing value Y for a specific account / MIS date?
+                          Requires mis_date. Extract account_number if given.
+- DIFFERENCE_EXPLANATION: bank says A, we show B -- why? Extract both values.
+                          Requires mis_date. expected_value = bank value, actual_value = system.
+- RECONCILIATION:         compare X across tables for a specific account / MIS date.
+
 Rules:
-- query_type: Use "VARIABLE_TRACE" when the user asks how a specific variable or column
-  is CALCULATED, DERIVED, POPULATED, or TRANSFORMED across functions.
-  Use "COLUMN_LOGIC" for all other logic/explanation queries.
-- target_variable: When query_type is "VARIABLE_TRACE", extract the exact variable or
-  column name being traced (e.g. "EAD_AMOUNT", "N_ANNUAL_GROSS_INCOME", "V_PROD_CODE").
-  Set to null for COLUMN_LOGIC queries.
-- intent: summarize what the user is asking in one sentence.
-- search_terms: extract ALL relevant keywords — function names, table names, column names,
-  business concepts (e.g. "operational risk", "capital adequacy", "GL data").
-  These terms will be used for semantic search, so be thorough.
-- schema_name defaults to "OFSMDM" unless the user specifies another schema.
-- confidence reflects how well you understood the user's question.
+- target_variable: extract the exact column/variable name (e.g. EAD_AMOUNT, N_ANNUAL_GROSS_INCOME).
+- search_terms: extract ALL relevant keywords -- function/table/column names and business concepts.
+- schema_name defaults to "OFSMDM" unless another schema is specified.
+- mis_date: parse any date mention (e.g. "2025-12-31", "Dec 31 2025") to YYYY-MM-DD.
+- For VALUE_TRACE / DIFFERENCE_EXPLANATION / RECONCILIATION:
+    * mis_date is required -- set confidence low if not found.
+    * Extract account_number, lob_code, lv_code, gl_code, branch_code only if mentioned.
+    * All Phase 2 fields stay null for Phase 1 queries.
 
 Examples:
-- "Explain FN_LOAD_OPS_RISK_DATA" → query_type: "COLUMN_LOGIC", target_variable: null
-- "How is EAD_AMOUNT calculated across functions?" → query_type: "VARIABLE_TRACE", target_variable: "EAD_AMOUNT"
-- "Trace N_ANNUAL_GROSS_INCOME" → query_type: "VARIABLE_TRACE", target_variable: "N_ANNUAL_GROSS_INCOME"
-- "What updates STG_PRODUCT_PROCESSOR?" → query_type: "COLUMN_LOGIC", target_variable: null
-- "How is V_PROD_CODE populated?" → query_type: "VARIABLE_TRACE", target_variable: "V_PROD_CODE"
-- "How does the entire batch flow work?" → query_type: "COLUMN_LOGIC", target_variable: null
+- "Explain FN_LOAD_OPS_RISK_DATA"
+    -> query_type: "COLUMN_LOGIC", target_variable: null
+- "How is EAD_AMOUNT calculated across functions?"
+    -> query_type: "VARIABLE_TRACE", target_variable: "EAD_AMOUNT"
+- "Why is N_EOP_BAL for account LD1323300008 showing 50000000 on 2025-12-31?"
+    -> query_type: "VALUE_TRACE", target_variable: "N_EOP_BAL",
+       account_number: "LD1323300008", mis_date: "2025-12-31",
+       actual_value: 50000000
+- "Bank says EAD is 52M but system shows 50M for account X on 2025-12-31"
+    -> query_type: "DIFFERENCE_EXPLANATION", target_variable: "EAD",
+       expected_value: 52000000, actual_value: 50000000,
+       mis_date: "2025-12-31", account_number: "X"
+- "FCT_PRODUCT_EXPOSURES value differs from STG_PRODUCT_PROCESSOR for account X on 2025-12-31"
+    -> query_type: "RECONCILIATION", target_variable: null,
+       account_number: "X", mis_date: "2025-12-31"
 """
 
 
@@ -237,6 +268,18 @@ class Orchestrator:
         state["target_variable"] = result.target_variable or ""
         state["warnings"] = []
         state["partial_flag"] = False
+
+        # Phase 2 fields -- only non-empty for data-trace queries.
+        state["phase2_filters"] = {
+            "account_number": result.account_number,
+            "mis_date": result.mis_date,
+            "lob_code": result.lob_code,
+            "lv_code": result.lv_code,
+            "gl_code": result.gl_code,
+            "branch_code": result.branch_code,
+        }
+        state["phase2_expected_value"] = result.expected_value
+        state["phase2_actual_value"] = result.actual_value
 
         logger.info(
             f"Query classified: type={result.query_type}, "
