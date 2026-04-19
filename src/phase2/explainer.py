@@ -80,11 +80,24 @@ MISSING_ROW_PROMPT = """The user asked about a row that does not exist.
 HARD RULES:
 1. You must NOT explain a value that does not exist.
 2. You must NOT invent the row, the value, or the computation.
-3. Produce a one-sentence response: state that the row does not exist for
-   the given filters, and suggest the user verify the account number and date.
+3. You must NOT invent function names, node ids, or line numbers. Cite
+   ONLY nodes/lines present in the known_overrides block below.
+4. You must NOT speculate about WHY the row is missing.
+5. Lead with one sentence stating the row does not exist for the given
+   filters and asking the user to verify the account number and date.
+6. If known_overrides is non-empty, append a second paragraph beginning
+   with "Note:" that, for each override, cites its exact node id and
+   (when present) line number, and describes the effect using conditional
+   phrasing ("if a row were loaded"). Do NOT claim the override has been
+   applied -- no row exists to apply it to.
+7. If known_overrides is empty or missing, produce ONLY the one-sentence
+   response from rule 5.
 
-FILTERS PROVIDED (JSON):
+FILTERS (JSON):
 {filters}
+
+KNOWN OVERRIDES (JSON):
+{known_overrides}
 
 STATUS: row not found.
 """
@@ -111,6 +124,7 @@ EVIDENCE (JSON):
 _FORBIDDEN_PHRASES = (
     "typically", "might", "could", "would normally",
     "in general", "usually", "would likely", "probably",
+    "likely", "may have", "possible reasons",
 )
 
 _FORBIDDEN_FUNCTION_PATTERNS = (
@@ -229,14 +243,17 @@ class Phase2Explainer:
             for name in hallucinated:
                 warnings.append(f"unknown_function:{name}")
 
-        # For missing_row route, the text must not mention a value other
-        # than what the user provided.
+        # For missing_row route, the text must not mention a numeric value
+        # that is not derivable from the filters or known_overrides.
         if route == "missing_row" and row is None:
-            if re.search(r"\b\d{2,}\b", text or ""):
-                # Allow years like 2025 -- this is a soft warning we keep
-                # but only if a currency/amount-like pattern is present.
-                if re.search(r"[-]?\$?\s?\d[\d,]+(\.\d+)?", text or ""):
-                    warnings.append("invented_numeric_value")
+            allowed = self._allowed_missing_row_numbers(evidence)
+            for tok in re.findall(r"\b\d[\d,]*(?:\.\d+)?\b", text or ""):
+                if tok in allowed:
+                    continue
+                if re.fullmatch(r"\d{4}", tok):  # year-like
+                    continue
+                warnings.append("invented_numeric_value")
+                break
 
         # For etl_explain, the text must name the ETL source.
         if route == "etl_explain":
@@ -247,6 +264,31 @@ class Phase2Explainer:
                     warnings.append("etl_source_not_mentioned")
 
         return warnings
+
+    def _allowed_missing_row_numbers(self, evidence: dict | None) -> set[str]:
+        """Collect numeric tokens that the missing_row response may cite.
+
+        Any digit sequence that appears in the filters or in a
+        ``known_overrides`` entry (gl_code, node id, line number) is
+        legitimate: the LLM is quoting evidence, not inventing a value.
+        """
+        allowed: set[str] = set()
+        if not evidence:
+            return allowed
+
+        def _collect(value: Any) -> None:
+            if value is None:
+                return
+            for tok in re.findall(r"\d[\d,]*(?:\.\d+)?", str(value)):
+                allowed.add(tok)
+
+        for v in (evidence.get("filters") or {}).values():
+            _collect(v)
+        for ov in evidence.get("known_overrides") or []:
+            if isinstance(ov, dict):
+                for v in ov.values():
+                    _collect(v)
+        return allowed
 
     # -----------------------------------------------------------------
     # Prompt selection & deterministic fallback
@@ -259,9 +301,13 @@ class Phase2Explainer:
         filters: dict,
     ) -> tuple[str, int]:
         if route == "missing_row":
+            known_overrides = (evidence or {}).get("known_overrides") or []
             return (
-                MISSING_ROW_PROMPT.format(filters=json.dumps(_clean(filters), default=str)),
-                2,
+                MISSING_ROW_PROMPT.format(
+                    filters=json.dumps(_clean(filters), default=str),
+                    known_overrides=json.dumps(known_overrides, default=str, indent=2),
+                ),
+                6 if known_overrides else 2,
             )
         if route == "etl_explain":
             return (
@@ -283,10 +329,26 @@ class Phase2Explainer:
         if route == "missing_row":
             f = {k: v for k, v in filters.items() if v is not None and v != ""}
             parts = ", ".join(f"{k}={v}" for k, v in f.items())
-            return (
+            lead = (
                 f"No row was found for the given filters ({parts}). "
                 "Please verify the account number and MIS date."
             )
+            overrides = (evidence or {}).get("known_overrides") or []
+            if not overrides:
+                return lead
+
+            note_lines: list[str] = ["Note:"]
+            for ov in overrides:
+                gl = ov.get("gl_code") or "(unknown GL)"
+                node = ov.get("node") or "(unknown node)"
+                line = ov.get("line")
+                where = f"{node}, line {line}" if line else node
+                effect = ov.get("effect") or ""
+                note_lines.append(
+                    f"- GL code {gl} is on the {ov.get('type', 'override')} "
+                    f"catalog ({where}). If a row were loaded, {effect}."
+                )
+            return lead + "\n\n" + "\n".join(note_lines)
 
         if route == "etl_explain":
             origin = evidence.get("origin_source") or evidence.get("origin") or "external ETL"
