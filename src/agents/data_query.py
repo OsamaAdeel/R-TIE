@@ -21,12 +21,16 @@ import re
 from typing import Any, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
+from tenacity import RetryError
 
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_column_index
-from src.tools.sql_guardian import GuardianRejectionError
+from src.tools.sql_guardian import (
+    ColumnResidencyError,
+    GuardianRejectionError,
+)
 
 logger = get_logger(__name__, concern="app")
 
@@ -45,6 +49,14 @@ HARD CONSTRAINTS — violating any of these produces an invalid response:
 - Reference ONLY tables and columns listed in the provided schema.
   If the question needs a table that is not listed, respond with the
   special JSON shape `{"unsupported": true, "reason": "..."}`.
+- COLUMN RESIDENCY: you MUST only use columns that are listed under the
+  table you are querying FROM. A column listed under STG_PRODUCT_PROCESSOR
+  does NOT exist on STG_GL_DATA (and vice-versa) unless it also appears
+  under that other table in the schema block. If a question asks about
+  accounts but the relevant value column lives on a different table from
+  the filter column, you must JOIN the two tables on their shared keys
+  (V_GL_CODE, V_LV_CODE, FIC_MIS_DATE) — never invent a column on the
+  wrong table.
 - Single statement. No semicolons, no PL/SQL blocks.
 - Date columns (any column ending in _DATE or named *FIC_MIS_DATE*) must
   be bound via `TO_DATE(:param_name, 'YYYY-MM-DD')`, not as bare strings.
@@ -159,10 +171,11 @@ class DataQueryAgent:
         filters = dict(filters or {})
 
         try:
-            catalog_text = self._build_schema_catalog(schema)
+            catalog_text, tables_to_columns = self._build_schema_catalog(schema)
         except Exception as exc:
             logger.warning("DataQuery catalog build failed: %s", exc)
             catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
+            tables_to_columns = {}
 
         try:
             plan = await self._generate_sql(
@@ -228,6 +241,33 @@ class DataQueryAgent:
                     f"Reason: {exc.message}. No execution performed."
                 ),
             )
+
+        # Pre-execution column residency check — catches LLM hallucinations
+        # where a column is referenced against a table it doesn't live on.
+        if tables_to_columns:
+            try:
+                self._guardian.validate_column_residency(sql, tables_to_columns)
+            except ColumnResidencyError as exc:
+                logger.error(
+                    "DataQuery column residency rejected | column=%s table=%s sql=%s",
+                    exc.column, exc.table, sql,
+                )
+                return self._query_generation_error(
+                    reason="column_not_found",
+                    user_query=user_query,
+                    sql=sql,
+                    params=params,
+                    user_message=(
+                        f"The generated SQL references column {exc.column} "
+                        f"against table {exc.table}, but that column doesn't "
+                        "exist on that table. This is a query-generation bug. "
+                        "Please rephrase your question and try again."
+                    ),
+                    suggestion=(
+                        "Try naming the target table explicitly, or rephrase "
+                        "with the column you actually want to see."
+                    ),
+                )
 
         # Safeguard 1: row count pre-check (skipped for aggregate queries).
         warnings: list[str] = []
@@ -306,16 +346,23 @@ class DataQueryAgent:
         try:
             rows = await self._schema_tools.execute_raw(exec_sql, params)
         except Exception as exc:
-            logger.error("DataQuery execution failed: %s", exc)
-            return self._error_result(
-                status="oracle_error",
+            inner = _unwrap_retry_error(exc)
+            ora_code, ora_message = _extract_oracle_error(inner)
+            logger.error(
+                "DataQuery Oracle error | code=%s msg=%s sql=%s params=%s",
+                ora_code or "unknown",
+                ora_message or str(inner),
+                exec_sql,
+                params,
+            )
+            reason, user_message, suggestion = _sanitize_oracle_error(ora_code)
+            return self._query_generation_error(
+                reason=reason,
                 user_query=user_query,
                 sql=exec_sql,
                 params=params,
-                explanation=(
-                    "Oracle rejected the generated SQL. "
-                    f"Reason: {exc}. No rows returned."
-                ),
+                user_message=user_message,
+                suggestion=suggestion,
                 warnings=warnings,
             )
 
@@ -415,20 +462,25 @@ class DataQueryAgent:
         parsed = json.loads(raw)
         return parsed
 
-    def _build_schema_catalog(self, schema: str) -> str:
-        """Build a compact `table → [columns]` description from the graph.
+    def _build_schema_catalog(self, schema: str) -> tuple[str, dict[str, set[str]]]:
+        """Build a per-table `{table: {columns}}` catalog from the graph.
 
         Two data sources are combined:
         1. Per-function graphs — INSERT/UPDATE column_maps give precise
            `table → columns` mapping for the columns the PL/SQL touches.
         2. The raw source of each function — INSERT `(COL, COL, ...)`
            column lists are parsed and attributed to the target table.
-        3. A flat "Known columns" section sourced from the graph column
-           index so the LLM can reference columns that exist but weren't
-           attributed to a single table.
+
+        Returns
+        -------
+        (catalog_text, tables_to_columns):
+            * `catalog_text` is the per-table block rendered for the LLM
+              prompt (no flat column dump — that was the source of Bug A).
+            * `tables_to_columns` is the authoritative mapping used by
+              SQLGuardian.validate_column_residency to reject SQL that
+              references a column against the wrong table.
         """
         tables_to_columns: dict[str, set[str]] = {}
-        all_columns: set[str] = set()
 
         if self._redis is not None:
             try:
@@ -440,7 +492,6 @@ class DataQueryAgent:
             from src.parsing.store import (
                 get_function_graph,
                 get_raw_source,
-                get_column_index,
             )
 
             reserved = {"full", "index", "aliases", "source", "meta"}
@@ -467,36 +518,20 @@ class DataQueryAgent:
                     for table, cols in _parse_insert_column_lists(raw_lines).items():
                         tables_to_columns.setdefault(table, set()).update(cols)
 
-            try:
-                idx = get_column_index(self._redis, schema) or {}
-                for col in idx.keys():
-                    if isinstance(col, str) and _looks_like_column_name(col):
-                        all_columns.add(col)
-            except Exception as exc:
-                logger.warning("column index load failed: %s", exc)
+        if not tables_to_columns:
+            return "(no tables discovered — schema catalog empty)", {}
 
-        if not tables_to_columns and not all_columns:
-            return "(no tables discovered — schema catalog empty)"
-
-        lines: list[str] = ["Tables:"]
+        lines: list[str] = []
         for table in sorted(tables_to_columns.keys()):
             cols = sorted(tables_to_columns[table])
-            if not cols:
-                lines.append(f"- {table}: (columns unknown; check Known columns below)")
-                continue
-            lines.append(f"- {table}: {', '.join(cols)}")
-
-        if all_columns:
+            lines.append(f"Table: {table}")
+            if cols:
+                lines.append(f"Columns: {', '.join(cols)}")
+            else:
+                lines.append("Columns: (none discovered in graph)")
             lines.append("")
-            lines.append(
-                "Known columns in schema (exist somewhere in the graph; "
-                "pick the one that fits the question — common OFSAA "
-                "conventions: N_* = numeric, V_* = varchar, F_* = flag, "
-                "D_* = date):"
-            )
-            lines.append(", ".join(sorted(all_columns)))
 
-        return "\n".join(lines)
+        return "\n".join(lines).rstrip(), tables_to_columns
 
     def _error_result(
         self,
@@ -517,6 +552,53 @@ class DataQueryAgent:
             "columns": [],
             "row_count": 0,
             "summary": f"Could not answer: {user_query}",
+            "explanation": explanation,
+            "sanity_warnings": warnings or [],
+            "verification_sql": None,
+            "correlation_id": get_correlation_id(),
+        }
+
+    def _query_generation_error(
+        self,
+        reason: str,
+        user_query: str,
+        sql: str,
+        params: dict,
+        user_message: str,
+        suggestion: str,
+        warnings: Optional[list[str]] = None,
+    ) -> dict:
+        """Structured response for LLM-generated SQL that Oracle rejected
+        or that failed column residency. Distinct from infrastructure
+        errors so the frontend can frame it as "rephrase your question"
+        rather than "the system is broken"."""
+        explanation = (
+            f"**{user_message}**\n\n"
+            f"**Suggestion:** {suggestion}\n\n"
+            "**SQL that was rejected:**\n\n"
+            "```sql\n"
+            f"{(sql or '').strip()}\n"
+            "```"
+        )
+        if params:
+            explanation += (
+                f"\n\n**Bind params:** `{json.dumps(params, default=str)}`"
+            )
+        return {
+            "status": "query_generation_error",
+            "type": "query_generation_error",
+            "reason": reason,
+            "query_kind": None,
+            "sql": sql,
+            "count_sql": None,
+            "params": params or {},
+            "bind_params": params or {},
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+            "summary": f"Could not answer: {user_query}",
+            "user_message": user_message,
+            "suggestion": suggestion,
             "explanation": explanation,
             "sanity_warnings": warnings or [],
             "verification_sql": None,
@@ -545,6 +627,106 @@ _TABLE_PREFIX_RE = re.compile(
 # Column naming conventions — N_ numeric, V_ varchar, F_ flag, D_ date,
 # plus FIC_* (OFSAA system columns) and LD_ / SETUP_
 _COLUMN_PREFIX_RE = re.compile(r"^(N|V|F|D|FIC|LD|SETUP|B)_", re.IGNORECASE)
+
+
+_ORA_CODE_RE = re.compile(r"ORA-(\d{5})", re.IGNORECASE)
+
+
+def _unwrap_retry_error(exc: BaseException) -> BaseException:
+    """Peel tenacity's RetryError to get the real DatabaseError underneath.
+
+    tenacity wraps every retried call in `RetryError[<Future ...>]`; `str()`
+    of that wrapper is the Python Future repr, which is useless for
+    debugging. The actual Oracle exception lives at
+    `retry_err.last_attempt.exception()`.
+    """
+    current = exc
+    while isinstance(current, RetryError):
+        try:
+            inner = current.last_attempt.exception()
+        except Exception:
+            inner = None
+        if inner is None or inner is current:
+            break
+        current = inner
+    return current
+
+
+def _extract_oracle_error(exc: BaseException) -> tuple[Optional[str], Optional[str]]:
+    """Return `(full_code, message)` for an oracledb.DatabaseError, else
+    `(None, None)`.
+
+    oracledb puts its structured error into `exc.args[0]`, an `_Error` with
+    `full_code` (e.g. "ORA-00904"), `code` (int), and `message` attrs.
+    Falls back to regex-scraping the stringified exception if those aren't
+    present (handles oracledb versions / wrapped variants).
+    """
+    if exc is None:
+        return None, None
+    inner = None
+    args = getattr(exc, "args", None) or ()
+    if args:
+        inner = args[0]
+    full_code = getattr(inner, "full_code", None) if inner is not None else None
+    message = getattr(inner, "message", None) if inner is not None else None
+    if not full_code:
+        match = _ORA_CODE_RE.search(str(exc))
+        if match:
+            full_code = f"ORA-{match.group(1)}"
+    if not message:
+        message = str(exc)
+    return full_code, message
+
+
+_ORA_SANITIZATION = {
+    "ORA-00904": (
+        "column_not_found",
+        "The generated SQL referenced a column that doesn't exist on the "
+        "target table. This is a query-generation bug. Please rephrase "
+        "your question and try again.",
+        "Try naming the table or column you want explicitly — e.g. "
+        "\"the N_EOP_BAL from STG_PRODUCT_PROCESSOR\".",
+    ),
+    "ORA-00942": (
+        "table_not_found",
+        "The generated SQL referenced a table not in the current schema. "
+        "Please rephrase your question or check the table name.",
+        "Check that the table you're asking about exists in the parsed "
+        "schema catalog.",
+    ),
+    "ORA-01722": (
+        "type_mismatch",
+        "The generated SQL had a data type or format error. Please "
+        "rephrase your question and try again.",
+        "If you're filtering on a date or number, make the format "
+        "explicit in the question.",
+    ),
+    "ORA-01861": (
+        "type_mismatch",
+        "The generated SQL had a data type or format error. Please "
+        "rephrase your question and try again.",
+        "Use an ISO date (YYYY-MM-DD) and state the column explicitly.",
+    ),
+}
+
+
+def _sanitize_oracle_error(full_code: Optional[str]) -> tuple[str, str, str]:
+    """Map an Oracle error code to `(reason, user_message, suggestion)`.
+
+    Never returns the raw Oracle message (which may leak schema info) and
+    never returns the Python `RetryError` / Future repr. Callers still log
+    the raw error verbatim at ERROR level — this is only for user-facing
+    text.
+    """
+    if full_code and full_code.upper() in _ORA_SANITIZATION:
+        return _ORA_SANITIZATION[full_code.upper()]
+    return (
+        "other_oracle_error",
+        "The generated SQL was rejected by the database. Please try "
+        "rephrasing your question.",
+        "A different wording — or a more specific filter (date, account, "
+        "code) — often helps the generator pick the right table.",
+    )
 
 
 def _collect_table_columns(
