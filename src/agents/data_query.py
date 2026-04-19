@@ -322,13 +322,25 @@ class DataQueryAgent:
         columns = select_columns or _column_names_from_sql(exec_sql)
         materialised = _materialise_rows(rows)
         row_count = len(materialised)
-        summary = _summarise(
-            user_query=user_query,
-            query_kind=query_kind,
-            columns=columns,
-            rows=materialised,
-            row_count=row_count,
-        )
+
+        # TIME_SERIES: pad the display rows so every requested date is
+        # present (missing ones show "no data"). Raw Oracle row_count is
+        # preserved — only the display rows are padded.
+        if query_kind == "TIME_SERIES":
+            display_rows, requested_dates = _pad_time_series_rows(
+                materialised, columns, params
+            )
+            summary = _summarise_time_series(columns, materialised, params)
+        else:
+            display_rows = materialised
+            requested_dates = []
+            summary = _summarise(
+                user_query=user_query,
+                query_kind=query_kind,
+                columns=columns,
+                rows=materialised,
+                row_count=row_count,
+            )
 
         return {
             "status": "answered",
@@ -336,15 +348,16 @@ class DataQueryAgent:
             "sql": exec_sql,
             "count_sql": count_sql,
             "params": params,
-            "rows": materialised[: self._display_limit],
+            "rows": display_rows[: self._display_limit],
             "columns": columns,
             "row_count": row_count,
+            "requested_dates": requested_dates,
             "summary": summary,
             "explanation": _build_explanation(
                 summary=summary,
                 sql=exec_sql,
                 params=params,
-                rows=materialised[: self._display_limit],
+                rows=display_rows[: self._display_limit],
                 columns=columns,
                 truncated=row_count > self._display_limit,
                 display_limit=self._display_limit,
@@ -700,51 +713,175 @@ def _summarise(
     return f"Query returned {row_count} row(s)."
 
 
-def _summarise_time_series(columns: list[str], rows: list[list]) -> str:
-    """For a TIME_SERIES result, compute the delta between first and last row.
+def _summarise_time_series(
+    columns: list[str],
+    raw_rows: list[list],
+    params: Optional[dict],
+) -> str:
+    """Return a neutral, factual one-line framing for a TIME_SERIES result.
 
-    Looks for a FIC_MIS_DATE column and a numeric value column; reports
-    `col: value_start -> value_end (delta = +/-X)`. Falls back to a
-    generic row count if the shape is unexpected.
+    Does NOT speculate about why data is missing. States only:
+      * how many requested dates returned data, or
+      * the change between the two values when all dates returned data
+        and the target column is numeric.
     """
-    if not rows:
+    params = params or {}
+    start = params.get("start_date")
+    end = params.get("end_date")
+    requested = _requested_dates(start, end)
+    n_requested = len(requested) if requested else len(raw_rows)
+    n_found = len(raw_rows)
+
+    if n_found == 0:
+        if n_requested:
+            return "No data found for any of the requested dates."
         return "No rows returned for the date range."
-    if len(rows) == 1:
-        return f"Time-series query returned only 1 row (expected 2). Value: {rows[0]}."
+
+    if n_requested and n_found < n_requested:
+        return (
+            f"{n_found} of {n_requested} requested dates has data "
+            "for this account."
+        )
+
+    # All requested dates returned data. If we have exactly two rows and a
+    # numeric target column, compute a deterministic delta.
+    upper_cols = [str(c).upper() for c in columns]
+    date_idx = upper_cols.index("FIC_MIS_DATE") if "FIC_MIS_DATE" in upper_cols else None
+    value_idx = _pick_value_column_idx(upper_cols, date_idx)
+
+    if n_found >= 2 and value_idx is not None and date_idx is not None:
+        sorted_rows = sorted(raw_rows, key=lambda r: _row_date_iso(r, date_idx) or "")
+        v_start = sorted_rows[0][value_idx]
+        v_end = sorted_rows[-1][value_idx]
+        try:
+            fs = float(v_start)
+            fe = float(v_end)
+            delta = fe - fs
+            sign = "+" if delta > 0 else ""
+            col_name = columns[value_idx] if value_idx < len(columns) else "value"
+            return (
+                f"Change in {col_name}: {v_start} \u2192 {v_end} "
+                f"(delta: {sign}{delta:g})."
+            )
+        except (TypeError, ValueError):
+            pass
+
+    return (
+        "Both dates returned data." if n_requested == 2
+        else f"All {n_requested} requested dates returned data."
+    )
+
+
+def _pad_time_series_rows(
+    rows: list[list],
+    columns: list[str],
+    params: Optional[dict],
+) -> tuple[list[list], list[str]]:
+    """Produce a display list with one row per requested date.
+
+    For each requested date (from params.start_date / end_date), use the
+    Oracle row for that date if present; otherwise emit a placeholder row
+    with "no data" in the value column(s) and filter values carried from
+    params where they are known.
+
+    Returns (padded_rows, requested_dates_iso). When no date range is
+    provided in params, returns (rows unchanged, []).
+    """
+    params = params or {}
+    requested = _requested_dates(params.get("start_date"), params.get("end_date"))
+    if not requested:
+        return list(rows), []
 
     upper_cols = [str(c).upper() for c in columns]
     date_idx = upper_cols.index("FIC_MIS_DATE") if "FIC_MIS_DATE" in upper_cols else None
-    # Prefer an N_*, then V_*, then anything else that isn't the date column
-    value_idx: Optional[int] = None
+    if date_idx is None:
+        # Cannot pad without a date column to pivot on
+        return list(rows), requested
+
+    by_date: dict[str, list] = {}
+    for r in rows:
+        d = _row_date_iso(r, date_idx)
+        if d:
+            by_date[d] = r
+
+    padded: list[list] = []
+    for iso in requested:
+        if iso in by_date:
+            padded.append(list(by_date[iso]))
+        else:
+            padded.append(_make_placeholder_row(iso, columns, date_idx, params))
+    return padded, requested
+
+
+def _make_placeholder_row(
+    iso_date: str,
+    columns: list[str],
+    date_idx: int,
+    params: dict,
+) -> list:
+    """Build a row for a missing date: the date itself in the date column,
+    known filter values (e.g. V_ACCOUNT_NUMBER from params) in filter
+    columns, and "no data" in value columns."""
+    row: list = []
+    for i, col in enumerate(columns):
+        cu = str(col).upper()
+        if i == date_idx:
+            row.append(iso_date)
+        elif cu == "V_ACCOUNT_NUMBER" and params.get("account_number"):
+            row.append(params["account_number"])
+        elif cu == "V_LV_CODE" and params.get("lv_code"):
+            row.append(params["lv_code"])
+        elif cu == "V_GL_CODE" and params.get("gl_code"):
+            row.append(params["gl_code"])
+        elif cu == "V_BRANCH_CODE" and params.get("branch_code"):
+            row.append(params["branch_code"])
+        elif cu == "V_LOB_CODE" and params.get("lob_code"):
+            row.append(params["lob_code"])
+        else:
+            row.append("no data")
+    return row
+
+
+def _requested_dates(start: Optional[str], end: Optional[str]) -> list[str]:
+    """Return the list of requested ISO dates (deduplicated, ordered)."""
+    if not start or not end:
+        return []
+    if start == end:
+        return [start]
+    # Order: earlier first. Lexical compare works for YYYY-MM-DD.
+    return [start, end] if start <= end else [end, start]
+
+
+def _pick_value_column_idx(upper_cols: list[str], date_idx: Optional[int]) -> Optional[int]:
+    """Prefer N_* numeric columns, then anything non-date and non-filter."""
     for i, c in enumerate(upper_cols):
         if i == date_idx:
             continue
         if c.startswith("N_"):
-            value_idx = i
-            break
-    if value_idx is None:
-        for i, c in enumerate(upper_cols):
-            if i != date_idx:
-                value_idx = i
-                break
+            return i
+    # Fall back to any non-date column (useful for non-numeric targets
+    # where we just want to report presence of values)
+    for i, c in enumerate(upper_cols):
+        if i == date_idx:
+            continue
+        if c in ("V_ACCOUNT_NUMBER", "V_LV_CODE", "V_GL_CODE",
+                 "V_BRANCH_CODE", "V_LOB_CODE"):
+            continue
+        return i
+    return None
 
-    first, last = rows[0], rows[-1]
-    if value_idx is None:
-        return f"Time-series query returned {len(rows)} rows: {first} -> {last}."
 
-    v_start = first[value_idx]
-    v_end = last[value_idx]
-    d_start = first[date_idx] if date_idx is not None else "start"
-    d_end = last[date_idx] if date_idx is not None else "end"
-    col_name = columns[value_idx] if value_idx < len(columns) else "value"
-    delta_str = ""
-    try:
-        delta = float(v_end) - float(v_start)
-        sign = "+" if delta > 0 else ""
-        delta_str = f" (delta = {sign}{delta:g})"
-    except (TypeError, ValueError):
-        pass
-    return f"{col_name}: {v_start} on {d_start} -> {v_end} on {d_end}{delta_str}."
+def _row_date_iso(row: list, date_idx: Optional[int]) -> Optional[str]:
+    """Normalize row[date_idx] to YYYY-MM-DD, or None if not parseable."""
+    if date_idx is None or date_idx >= len(row):
+        return None
+    val = row[date_idx]
+    if val is None:
+        return None
+    s = str(val).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return None
 
 
 def _build_explanation(
@@ -766,18 +903,18 @@ def _build_explanation(
         else:
             lines.append("**Rows:**")
             lines.append("")
-            lines.append("| " + " | ".join(header) + " |")
-            lines.append("|" + "|".join("---" for _ in header) + "|")
+            lines.append("| " + " | ".join(str(h) for h in header) + " |")
+            lines.append("| " + " | ".join("---" for _ in header) + " |")
             preview = rows[: min(20, len(rows))]
             for r in preview:
                 cells = [str(v) if v is not None else "" for v in r]
                 if len(cells) < len(header):
                     cells.extend([""] * (len(header) - len(cells)))
                 lines.append("| " + " | ".join(cells) + " |")
+            lines.append("")
             if len(rows) > len(preview):
-                lines.append("")
                 lines.append(f"_…showing first {len(preview)} of {len(rows)}._")
-        lines.append("")
+                lines.append("")
 
     if truncated:
         lines.append(

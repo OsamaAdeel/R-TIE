@@ -972,6 +972,7 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "columns": result.get("columns"),
         "rows": result.get("rows"),
         "row_count": result.get("row_count"),
+        "requested_dates": result.get("requested_dates") or [],
         "verification_sql": result.get("verification_sql"),
     }
     yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
