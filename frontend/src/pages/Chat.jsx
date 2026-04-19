@@ -2,7 +2,7 @@ import { useRef, useEffect } from 'react';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import ModelSelector from '../components/ModelSelector';
-import { Database, Sparkles, ArrowRight } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 
 export default function Chat({ session, onSend, loading, provider, model, onProviderChange, onModelChange }) {
   const messagesEndRef = useRef(null);
@@ -64,17 +64,23 @@ function EmptyState({ onSend }) {
   return (
     <div className="h-full flex items-center justify-center p-8">
       <div className="text-center max-w-lg">
-        {/* Logo */}
-        <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 flex items-center justify-center mx-auto mb-6 shadow-xl shadow-blue-500/20">
-          <Database size={36} className="text-white" />
-        </div>
-
-        <h2 className="text-2xl font-bold text-text-primary mb-2 tracking-tight">
-          RTIE Logic Explorer
-        </h2>
-        <p className="text-sm text-text-secondary mb-8 leading-relaxed max-w-md mx-auto">
-          Ask about any PL/SQL function or procedure in Oracle OFSAA.
-          Get instant, fully-cited logic explanations with formula breakdowns.
+        {/* Wordmark — serif display, Claude-style brand moment */}
+        <h1
+          className="mb-3 text-text-primary"
+          style={{
+            fontFamily: "'Instrument Serif', 'Times New Roman', serif",
+            fontStyle: 'italic',
+            fontWeight: 400,
+            fontSize: '76px',
+            lineHeight: 1,
+            letterSpacing: '-0.02em',
+          }}
+        >
+          R-TIE
+        </h1>
+        <p className="text-sm text-text-secondary mb-10 leading-relaxed max-w-md mx-auto">
+          Trace, explain, and reason about your Oracle OFSAA system — with
+          cited answers grounded in the source.
         </p>
 
         {/* Example cards */}
@@ -90,12 +96,6 @@ function EmptyState({ onSend }) {
               <ArrowRight size={14} className="text-text-muted group-hover:text-accent group-hover:translate-x-0.5 transition-all" />
             </button>
           ))}
-        </div>
-
-        {/* Powered by badge */}
-        <div className="mt-8 flex items-center justify-center gap-1.5 text-xs text-text-muted">
-          <Sparkles size={12} />
-          <span>Powered by LangGraph + OpenAI</span>
         </div>
       </div>
     </div>
