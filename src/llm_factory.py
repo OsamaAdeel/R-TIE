@@ -89,11 +89,13 @@ def create_llm(
         if json_mode:
             kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
 
-        # GPT-5 and the o-series reasoning models only accept the default
-        # temperature (1); passing any other value raises
-        # "Unsupported value: 'temperature'".
+        # GPT-5 and the o-series reasoning models only accept temperature=1;
+        # any other value raises "Unsupported value: 'temperature'".
+        # Must set explicitly — langchain's ChatOpenAI default is 0.7.
         model_lower = (model or "").lower()
-        if not (model_lower.startswith("gpt-5") or model_lower.startswith("o1") or model_lower.startswith("o3")):
+        if model_lower.startswith("gpt-5") or model_lower.startswith("o1") or model_lower.startswith("o3"):
+            kwargs["temperature"] = 1
+        else:
             kwargs["temperature"] = temperature
 
         # Force TLS 1.2 — TLS 1.3 on Python 3.14 + corporate networks
