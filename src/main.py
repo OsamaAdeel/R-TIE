@@ -31,6 +31,7 @@ from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
 from src.agents.variable_tracer import VariableTracer
 from src.agents.value_tracer import ValueTracerAgent
+from src.agents.data_query import DataQueryAgent
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -108,6 +109,7 @@ _metadata_interpreter: MetadataInterpreter = None
 _logic_explainer: LogicExplainer = None
 _variable_tracer: VariableTracer = None
 _value_tracer: ValueTracerAgent = None
+_data_query: DataQueryAgent = None
 _validator: Validator = None
 _cache_manager: CacheManager = None
 _indexer: IndexerAgent = None
@@ -132,7 +134,7 @@ async def lifespan(app: FastAPI):
     """
     global _schema_tools, _cache_client, _vector_store
     global _orchestrator, _metadata_interpreter, _logic_explainer
-    global _variable_tracer, _value_tracer, _validator, _cache_manager, _indexer, _renderer
+    global _variable_tracer, _value_tracer, _data_query, _validator, _cache_manager, _indexer, _renderer
     global _compiled_graph, _health_checker, _settings, _graph_available, _graph_redis
 
     _settings = _load_settings()
@@ -298,6 +300,30 @@ async def lifespan(app: FastAPI):
         logger.info("Phase 2 value tracer initialised")
     except Exception as exc:
         logger.warning(f"Phase 2 value tracer init failed (non-fatal): {exc}")
+
+    # Data-query agent (Option A): handles aggregates + row-list questions
+    # by generating a read-only SELECT through SQLGuardian.
+    try:
+        from src.tools.sql_guardian import SQLGuardian
+        dq_cfg = (_settings.get("data_query") or {})
+        _data_query = DataQueryAgent(
+            schema_tools=_schema_tools,
+            redis_client=_graph_redis,
+            sql_guardian=SQLGuardian(),
+            temperature=llm_cfg["temperature"],
+            max_tokens=llm_cfg["max_tokens"],
+            hard_row_limit=int(dq_cfg.get("hard_row_limit", 10_000)),
+            warn_row_limit=int(dq_cfg.get("warn_row_limit", 100)),
+            display_row_limit=int(dq_cfg.get("display_row_limit", 100)),
+        )
+        logger.info(
+            "DataQueryAgent initialised (hard=%s, warn=%s, display=%s)",
+            dq_cfg.get("hard_row_limit", 10_000),
+            dq_cfg.get("warn_row_limit", 100),
+            dq_cfg.get("display_row_limit", 100),
+        )
+    except Exception as exc:
+        logger.warning(f"DataQueryAgent init failed (non-fatal): {exc}")
 
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
@@ -521,6 +547,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "phase2_filters": {},
                 "phase2_expected_value": None,
                 "phase2_actual_value": None,
+                "unsupported_reason": "",
                 "output": {},
                 "partial_flag": False,
             }
@@ -548,12 +575,45 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
                 return
 
-            # --- Phase 2 routing: data-trace queries skip the standard
-            # semantic-search + raw-source fetch stages and go directly to
-            # the ValueTracerAgent, which runs its own graph resolve +
-            # Oracle value fetch + LLM narration.
-            if state.get("query_type") in ("VALUE_TRACE", "DIFFERENCE_EXPLANATION", "RECONCILIATION"):
+            # --- Date-range override: any query with BOTH start_date and
+            # end_date is a time-series question, which DataQueryAgent must
+            # handle via a two-date SQL comparison. Force DATA_QUERY even if
+            # the classifier guessed something else (defensive belt-and-
+            # suspenders against mis-classification into VALUE_TRACE).
+            _p2_filters = state.get("phase2_filters") or {}
+            if _p2_filters.get("start_date") and _p2_filters.get("end_date"):
+                if state.get("query_type") != "DATA_QUERY":
+                    logger.info(
+                        "Forcing DATA_QUERY route: date-range detected "
+                        "(start=%s end=%s), classifier said %s",
+                        _p2_filters.get("start_date"),
+                        _p2_filters.get("end_date"),
+                        state.get("query_type"),
+                    )
+                    state["query_type"] = "DATA_QUERY"
+
+            # --- Phase 2 routing: single-row value traces go to the
+            # ValueTracerAgent, which runs its own graph resolve + Oracle
+            # value fetch + LLM narration.
+            if state.get("query_type") in ("VALUE_TRACE", "DIFFERENCE_EXPLANATION"):
                 async for event in _phase2_stream(state, request.query, correlation_id, provider, model):
+                    yield event
+                return
+
+            # --- Option A routing: aggregate / filter / time-series questions
+            # go to the DataQueryAgent which generates + executes a read-only
+            # SELECT.
+            if state.get("query_type") == "DATA_QUERY":
+                async for event in _data_query_stream(
+                    state, request.query, correlation_id, provider, model
+                ):
+                    yield event
+                return
+
+            # --- Unsupported: explicit capability-limitation response,
+            # no handler, no partial answer, no trace.
+            if state.get("query_type") == "UNSUPPORTED":
+                async for event in _unsupported_stream(state, correlation_id):
                     yield event
                 return
 
@@ -716,11 +776,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
 
 
 async def _phase2_stream(state, user_query, correlation_id, provider, model):
-    """Stream a Phase 2 VALUE_TRACE/DIFFERENCE/RECONCILIATION response as SSE.
+    """Stream a Phase 2 VALUE_TRACE / DIFFERENCE_EXPLANATION response as SSE.
 
-    Runs the ValueTracerAgent, which resolves graph nodes, fetches
-    actual Oracle values, builds a proof chain, identifies any delta,
-    generates verification SQL, and finally streams an LLM narration.
+    Runs the ValueTracerAgent, which resolves graph nodes, fetches actual
+    Oracle values, builds a proof chain, identifies any delta, generates
+    verification SQL, and finally streams an LLM narration.
     """
     query_type = state["query_type"]
     filters = dict(state.get("phase2_filters") or {})
@@ -763,16 +823,8 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
                 provider=provider,
                 model=model,
             )
-        elif query_type == "RECONCILIATION":
-            result = await _value_tracer.reconcile(
-                target_variable=target,
-                filters=filters,
-                schema=schema,
-                user_query=user_query,
-                provider=provider,
-                model=model,
-            )
         else:
+            # VALUE_TRACE (and anything else mis-routed here) -> single-row trace.
             result = await _value_tracer.trace_value(
                 target_variable=target,
                 filters=filters,
@@ -837,6 +889,130 @@ def _chunk_text(text: str, chunk_size: int = 4):
         return
     for i in range(0, len(text), chunk_size):
         yield text[i:i + chunk_size]
+
+
+async def _data_query_stream(state, user_query, correlation_id, provider, model):
+    """Stream a DATA_QUERY response: LLM-generated SQL + safeguarded execution."""
+    schema = state.get("schema") or "OFSMDM"
+    filters = dict(state.get("phase2_filters") or {})
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as DATA_QUERY'})}\n\n"
+
+    if _data_query is None:
+        yield f"event: error\ndata: {json_mod.dumps({'error': 'DataQueryAgent not available'})}\n\n"
+        return
+
+    require_mis_date = (_settings.get("phase2") or {}).get("require_mis_date", True)
+    has_date_range = bool(filters.get("start_date") and filters.get("end_date"))
+    if require_mis_date and not filters.get("mis_date") and not has_date_range:
+        payload = {
+            "type": "clarification",
+            "message": (
+                "This looks like a data query but no MIS date was detected. "
+                "Please include a date (e.g. 'on 2025-12-31') or a date range "
+                "(e.g. 'between 2025-09-30 and 2025-12-31') so results are "
+                "scoped to a specific run."
+            ),
+        }
+        yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
+        return
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Building schema catalog + generating SQL...'})}\n\n"
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Executing read-only query against Oracle...'})}\n\n"
+
+    try:
+        result = await _data_query.answer(
+            user_query=user_query,
+            schema=schema,
+            filters=filters,
+            provider=provider,
+            model=model,
+        )
+    except Exception as exc:
+        logger.error(f"DATA_QUERY failed: {exc}\n{traceback.format_exc()}")
+        yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        return
+
+    meta = {
+        "schema": schema,
+        "query_type": "DATA_QUERY",
+        "status": result.get("status"),
+        "query_kind": result.get("query_kind"),
+        "row_count": result.get("row_count"),
+        "correlation_id": correlation_id,
+    }
+    yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
+
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Formatting results...'})}\n\n"
+
+    explanation = result.get("explanation") or "(no explanation available)"
+    for chunk in _chunk_text(explanation):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+
+    status = result.get("status")
+    validated = status == "answered"
+    badge = (
+        "VERIFIED" if status == "answered"
+        else "REVIEW" if status == "confirmation_required"
+        else "REJECTED"
+    )
+    done_payload = {
+        "type": "data_query",
+        "status": status,
+        "query_kind": result.get("query_kind"),
+        "validated": validated,
+        "badge": badge,
+        "sanity_warnings": result.get("sanity_warnings") or [],
+        "summary": result.get("summary"),
+        "correlation_id": correlation_id,
+        "explanation": {"markdown": explanation},
+        "sql": result.get("sql"),
+        "count_sql": result.get("count_sql"),
+        "params": result.get("params"),
+        "columns": result.get("columns"),
+        "rows": result.get("rows"),
+        "row_count": result.get("row_count"),
+        "verification_sql": result.get("verification_sql"),
+    }
+    yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+
+
+async def _unsupported_stream(state, correlation_id):
+    """Stream an explicit capability-limitation response for UNSUPPORTED queries."""
+    reason = state.get("unsupported_reason") or "capability not available in this system"
+    markdown = (
+        "### Not supported\n\n"
+        f"This question cannot be answered by RTIE: **{reason}**.\n\n"
+        "RTIE is a read-only introspection system scoped to the parsed "
+        "PL/SQL graph and the current staging schema. It does not:\n"
+        "- Reconcile against downstream result tables (FCT_*) that are not "
+        "in the graph.\n"
+        "- Forecast or predict future state.\n"
+        "- Query tables outside the configured schema.\n\n"
+        "**What you can do:** rephrase as a question about a specific "
+        "value, account, or aggregate within the staging schema, or escalate "
+        "to a team with access to the missing data source."
+    )
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as UNSUPPORTED'})}\n\n"
+    meta = {
+        "query_type": "UNSUPPORTED",
+        "status": "declined",
+        "reason": reason,
+        "correlation_id": correlation_id,
+    }
+    yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
+    for chunk in _chunk_text(markdown):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    done_payload = {
+        "type": "unsupported",
+        "status": "declined",
+        "validated": True,
+        "badge": "DECLINED",
+        "reason": reason,
+        "correlation_id": correlation_id,
+        "explanation": {"markdown": markdown},
+    }
+    yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
 
 
 async def _handle_command(

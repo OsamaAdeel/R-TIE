@@ -47,12 +47,17 @@ class ClassificationResult(BaseModel):
     # Phase 2 fields -- populated only for data-trace queries.
     account_number: Optional[str] = None
     mis_date: Optional[str] = None
+    # Date range (populated only for time-series queries; both must be set).
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     expected_value: Optional[float] = None
     actual_value: Optional[float] = None
     lob_code: Optional[str] = None
     lv_code: Optional[str] = None
     gl_code: Optional[str] = None
     branch_code: Optional[str] = None
+    # Populated only when query_type == "UNSUPPORTED"
+    unsupported_reason: Optional[str] = None
 
 
 class CommandResult(BaseModel):
@@ -77,7 +82,7 @@ Your job is to understand user queries about Oracle OFSAA PL/SQL objects, tables
 You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no extra text.
 
 {
-  "query_type": "COLUMN_LOGIC" | "VARIABLE_TRACE" | "VALUE_TRACE" | "DIFFERENCE_EXPLANATION" | "RECONCILIATION",
+  "query_type": "COLUMN_LOGIC" | "VARIABLE_TRACE" | "VALUE_TRACE" | "DIFFERENCE_EXPLANATION" | "DATA_QUERY" | "UNSUPPORTED",
   "intent": "<concise description of what the user wants to know>",
   "search_terms": ["<keyword1>", "<keyword2>", "..."],
   "target_variable": "<variable/column name, or null>",
@@ -85,32 +90,88 @@ You MUST respond with ONLY a valid JSON object — no markdown, no explanation, 
   "confidence": <float between 0.0 and 1.0>,
   "account_number": "<account number mentioned in the query, or null>",
   "mis_date": "<MIS date in YYYY-MM-DD format, or null>",
+  "start_date": "<ISO date YYYY-MM-DD, or null — set only for date-range queries>",
+  "end_date":   "<ISO date YYYY-MM-DD, or null — set only for date-range queries>",
   "expected_value": <number the user says is expected / what the bank reports, or null>,
   "actual_value": <number the user says the system shows, or null>,
   "lob_code": "<line-of-business code, or null>",
   "lv_code": "<LV code, or null>",
   "gl_code": "<GL code, or null>",
-  "branch_code": "<branch code, or null>"
+  "branch_code": "<branch code, or null>",
+  "unsupported_reason": "<short phrase naming the missing capability, or null>"
 }
 
 Query types:
 - VARIABLE_TRACE:         how is X calculated -- logic only, no data needed.
 - COLUMN_LOGIC:           what does X do, explain function X -- logic only.
-- VALUE_TRACE:            why is X showing value Y for a specific account / MIS date?
+- VALUE_TRACE:            why is X showing value Y for a specific account on a
+                          specific MIS date? Single-date, single-row trace.
                           Requires mis_date. Extract account_number if given.
 - DIFFERENCE_EXPLANATION: bank says A, we show B -- why? Extract both values.
                           Requires mis_date. expected_value = bank value, actual_value = system.
-- RECONCILIATION:         compare X across tables for a specific account / MIS date.
+- DATA_QUERY:             question about a SET of rows, an aggregate value, or a
+                          comparison across dates. Answer requires running SQL,
+                          NOT graph tracing. Triggers:
+                            * "total", "sum", "average", "count", "how many"
+                            * "which accounts", "list all", "breakdown by"
+                            * "changed between X and Y", "from X to Y",
+                              "difference between DATE1 and DATE2" — any
+                              comparison involving TWO MIS dates (time-series).
+                            * Every question without a specific single account_number
+                              that asks for numbers/rows.
+- UNSUPPORTED:            question the system cannot honestly answer. Set
+                          unsupported_reason. Triggers:
+                            * References to FCT_* tables or downstream result tables
+                              not present in the graph (cross-table reconciliation).
+                            * Forecasting / prediction ("likely to fail", "next quarter",
+                              "forecast", "will X happen").
+                            * Any other capability outside read-only introspection of
+                              the current schema + graph.
 
-Rules:
-- target_variable: extract the exact column/variable name (e.g. EAD_AMOUNT, N_ANNUAL_GROSS_INCOME).
-- search_terms: extract ALL relevant keywords -- function/table/column names and business concepts.
+Routing rules (apply in order):
+ 1. If the query contains forecasting / FCT-vs-STG / future-tense prediction
+    language -> UNSUPPORTED. Use unsupported_reason to name it.
+ 2. Otherwise, if the query mentions TWO MIS dates (a date range / time-series
+    comparison) -> DATA_QUERY, regardless of whether an account_number is
+    present. Set start_date and end_date; leave mis_date null.
+ 3. Otherwise, if the query asks about a single specific account_number on
+    a single MIS date and wants to understand a value (why / how / breakdown)
+    -> VALUE_TRACE (or DIFFERENCE_EXPLANATION if two values are compared).
+ 4. Otherwise, if the query uses aggregation ("total", "sum", "average",
+    "count", "how many") OR asks for a row list without specifying one
+    account ("which accounts", "list all", "show me all", "breakdown by")
+    -> DATA_QUERY.
+ 5. Otherwise -> VARIABLE_TRACE or COLUMN_LOGIC as before.
+ 6. When in doubt between VALUE_TRACE and DATA_QUERY, prefer VALUE_TRACE
+    ONLY when a single specific account_number + single mis_date are present.
+    Otherwise prefer DATA_QUERY.
+
+Date extraction rules:
+- For single-date queries: set `mis_date` to that date. Leave `start_date`
+  and `end_date` null.
+- For date-range queries ("between X and Y", "from X to Y", "changed from X
+  to Y", "between DATE1 and DATE2"): set `start_date` to the EARLIER date,
+  `end_date` to the LATER date. Leave `mis_date` NULL. Never silently drop
+  one of the two dates.
+- Never populate all three of mis_date, start_date, end_date. It's either
+  (mis_date only) or (start_date + end_date only).
+
+Field rules:
+- target_variable: extract the exact column/variable name (e.g. EAD_AMOUNT,
+  N_ANNUAL_GROSS_INCOME).
+- search_terms: extract ALL relevant keywords -- function/table/column names
+  and business concepts.
 - schema_name defaults to "OFSMDM" unless another schema is specified.
-- mis_date: parse any date mention (e.g. "2025-12-31", "Dec 31 2025") to YYYY-MM-DD.
-- For VALUE_TRACE / DIFFERENCE_EXPLANATION / RECONCILIATION:
-    * mis_date is required -- set confidence low if not found.
-    * Extract account_number, lob_code, lv_code, gl_code, branch_code only if mentioned.
-    * All Phase 2 fields stay null for Phase 1 queries.
+- For VALUE_TRACE / DIFFERENCE_EXPLANATION: mis_date is required -- set
+  confidence low if not found.
+- For DATA_QUERY: either mis_date OR (start_date + end_date) is required --
+  set confidence low if neither is found.
+- Extract account_number, lob_code, lv_code, gl_code, branch_code only if
+  mentioned.
+- unsupported_reason: only populated for UNSUPPORTED. Examples:
+    "cross-table reconciliation against FCT tables (not in scope)",
+    "forecasting / prediction (system is read-only introspection only)",
+    "references table X which is not parsed in the graph".
 
 Examples:
 - "Explain FN_LOAD_OPS_RISK_DATA"
@@ -120,14 +181,42 @@ Examples:
 - "Why is N_EOP_BAL for account LD1323300008 showing 50000000 on 2025-12-31?"
     -> query_type: "VALUE_TRACE", target_variable: "N_EOP_BAL",
        account_number: "LD1323300008", mis_date: "2025-12-31",
-       actual_value: 50000000
+       start_date: null, end_date: null, actual_value: 50000000
 - "Bank says EAD is 52M but system shows 50M for account X on 2025-12-31"
     -> query_type: "DIFFERENCE_EXPLANATION", target_variable: "EAD",
        expected_value: 52000000, actual_value: 50000000,
        mis_date: "2025-12-31", account_number: "X"
+- "What is the total N_EOP_BAL for all accounts with V_LV_CODE='ABL' on 2025-12-31?"
+    -> query_type: "DATA_QUERY", target_variable: "N_EOP_BAL",
+       mis_date: "2025-12-31", lv_code: "ABL",
+       start_date: null, end_date: null
+- "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
+    -> query_type: "DATA_QUERY", target_variable: "F_EXPOSURE_ENABLED_IND",
+       mis_date: "2025-12-31", start_date: null, end_date: null
+- "Which accounts have N_EOP_BAL = 0 on 2025-12-31?"
+    -> query_type: "DATA_QUERY", target_variable: "N_EOP_BAL",
+       mis_date: "2025-12-31", start_date: null, end_date: null
+- "Show me all accounts on 2025-12-31"
+    -> query_type: "DATA_QUERY", target_variable: null, mis_date: "2025-12-31",
+       start_date: null, end_date: null
+- "How did N_EOP_BAL change for account TF1528012748-T24-COLLBLG between 2025-09-30 and 2025-12-31?"
+    -> query_type: "DATA_QUERY", target_variable: "N_EOP_BAL",
+       account_number: "TF1528012748-T24-COLLBLG",
+       mis_date: null,
+       start_date: "2025-09-30", end_date: "2025-12-31"
+- "N_EOP_BAL changed from 100M on 2025-09-30 to 120M on 2025-12-31 — why?"
+    -> query_type: "DATA_QUERY", target_variable: "N_EOP_BAL",
+       mis_date: null,
+       start_date: "2025-09-30", end_date: "2025-12-31"
+- "Why does N_EOP_BAL differ between STG and FCT for account X on 2025-12-31?"
+    -> query_type: "UNSUPPORTED",
+       unsupported_reason: "cross-table reconciliation against FCT tables (not in scope)"
+- "Which accounts are likely to fail next quarter?"
+    -> query_type: "UNSUPPORTED",
+       unsupported_reason: "forecasting / prediction (system is read-only introspection only)"
 - "FCT_PRODUCT_EXPOSURES value differs from STG_PRODUCT_PROCESSOR for account X on 2025-12-31"
-    -> query_type: "RECONCILIATION", target_variable: null,
-       account_number: "X", mis_date: "2025-12-31"
+    -> query_type: "UNSUPPORTED",
+       unsupported_reason: "cross-table reconciliation against FCT tables (not in scope)"
 """
 
 
@@ -273,6 +362,8 @@ class Orchestrator:
         state["phase2_filters"] = {
             "account_number": result.account_number,
             "mis_date": result.mis_date,
+            "start_date": result.start_date,
+            "end_date": result.end_date,
             "lob_code": result.lob_code,
             "lv_code": result.lv_code,
             "gl_code": result.gl_code,
@@ -280,6 +371,7 @@ class Orchestrator:
         }
         state["phase2_expected_value"] = result.expected_value
         state["phase2_actual_value"] = result.actual_value
+        state["unsupported_reason"] = result.unsupported_reason or ""
 
         logger.info(
             f"Query classified: type={result.query_type}, "

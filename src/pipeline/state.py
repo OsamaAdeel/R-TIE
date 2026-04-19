@@ -66,6 +66,8 @@ class LogicState(TypedDict):
     phase2_filters: dict
     phase2_expected_value: Optional[float]
     phase2_actual_value: Optional[float]
+    # Populated only when query_type == "UNSUPPORTED"
+    unsupported_reason: str
     # Final output
     output: dict
     partial_flag: bool

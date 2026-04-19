@@ -49,3 +49,9 @@ phase2:
   verification_tolerance: 0.01
   oracle_query_timeout_seconds: 10
   require_mis_date: true
+
+data_query:
+  enabled: true
+  hard_row_limit: 10000    # reject row-list queries above this count
+  warn_row_limit: 100      # ask for confirmation between warn and hard
+  display_row_limit: 100   # FETCH FIRST N ROWS ONLY applied at execute time
