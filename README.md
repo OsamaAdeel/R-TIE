@@ -2,21 +2,25 @@
 
 > **Explain every number. Trace every transformation. Touch nothing.**
 
-RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that explains the complete logic behind regulatory capital computations — tracing PL/SQL functions, column lineage, and data flows to give engineers instant, fully cited answers without touching the underlying system.
+RTIE is a read-only multi-agent AI system built on Oracle OFSAA FSAPPS that explains the complete logic behind regulatory capital computations — tracing PL/SQL functions, column lineage, and actual data values to give engineers instant, fully cited answers without touching the underlying system.
 
 ---
 
 ## How It Works
 
-An engineer asks a question like *"How is N_ANNUAL_GROSS_INCOME calculated?"* — RTIE parses all PL/SQL functions at startup into a compressed graph representation (86.6% smaller than raw source), looks up exactly which nodes across which functions touch that variable, and sends a compact ~300 token subgraph to the LLM instead of ~17,000 tokens of raw PL/SQL. The LLM explains the business logic with exact line references. The entire round trip takes ~2 seconds at ~$0.005 per query.
+An engineer asks a question — "How is N_ANNUAL_GROSS_INCOME calculated?" or "Why is N_EOP_BAL showing -10 for account X?" — and RTIE answers from one of three capabilities:
+
+- **Logic trace** explains what the code does using a compressed graph representation (86.6% smaller than raw PL/SQL source).
+- **Value trace** fetches the actual row, classifies its origin, and explains how the value came to be — using graph path for PL/SQL-computed values and the origins catalog for ETL-loaded values.
+- **Data query** generates, validates, and executes a read-only SELECT against Oracle for aggregation, filter, count, and time-series questions.
+
+Every answer is grounded in parsed code or fetched data. No speculation. No hallucinated function names. When a question falls outside RTIE's scope (cross-table reconciliation, forecasting, tables not in the graph), it declines explicitly rather than guessing.
 
 ---
 
-## Sample Output
+## Sample Outputs
 
-**Query:** *"How is N_ANNUAL_GROSS_INCOME calculated?"*
-
-**Response:**
+**Logic query:** *"How is N_ANNUAL_GROSS_INCOME calculated?"*
 
 > **Execution Condition:** This entire function ONLY runs when the reporting month is December.
 >
@@ -28,10 +32,19 @@ An engineer asks a question like *"How is N_ANNUAL_GROSS_INCOME calculated?"* �
 > *Intermediate variables: TOT1 = LN_TOTAL_DEDUCT + (-1 × LN_DEDUCITON_RATIO_1), CBA_DEDUCTION = SUM(N_AMOUNT_ACY) from 3 specific GL codes*
 >
 > **Step 3: ABLIBG Adjustment** (FN_LOAD_OPS_RISK_DATA, lines 329-344)
-> Same deduction logic applied separately for the ABLIBG entity using branch-filtered GL data.
+> Same deduction logic applied separately for the ABLIBG entity.
 >
 > **Step 4: Pass-Through** (TLX_OPS_ADJ_MISDATE)
-> Copies N_ANNUAL_GROSS_INCOME unchanged through STG_OPS_ADJ_MISDATE_TLX and back. Purpose: date-adjusts historical records so the engine can average 3 years of gross income.
+> Copies N_ANNUAL_GROSS_INCOME unchanged through STG_OPS_ADJ_MISDATE_TLX and back. Purpose: date-adjusts historical records.
+
+**Value query:** *"Why is N_EOP_BAL -10 for account TF1528012748-T24-COLLBLG on 2025-12-31?"*
+
+> The value of the row for N_EOP_BAL is -10.0. This row was loaded by the T24 core banking system. No PL/SQL function computed the N_EOP_BAL value. PL/SQL modified the F_EXPOSURE_ENABLED_IND column, setting it to 'N' because the GL code is on the hardcoded block list. The fix path is: Investigate T24 extract logs, verify GL position.
+
+**Data query:** *"What is the total N_EOP_BAL for all accounts with V_LV_CODE='ABL' on 2025-12-31?"*
+
+> **Summary:** SUM(N_EOP_BAL) = -1,611,100,157.21.
+> **SQL executed:** `SELECT SUM(N_EOP_BAL) FROM STG_PRODUCT_PROCESSOR WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD') AND V_LV_CODE = :lv_code`
 
 ---
 
@@ -101,9 +114,8 @@ This generates descriptions (via OpenAI gpt-4o-mini) and embeddings for each fun
 ### 7. Ask questions via CLI
 ```bash
 python cli.py ask "How is N_ANNUAL_GROSS_INCOME calculated?"
-python cli.py ask "What updates STG_PRODUCT_PROCESSOR?"
-python cli.py ask "Explain FN_LOAD_OPS_RISK_DATA"
-python cli.py ask "Trace EAD_AMOUNT across functions"
+python cli.py ask "Why is N_EOP_BAL -10 for account X on 2025-12-31?"
+python cli.py ask "What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?"
 ```
 
 ### 8. Run the web app
@@ -129,10 +141,12 @@ RTIE/
     modules/                 PL/SQL source files (.sql)
     schemas/                 Oracle DDL (OFSMDM, OFSERM)
   src/
-    agents/                  LangGraph agents
-      orchestrator.py          Query classification + routing
-      logic_explainer.py       LLM-powered explanation generation
-      variable_tracer.py       Variable lineage tracing (LLM + Python hybrid)
+    agents/                  LangGraph + Phase 2 agents
+      orchestrator.py          Query classification + routing (7 query types)
+      logic_explainer.py       LLM-powered logic explanation (Phase 1)
+      variable_tracer.py       Variable lineage tracing (Phase 1 fallback)
+      value_tracer.py          Row-first value trace (Phase 2)
+      data_query.py            SQL generation + execution (Option A)
       metadata_interpreter.py  Source code fetching (Redis/Oracle/disk)
       validator.py             Output validation + confidence scoring
       renderer.py              Final response assembly
@@ -146,17 +160,24 @@ RTIE/
       store.py                 Redis graph storage
       loader.py                Startup pipeline orchestrator
       query_engine.py          Query-time subgraph filtering + payload assembly
+    phase2/                  Phase 2 value lineage components
+      row_inspector.py         Fetches the actual target row first
+      origins_catalog.py       Graph-derived catalog (V_DATA_ORIGIN, GL blocks, overrides)
+      origin_classifier.py     Routes PLSQL vs ETL vs UNKNOWN
+      trace_router.py          Picks strategy by origin
+      evidence_builder.py      Assembles verified facts only
+      explainer.py             Hallucination-forbidden LLM prompts
     pipeline/                LangGraph orchestration
       logic_graph.py           StateGraph definition + conditional edges
       state.py                 LogicState TypedDict
     tools/                   Infrastructure clients
       cache_tools.py           Redis cache client
       schema_tools.py          Oracle query executor
-      sql_guardian.py          SQL injection prevention
+      sql_guardian.py          SQL injection prevention (SELECT-only, bind vars)
       vector_store.py          Redis vector search (RediSearch)
     middleware/               Correlation ID, retry
     monitoring/               Health checks
-  tests/unit/parsing/        44 unit tests for the graph parser
+  tests/unit/                50+ unit tests (parsing + phase2)
   frontend/                  React + Vite web UI
   cli.py                     CLI testing tool
   run.py                     Backend launcher (Windows-compatible)
@@ -172,37 +193,43 @@ RTIE/
 graph TB
     UI["React + Vite Frontend<br/><i>localhost:5173</i>"]
     API["FastAPI Backend<br/><i>localhost:8000 &bull; /v1/stream</i>"]
-    ORC["Orchestrator<br/><i>classify + route</i>"]
-    GP["Graph Pipeline<br/><i>query engine</i>"]
+    ORC["Orchestrator<br/><i>classify + route (7 query types)</i>"]
+    GP["Graph Pipeline<br/><i>query engine (Phase 1)</i>"]
+    VT["Value Tracer<br/><i>row-first trace (Phase 2)</i>"]
+    DQ["Data Query Agent<br/><i>SQL gen + safeguards (Option A)</i>"]
     LLM["LLM Layer<br/><i>OpenAI / Claude</i>"]
     SS["Semantic Search<br/><i>embeddings + KNN</i>"]
     MI["Metadata Interpreter<br/><i>fetch source code</i>"]
-    LE["Logic Explainer /<br/>Variable Tracer"]
-    REDIS[("Redis<br/><i>Graph store &bull; Column index<br/>Vector index &bull; Source cache</i>")]
+    REDIS[("Redis<br/><i>Graph store &bull; Column index<br/>Origins catalog &bull; Source cache</i>")]
     PG[("PostgreSQL<br/><i>LangGraph checkpointer</i>")]
     ORACLE[("Oracle OFSAA<br/><i>read-only</i>")]
 
     UI -- "SSE streaming" --> API
     API --> ORC
-    API --> GP
-    API --> LLM
+    ORC --> GP
+    ORC --> VT
+    ORC --> DQ
     ORC --> SS
     SS --> MI
     GP --> REDIS
-    LLM --> LE
+    VT --> REDIS
+    VT --> ORACLE
+    DQ --> ORACLE
+    DQ --> LLM
+    LLM --> API
     MI --> REDIS
     MI --> ORACLE
-    SS --> REDIS
     API --> PG
 
     style UI fill:#4f46e5,color:#fff,stroke:none
     style API fill:#0f766e,color:#fff,stroke:none
     style ORC fill:#7c3aed,color:#fff,stroke:none
     style GP fill:#0369a1,color:#fff,stroke:none
-    style LLM fill:#b45309,color:#fff,stroke:none
+    style VT fill:#059669,color:#fff,stroke:none
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style LLM fill:#d97706,color:#fff,stroke:none
     style SS fill:#6d28d9,color:#fff,stroke:none
     style MI fill:#059669,color:#fff,stroke:none
-    style LE fill:#d97706,color:#fff,stroke:none
     style REDIS fill:#dc2626,color:#fff,stroke:none
     style PG fill:#2563eb,color:#fff,stroke:none
     style ORACLE fill:#9333ea,color:#fff,stroke:none
@@ -210,103 +237,73 @@ graph TB
 
 ### LLM Provider
 
-All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB).
+All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB); SQL generation prompts are ~1-2KB.
+
+---
+
+### Query Types and Routing
+
+The orchestrator classifies every query into one of seven types and routes to the matching handler. This is the single decision that determines which capability answers the question.
+
+| Query Type | Example | Handler | Phase |
+|------------|---------|---------|-------|
+| VARIABLE_TRACE | "How is EAD_AMOUNT calculated?" | Logic Explainer | 1 |
+| COLUMN_LOGIC | "What does N_EOP_BAL do?" | Logic Explainer | 1 |
+| FUNCTION_LOGIC | "Explain FN_LOAD_OPS_RISK_DATA" | Logic Explainer | 1 |
+| VALUE_TRACE | "Why is N_EOP_BAL -10 for account X?" | Value Tracer | 2 |
+| DIFFERENCE_EXPLANATION | "Bank says 52M, we show 50M for account X" | Value Tracer | 2 |
+| DATA_QUERY | "Total N_EOP_BAL for V_LV_CODE='ABL'" | Data Query Agent | Option A |
+| UNSUPPORTED | "FCT vs STG reconciliation" / forecasting | Capability decline | — |
+
+**Ambiguity rule:** When unclear, the orchestrator defaults to VALUE_TRACE (which handles single-row questions correctly including breakdown requests). Mis-routing aggregation queries to VALUE_TRACE was the original silent-failure bug, so the classifier requires explicit aggregation keywords ("total", "sum", "count", "how many", "which accounts") AND absence of a specific account number to route to DATA_QUERY.
 
 ---
 
 ### Request Pipeline (SSE Streaming)
 
-When a user asks a question, the `/v1/stream` endpoint processes it through 4 stages, streaming Server-Sent Events (SSE) to the frontend at each stage:
+When a user asks a question, the `/v1/stream` endpoint processes it through stages, streaming Server-Sent Events (SSE) to the frontend at each stage:
 
 ```mermaid
 flowchart TD
     Q(["User Query"])
-    C["1. CLASSIFY<br/><i>Orchestrator LLM call</i>"]
-    S["2. SEARCH<br/><i>Embed query + KNN</i>"]
-    F["3. FETCH<br/><i>Redis / Oracle / disk</i>"]
-    G{"Graph<br/>available?"}
-    GR["3b. GRAPH RESOLVE<br/><i>Column index lookup<br/>Node fetch + payload assembly</i>"]
-    RAW["Raw source<br/>fallback"]
-    E["4. EXPLAIN<br/><i>LLM streams markdown tokens</i>"]
+    C["1. CLASSIFY<br/><i>Orchestrator LLM call<br/>7 query types</i>"]
+    R{"Query<br/>type?"}
+
+    GP["Phase 1<br/><i>Graph trace<br/>(logic only)</i>"]
+    VT["Phase 2<br/><i>Row-first value trace</i>"]
+    DQ["Option A<br/><i>SQL generation + execution</i>"]
+    UN["UNSUPPORTED<br/><i>Explicit decline</i>"]
+
+    E["STREAM<br/><i>LLM streams markdown tokens</i>"]
     D(["Done"])
 
-    SSE1["stage: classify"]
-    SSE2["stage: search"]
-    SSE3["stage: fetch<br/>meta: functions"]
-    SSE4["stage: explain<br/>token: markdown<br/>done: confidence"]
-
     Q --> C
-    C --> S
-    S --> F
-    F --> G
-    G -- "Yes" --> GR
-    G -- "No" --> RAW
-    GR --> E
-    RAW --> E
-    E --> D
+    C --> R
+    R -- "VARIABLE_TRACE<br/>COLUMN_LOGIC<br/>FUNCTION_LOGIC" --> GP
+    R -- "VALUE_TRACE<br/>DIFFERENCE_EXPLANATION" --> VT
+    R -- "DATA_QUERY" --> DQ
+    R -- "UNSUPPORTED" --> UN
 
-    C -.- SSE1
-    S -.- SSE2
-    F -.- SSE3
-    E -.- SSE4
+    GP --> E
+    VT --> E
+    DQ --> E
+    UN --> E
+    E --> D
 
     style Q fill:#4f46e5,color:#fff,stroke:none
     style C fill:#7c3aed,color:#fff,stroke:none
-    style S fill:#6d28d9,color:#fff,stroke:none
-    style F fill:#059669,color:#fff,stroke:none
-    style GR fill:#0369a1,color:#fff,stroke:none
-    style RAW fill:#6b7280,color:#fff,stroke:none
-    style E fill:#b45309,color:#fff,stroke:none
-    style D fill:#4f46e5,color:#fff,stroke:none
-    style G fill:#0f766e,color:#fff,stroke:none
-    style SSE1 fill:#f3f4f6,color:#666,stroke:#ddd
-    style SSE2 fill:#f3f4f6,color:#666,stroke:#ddd
-    style SSE3 fill:#f3f4f6,color:#666,stroke:#ddd
-    style SSE4 fill:#f3f4f6,color:#666,stroke:#ddd
-```
-
-**Routing logic at Stage 4:**
-- If graph pipeline produced `llm_payload` — `stream_semantic()` with structured payload (~300 tokens)
-- Else if `VARIABLE_TRACE` — Variable Tracer (3-stage extraction pipeline)
-- Else — `stream_semantic()` with raw source fallback
-
-### LangGraph StateGraph (7 nodes, conditional routing)
-
-The `/v1/query` (non-streaming) endpoint uses a compiled LangGraph pipeline with PostgreSQL checkpointing:
-
-```mermaid
-flowchart LR
-    PQ["parse_query"] --> SS["semantic_search"] --> FM["fetch_multi_logic"]
-    FM --> R{"route"}
-    R -- "VARIABLE_TRACE" --> VT["variable_trace"]
-    R -- "COLUMN_LOGIC" --> ES["explain_semantic"]
-    VT --> OV["output_validator"]
-    ES --> OV
-    OV --> RR["render_response"]
-
-    style PQ fill:#7c3aed,color:#fff,stroke:none
-    style SS fill:#6d28d9,color:#fff,stroke:none
-    style FM fill:#059669,color:#fff,stroke:none
     style R fill:#0f766e,color:#fff,stroke:none
-    style VT fill:#d97706,color:#fff,stroke:none
-    style ES fill:#b45309,color:#fff,stroke:none
-    style OV fill:#dc2626,color:#fff,stroke:none
-    style RR fill:#4f46e5,color:#fff,stroke:none
+    style GP fill:#0369a1,color:#fff,stroke:none
+    style VT fill:#059669,color:#fff,stroke:none
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style UN fill:#6b7280,color:#fff,stroke:none
+    style E fill:#d97706,color:#fff,stroke:none
+    style D fill:#4f46e5,color:#fff,stroke:none
 ```
-
-| Node | Agent | Purpose |
-|------|-------|---------|
-| parse_query | Orchestrator | Classify query type, extract search terms |
-| semantic_search | Embeddings + VectorStore | KNN lookup for relevant functions |
-| fetch_multi_logic | MetadataInterpreter | Fetch source from Redis/Oracle/disk |
-| variable_trace | VariableTracer | 3-stage variable lineage pipeline |
-| explain_semantic | LogicExplainer | Cross-function explanation with citations |
-| output_validator | Validator | Verify referenced functions, compute confidence |
-| render_response | Renderer | Assemble final response with badges and warnings |
 
 ---
 
-### Graph Parsing Pipeline (Startup)
+### Phase 1 — Graph Pipeline (Startup + Query Time)
 
 On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis. A 1,500-line function (67,721 chars) compresses to ~288 lines (9,084 chars) — **86.6% reduction**. At query time, only the relevant subgraph is sent to the LLM (~300 tokens instead of ~17,000).
 
@@ -332,6 +329,7 @@ flowchart TD
 **Calculation types:** DIRECT, ARITHMETIC, CONDITIONAL, FALLBACK, OVERRIDE
 
 **Parser handles these patterns:**
+
 | Pattern | What it captures |
 |---------|-----------------|
 | Function-level execution conditions | `IF EXTRACT(MONTH...) = 12` — December-only functions |
@@ -344,9 +342,9 @@ flowchart TD
 
 ---
 
-### Query Engine Pipeline (Query-Time)
+### Query Engine (Query-Time Subgraph)
 
-When the graph is available, the query engine resolves a user question to a compact structured payload in microseconds — replacing ~17,000 tokens of raw PL/SQL with a ~2-4KB focused payload:
+When a Phase 1 query arrives, the query engine resolves it to a compact structured payload in microseconds.
 
 ```mermaid
 flowchart TD
@@ -373,7 +371,7 @@ flowchart TD
 
 **Example: "How is N_ANNUAL_GROSS_INCOME calculated?"**
 
-| What happens | Tool | Time | Cost |
+| Step | Tool | Time | Cost |
 |---|---|---|---|
 | Alias resolution | Redis | < 1ms | Free |
 | Column index lookup | Redis | < 1ms | Free |
@@ -381,19 +379,180 @@ flowchart TD
 | Assemble payload | Python | < 1ms | Free |
 | LLM explanation | GPT-4o (1 call, ~500 tokens) | ~2s | ~$0.005 |
 
-**Output structure (4 steps instead of raw 500+ lines):**
+---
+
+### Phase 2 — Value Lineage (Row-First Pipeline)
+
+Phase 2 answers questions about actual data values: *"Why is this value X?"* It starts from the row, not the graph. The row's `V_DATA_ORIGIN` column reveals whether the value was computed by PL/SQL or loaded from external ETL — and that single fact determines the entire trace strategy.
+
+```mermaid
+flowchart TD
+    Q(["Why is N_EOP_BAL<br/>-10 for account X<br/>on 2025-12-31?"])
+
+    S1["1. RowInspector<br/><i>row_inspector.py</i><br/>Fetch actual row from Oracle"]
+    M{"Row<br/>exists?"}
+    NR["row_not_found<br/><i>Explicit decline</i>"]
+
+    S2["2. OriginClassifier<br/><i>origin_classifier.py</i><br/>Check V_DATA_ORIGIN<br/>Check GL block list<br/>Check EOP overrides"]
+
+    S3{"Origin<br/>category?"}
+
+    S4A["PLSQL origin<br/><i>graph_trace</i><br/>Walk graph path<br/>Fetch value at each node"]
+    S4B["ETL origin<br/><i>etl_explain</i><br/>Identify source system<br/>List PL/SQL non-modifications"]
+    S4C["UNKNOWN origin<br/><i>diagnose</i><br/>Surface row facts<br/>Suggest investigation"]
+
+    S5["3. EvidenceBuilder<br/><i>evidence_builder.py</i><br/>Assemble verified facts only"]
+
+    S6["4. Phase2Explainer<br/><i>explainer.py</i><br/>Hallucination-forbidden LLM prompt<br/>Sanity check output"]
+
+    OUT(["Response with row facts,<br/>SQL verification, and<br/>actionable fix path"])
+
+    Q --> S1 --> M
+    M -- "No" --> NR
+    M -- "Yes" --> S2 --> S3
+    S3 -- "PLSQL" --> S4A --> S5
+    S3 -- "ETL" --> S4B --> S5
+    S3 -- "UNKNOWN" --> S4C --> S5
+    S5 --> S6 --> OUT
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#7c3aed,color:#fff,stroke:none
+    style M fill:#0f766e,color:#fff,stroke:none
+    style NR fill:#6b7280,color:#fff,stroke:none
+    style S2 fill:#6d28d9,color:#fff,stroke:none
+    style S3 fill:#0f766e,color:#fff,stroke:none
+    style S4A fill:#0369a1,color:#fff,stroke:none
+    style S4B fill:#059669,color:#fff,stroke:none
+    style S4C fill:#b45309,color:#fff,stroke:none
+    style S5 fill:#059669,color:#fff,stroke:none
+    style S6 fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
-Step 1: INSERT seed from ABL_OPS_RISK_DATA into STG_OPS_RISK_DATA
-Step 2: UPDATE CBA/RBA with CASE expression (intermediate vars: TOT1, CBA_DEDUCTION)
-Step 3: UPDATE ABLIBG with CASE expression (intermediate vars: LN_SUB_TOTAL_ABLIBG)
-Step 4: [PASS-THROUGH] TLX_OPS_ADJ_MISDATE — copies value unchanged through staging table
-```
+
+**Row-first matters.** A row in STG_PRODUCT_PROCESSOR can arrive via at least four different paths:
+
+1. PL/SQL function execution (traceable through the graph)
+2. Direct ETL load from an external system (T24, IBG, CBS, ODF)
+3. Manual upload processes
+4. Other OFSAA modules outside the current batch
+
+A graph-first trace assumes every row flows through PL/SQL and breaks when it doesn't. The row-first approach handles all four paths because classification comes from the row's `V_DATA_ORIGIN` column — not from assumptions about the pipeline shape.
 
 ---
 
-### Variable Tracer (3-Stage Pipeline)
+### Origins Catalog (Auto-Derived from Graph)
 
-When a user asks "How is EAD_AMOUNT calculated?" and the graph pipeline has no matches, the Variable Tracer is the fallback. It extracts relevant lines using a hybrid LLM + Python approach:
+The origins catalog maps `V_DATA_ORIGIN` values to what produced them, tracks GL codes in hardcoded block lists, and records hardcoded overrides (e.g. `N_EOP_BAL = 0` for specific GL codes). It is **built automatically at startup** by scanning the parsed graph in Redis. No hardcoded batch-specific knowledge.
+
+```mermaid
+flowchart LR
+    G[("Redis<br/><i>Parsed graph<br/>(Phase 1 output)</i>")]
+    CB["build_catalog()<br/><i>origins_catalog.py</i>"]
+
+    E1["Extract V_DATA_ORIGIN literals<br/><i>from column_maps + CASE/DECODE</i>"]
+    E2["Extract GL block list<br/><i>from CONDITIONAL on F_EXPOSURE_ENABLED_IND</i>"]
+    E3["Extract EOP overrides<br/><i>from OVERRIDE calculations</i>"]
+    E4["Seed ETL origins<br/><i>BOOTSTRAP_ETL_ORIGINS<br/>(OF, T24, IBG, CBS, SWIFT)</i>"]
+
+    V["_validate_completeness()<br/><i>Ensure all bootstrap keys present<br/>Functions match graph key count</i>"]
+
+    SW["Atomic swap<br/><i>_catalog = new_catalog<br/>(only after build success)</i>"]
+
+    C[("Module global<br/><i>OriginsCatalog<br/>(served by get_catalog())</i>")]
+
+    G --> CB
+    CB --> E1 --> V
+    CB --> E2 --> V
+    CB --> E3 --> V
+    CB --> E4 --> V
+    V --> SW --> C
+
+    style G fill:#dc2626,color:#fff,stroke:none
+    style CB fill:#7c3aed,color:#fff,stroke:none
+    style E1 fill:#0369a1,color:#fff,stroke:none
+    style E2 fill:#059669,color:#fff,stroke:none
+    style E3 fill:#b45309,color:#fff,stroke:none
+    style E4 fill:#6b7280,color:#fff,stroke:none
+    style V fill:#0f766e,color:#fff,stroke:none
+    style SW fill:#4f46e5,color:#fff,stroke:none
+    style C fill:#d97706,color:#fff,stroke:none
+```
+
+**Hardened against partial initialization.** `build_catalog()` builds into a local variable first. The module global is only swapped in after `build()` succeeds AND `_validate_completeness()` passes. On any failure, the previous working catalog remains in memory (or stays `None` on first-time failure, causing clean `RuntimeError` on requests). No half-initialized catalog ever serves traffic.
+
+**Adding a new batch:** Drop new `.sql` files under `db/modules/<NEW_MODULE>/functions/`, restart. The graph pipeline re-parses everything, the catalog rebuilds, new V_DATA_ORIGIN values and GL codes are picked up automatically. Zero code changes.
+
+---
+
+### Option A — Data Query Handler
+
+Option A handles questions where the answer is in the database, not in the code. Aggregation, filter, count, time series — these are raw data questions that need SQL execution, not graph tracing.
+
+```mermaid
+flowchart TD
+    Q(["Total N_EOP_BAL<br/>for V_LV_CODE='ABL'<br/>on 2025-12-31?"])
+
+    S1["1. SQL Generator<br/><i>data_query.py</i><br/>LLM translates NL to SQL<br/>Bind variables only<br/>Prefer aggregation"]
+
+    S2["2. SQL Guardian<br/><i>sql_guardian.py</i><br/>SELECT-only validation<br/>Reject DML/DDL/PL/SQL"]
+
+    S3{"Query<br/>kind?"}
+
+    S4A["AGGREGATION<br/><i>SUM, COUNT, AVG</i><br/>Execute directly"]
+    S4B["ROW_LIST<br/><i>Row count pre-check<br/>(SAFEGUARD 1)</i>"]
+    S4C["TIME_SERIES<br/><i>FIC_MIS_DATE IN (...)<br/>Deterministic delta</i>"]
+
+    RCC{"Row<br/>count?"}
+    R1["> 10K → reject<br/><i>Narrowing suggestion</i>"]
+    R2["100 to 10K →<br/><i>Ask user confirmation</i>"]
+    R3["< 100 →<br/><i>FETCH FIRST 100<br/>(SAFEGUARD 3)</i>"]
+
+    EX["Oracle execute<br/><i>schema_tools.py</i>"]
+
+    F["Result Formatter<br/><i>Deterministic markdown<br/>No LLM speculation</i>"]
+
+    OUT(["Scalar / table<br/>+ SQL + bind params<br/>+ one-line summary"])
+
+    Q --> S1 --> S2 --> S3
+    S3 -- "AGGREGATION / COUNT" --> S4A --> EX
+    S3 -- "ROW_LIST" --> S4B --> RCC
+    S3 -- "TIME_SERIES" --> S4C --> EX
+    RCC -- "> 10K" --> R1
+    RCC -- "100-10K" --> R2
+    RCC -- "< 100" --> R3 --> EX
+    EX --> F --> OUT
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#7c3aed,color:#fff,stroke:none
+    style S2 fill:#dc2626,color:#fff,stroke:none
+    style S3 fill:#0f766e,color:#fff,stroke:none
+    style S4A fill:#0369a1,color:#fff,stroke:none
+    style S4B fill:#059669,color:#fff,stroke:none
+    style S4C fill:#b45309,color:#fff,stroke:none
+    style RCC fill:#0f766e,color:#fff,stroke:none
+    style R1 fill:#6b7280,color:#fff,stroke:none
+    style R2 fill:#d97706,color:#fff,stroke:none
+    style R3 fill:#059669,color:#fff,stroke:none
+    style EX fill:#9333ea,color:#fff,stroke:none
+    style F fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Three safeguards prevent large-dataset incidents:**
+
+1. **Row count pre-check** — For row-list queries, run `COUNT(*)` first with the same WHERE clause. Hard limit of 10,000 rows rejects with a narrowing suggestion. Between 100-10,000 asks the user whether to return rows or a summary. Under 100 executes.
+
+2. **Aggregation preference in the LLM prompt** — The SQL generator is explicitly instructed to produce SUM/COUNT/AVG queries when the question can be answered aggregately. "How many" becomes COUNT. "Total" becomes SUM.
+
+3. **Mandatory row limit injection** — For row-listing queries that pass the count check, `FETCH FIRST 100 ROWS ONLY` is auto-appended after SQL generation, before execution.
+
+**Time series presentation.** When a query provides `start_date` and `end_date`, the result table shows BOTH dates explicitly. Missing dates display `no data` placeholders — facts only, no speculation about why. When both dates have data and the target column is numeric, a deterministic delta is computed and displayed.
+
+---
+
+### Variable Tracer (Phase 1 Fallback)
+
+When a logic query has no matches in the graph's column index, the Variable Tracer is the fallback. It extracts relevant lines from raw source using a hybrid LLM + Python approach.
 
 ```mermaid
 flowchart TD
@@ -414,7 +573,7 @@ flowchart TD
 
 **Primary path vs fallback:**
 - **Graph pipeline** (primary) — used when the target variable is found in the column index. Produces a structured ~300 token payload. No raw source sent to LLM.
-- **Variable Tracer** (fallback) — used when the graph has no matches. Extracts relevant lines from raw source using regex + LLM hybrid approach.
+- **Variable Tracer** (fallback) — used when the graph has no matches. Extracts relevant lines from raw source using regex + LLM hybrid.
 
 ---
 
@@ -428,7 +587,7 @@ React + Vite + Tailwind CSS v4
     +-- components/
     |     MessageBubble.jsx  User messages (edit, retry, copy)
     |     |                  Assistant messages (streaming markdown)
-    |     |                  AgentThinking (4-stage pipeline indicator)
+    |     |                  AgentThinking (pipeline stage indicator)
     |     |                  CodeBlockWithCopy (syntax highlighted)
     |     ResponseCard.jsx   Structured response cards
     |     CommandResult.jsx  Slash command output
@@ -437,26 +596,53 @@ React + Vite + Tailwind CSS v4
 
 **SSE event flow:**
 ```
-event: stage  -> Updates pipeline stage indicator (classify/search/fetch/explain)
-event: meta   -> Populates function list and metadata
+event: stage  -> Updates pipeline stage indicator (classify/trace/stream)
+event: meta   -> Populates function list, origin info, SQL, bind params
 event: token  -> Appends to streaming markdown (rendered incrementally)
-event: done   -> Final metadata (confidence, citations, badge)
+event: done   -> Final metadata (confidence, citations, badge, requested_dates)
 event: error  -> Error display
 ```
 
 ---
 
+## Scope and Limits
+
+RTIE is designed to prioritize accuracy over coverage. When a query falls outside what the system can answer from parsed code or fetched data, RTIE declines explicitly rather than guessing. This is a deliberate architectural choice, not a limitation to be worked around.
+
+**What RTIE will NOT do:**
+
+| Out of scope | Why |
+|---|---|
+| Forecasting or prediction ("which accounts are likely to fail next quarter") | RTIE is read-only introspection. It has no forecasting model and will not generate one. |
+| Cross-table reconciliation against FCT / result tables | FCT tables live in the OFSAA Results schema, which is outside RTIE's scope. Responses for these queries redirect the user to the Results schema owners. |
+| References to tables not present in the parsed graph | If a table isn't in `db/modules/*/functions/`, RTIE can't reason about it. Queries mentioning such tables get an explicit capability-limitation response. |
+| Write operations of any kind | Oracle service account has SELECT-only privileges. SQL Guardian rejects DML/DDL at the application layer as a second defense. Even legitimate read-only DDL like EXPLAIN PLAN is out of scope. |
+| Speculation about upstream systems | For ETL-loaded rows (V_DATA_ORIGIN = T24, OF, IBG, etc.), RTIE states the origin and suggests the fix path ("investigate the ETL extract logs") but does not speculate about why the upstream value is what it is. |
+
+**What RTIE will do when it can't answer:**
+
+- Identify the capability that's missing (forecasting, cross-table reconciliation, unknown table, etc.)
+- State which category the query falls into
+- Suggest a rephrasing that might be answerable
+- Point to whoever owns the missing data or capability
+
+A confidently wrong answer is worse than no answer. Engineers lose trust in a system that guesses. They retain trust in a system that admits its limits.
+
+---
+
 ## Safety Principles
 
-RTIE is strictly read-only. It never modifies any database object, function, or table.
+RTIE is strictly read-only. It never modifies any database object, function, or table. Safety is enforced at four layers:
 
 | Layer | Protection |
 |---|---|
 | Database | Oracle service account has SELECT-only privileges |
-| Code | SQL Guardian validates every query via AST parse-tree — rejects DML/DDL |
-| LLM | Never writes SQL, never computes numbers, never modifies any object |
-| Parameters | All Oracle queries use bind variables — no string interpolation |
-| Limits | FETCH FIRST N ROWS ONLY injected on all unbounded queries |
+| SQL Guardian | Validates every query via AST parse-tree — rejects DML / DDL / PL/SQL blocks, rejects string-interpolated filter values |
+| Bind variables | All Oracle queries use named bind parameters — no string interpolation of user input |
+| Row limits | `FETCH FIRST N ROWS ONLY` injected on all unbounded row-list queries. Count pre-check rejects queries over 10K rows. |
+| LLM | Never writes SQL for value traces (Phase 2). Never computes numeric results. When it does generate SQL (Option A), the output passes through SQL Guardian before execution. |
+
+Phase 2's LLM prompts additionally contain hard rules against hallucinated function names. Every response passes a sanity check that flags forbidden phrases ("possible reasons", "might be because", "may have") and any function name not present in the loaded graph.
 
 ---
 
@@ -502,12 +688,12 @@ RTIE is strictly read-only. It never modifies any database object, function, or 
    python cli.py index --force
    ```
 
-3. Restart the backend (graph pipeline re-parses on startup):
+3. Restart the backend (graph pipeline re-parses, origins catalog rebuilds):
    ```bash
    python run.py
    ```
 
-4. Ask questions about it immediately.
+4. Ask questions about it immediately. New V_DATA_ORIGIN values, GL codes, and overrides are picked up automatically.
 
 ---
 
@@ -540,10 +726,10 @@ RTIE is strictly read-only. It never modifies any database object, function, or 
 ## Running Tests
 
 ```bash
-python -m pytest tests/unit/parsing/ -v
+python -m pytest tests/unit/ -v
 ```
 
-44 tests covering: parser, builder, indexer, serializer, store, loader, query engine.
+50+ tests covering: parser, builder, indexer, serializer, store, loader, query engine, origins catalog, row inspector, origin classifier, evidence builder, explainer, data query agent, result formatter.
 
 ---
 
@@ -551,15 +737,24 @@ python -m pytest tests/unit/parsing/ -v
 
 | Item | Reason |
 |---|---|
-| Proactive batch detection | Phase 1 is reactive only — engineers ask, system answers |
+| Proactive batch detection | RTIE is reactive — engineers ask, system answers |
 | pgvector / RAG | Not needed — all knowledge is in queryable Oracle tables and parsed graphs |
 | AutoGen / CrewAI | Insufficient determinism for regulated BASEL environment |
 | Any write operations | RTIE is strictly read-only — no exceptions |
+| Speculation or guessing | RTIE states facts or declines explicitly |
 
 ---
 
 ## Roadmap
 
-**Phase 1 (current):** Logic-only — explain functions, procedures, variable lineage across the DATA_PREPARATION batch.
+**Phase 1 (complete):** Logic explanation — explain functions, procedures, variable lineage across batches using the compressed graph representation.
 
-**Phase 2 (planned):** Value lineage — trace actual account-level values from staging through to final FCT output. Connect to live Oracle data. Show mathematical proof with real numbers.
+**Phase 2 (complete):** Value lineage — trace actual row values, classify by origin (PL/SQL vs ETL), explain using graph path or ETL source identification.
+
+**Option A (complete):** Data queries — aggregation, filter, count, and time-series questions answered by LLM-generated SQL with three safeguards.
+
+**Future capability extensions:**
+- Frontend rendering for clarification events (when a DATA_QUERY is missing a MIS date)
+- Surfacing known override patterns on row-not-found responses
+- Cross-table reconciliation when FCT tables become part of the parsed scope
+- Integration with real production data at scale
