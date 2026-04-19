@@ -249,7 +249,7 @@ def render_message(
     lines.append("")
     lines.append("Try rephrasing:")
     for suggestion in suggestions:
-        lines.append(f'  "{suggestion}"')
+        lines.append(f'  - "{suggestion}"')
     return "\n".join(lines)
 
 

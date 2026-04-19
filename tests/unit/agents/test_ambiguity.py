@@ -289,6 +289,44 @@ def test_rendered_message_matches_documented_template(
     assert "Try rephrasing:" in message
 
 
+def test_rendered_message_puts_each_suggestion_on_its_own_bullet_line(
+    catalog_v_prod_code_in_both,
+):
+    """Suggestions must render as separate bulleted lines so markdown
+    displays them as list items instead of a run-on sentence."""
+    candidates = detect_identifier_ambiguity(
+        target_column="V_PROD_CODE",
+        filters={"account_number": "601013101-8604", "mis_date": "2025-12-31"},
+        tables_to_columns=catalog_v_prod_code_in_both,
+        user_query="what's the v_prod_code of 601013101-8604 on 2025-12-31?",
+    )
+    suggestions = generate_suggestions(
+        user_query="what's the v_prod_code of 601013101-8604 on 2025-12-31?",
+        identifier="601013101-8604",
+        candidates=candidates,
+    )
+    message = render_message(
+        target_column="V_PROD_CODE",
+        identifier="601013101-8604",
+        candidates=candidates,
+        suggestions=suggestions,
+    )
+    # The "Try rephrasing:" header must be followed by each suggestion
+    # on its own dash-prefixed line.
+    header_idx = message.index("Try rephrasing:")
+    tail = message[header_idx:]
+    for suggestion in suggestions:
+        assert f'\n  - "{suggestion}"' in tail, (
+            f"suggestion {suggestion!r} not rendered as its own bullet line"
+        )
+    # And the two suggestions must be separated by a newline (not run
+    # together on the same line).
+    assert len(suggestions) == 2
+    first_line = f'  - "{suggestions[0]}"'
+    second_line = f'  - "{suggestions[1]}"'
+    assert f"{first_line}\n{second_line}" in message
+
+
 # ---------------------------------------------------------------------
 # DataQueryAgent integration — short-circuits before SQL generation
 # ---------------------------------------------------------------------
