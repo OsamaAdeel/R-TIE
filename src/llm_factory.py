@@ -43,7 +43,7 @@ def get_default_model(provider: str) -> str:
     """
     if provider == "anthropic":
         return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-    return os.getenv("OPENAI_MODEL", "gpt-4o")
+    return os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
 
 def create_llm(
@@ -89,6 +89,13 @@ def create_llm(
         if json_mode:
             kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
 
+        # GPT-5 and the o-series reasoning models only accept the default
+        # temperature (1); passing any other value raises
+        # "Unsupported value: 'temperature'".
+        model_lower = (model or "").lower()
+        if not (model_lower.startswith("gpt-5") or model_lower.startswith("o1") or model_lower.startswith("o3")):
+            kwargs["temperature"] = temperature
+
         # Force TLS 1.2 — TLS 1.3 on Python 3.14 + corporate networks
         # causes SSL: SSLV3_ALERT_BAD_RECORD_MAC on large payloads
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -98,7 +105,6 @@ def create_llm(
         return ChatOpenAI(
             api_key=api_key,
             model=model,
-            temperature=temperature,
             max_tokens=max_tokens,
             http_client=httpx.Client(verify=ssl_ctx, timeout=120),
             http_async_client=httpx.AsyncClient(verify=ssl_ctx, timeout=120),
@@ -132,8 +138,19 @@ def list_available_models() -> dict:
     if os.getenv("OPENAI_API_KEY"):
         models["openai"] = {
             "available": True,
-            "default_model": os.getenv("OPENAI_MODEL", "gpt-4o"),
-            "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o3-mini"],
+            "default_model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+            "models": [
+                "gpt-5.4-mini",
+                "gpt-5.4",
+                "gpt-5.2",
+                "gpt-5-mini",
+                "gpt-5-nano",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4-turbo",
+                "o1",
+                "o3-mini",
+            ],
         }
     else:
         models["openai"] = {"available": False}

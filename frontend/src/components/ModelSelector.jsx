@@ -15,12 +15,23 @@ const PROVIDER_LABELS = {
 
 const FALLBACK_DATA = {
   default_provider: 'openai',
-  default_model: 'gpt-4o',
+  default_model: 'gpt-5-mini',
   providers: {
     openai: {
       available: true,
-      default_model: 'gpt-4o',
-      models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'],
+      default_model: 'gpt-5-mini',
+      models: [
+        'gpt-5.4-mini',
+        'gpt-5.4',
+        'gpt-5.2',
+        'gpt-5-mini',
+        'gpt-5-nano',
+        'gpt-4o',
+        'gpt-4o-mini',
+        'gpt-4-turbo',
+        'o1',
+        'o3-mini',
+      ],
     },
     anthropic: {
       available: true,
