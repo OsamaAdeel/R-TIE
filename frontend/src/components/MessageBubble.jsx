@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Copy, Check, Search, Brain, FileCode, ChevronRight, Sparkles, RotateCcw, Pencil } from 'lucide-react';
+import { Copy, Check, Search, Brain, FileCode, ChevronRight, Sparkles, RotateCcw, Pencil, HelpCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -43,6 +43,8 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
       <div className="max-w-4xl">
         {message.error ? (
           <ErrorCard error={message.error} />
+        ) : message.clarification ? (
+          <ClarificationCard message={message.clarification.message} />
         ) : message.streaming ? (
           message.streamedMarkdown
             ? <StreamingMarkdown markdown={message.streamedMarkdown} meta={message.meta} stage={message.stage} />
@@ -323,6 +325,24 @@ function ErrorCard({ error }) {
     <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3">
       <p className="text-xs text-red-600 font-semibold">Error</p>
       <p className="text-xs text-red-500 mt-1">{error}</p>
+    </div>
+  );
+}
+
+function ClarificationCard({ message }) {
+  return (
+    <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 shadow-sm">
+      <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center shrink-0 mt-0.5">
+        <HelpCircle size={16} className="text-amber-600" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-1">
+          More information needed
+        </p>
+        <p className="text-sm text-amber-900 leading-relaxed whitespace-pre-wrap">
+          {message}
+        </p>
+      </div>
     </div>
   );
 }

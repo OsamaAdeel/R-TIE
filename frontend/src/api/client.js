@@ -33,12 +33,13 @@ export async function sendQuery(query, sessionId, engineerId, provider, model) {
  * @param {string} engineerId
  * @param {string|null} provider
  * @param {string|null} model
- * @param {function} onMeta     - called once with metadata {schema, functions_analyzed, ...}
- * @param {function} onToken    - called for each markdown text chunk
- * @param {function} onDone     - called once with final payload {confidence, validated, ...}
- * @param {function} onError    - called on error
+ * @param {function} onMeta          - called once with metadata {schema, functions_analyzed, ...}
+ * @param {function} onToken         - called for each markdown text chunk
+ * @param {function} onDone          - called once with final payload {confidence, validated, ...}
+ * @param {function} onClarification - called when backend asks the user for missing input (type: 'clarification')
+ * @param {function} onError         - called on error
  */
-export async function streamQuery(query, sessionId, engineerId, provider, model, { onStage, onMeta, onToken, onDone, onError }) {
+export async function streamQuery(query, sessionId, engineerId, provider, model, { onStage, onMeta, onToken, onDone, onClarification, onError }) {
   const body = {
     query,
     session_id: sessionId,
@@ -89,7 +90,11 @@ export async function streamQuery(query, sessionId, engineerId, provider, model,
             } else if (currentEvent === 'token') {
               onToken?.(parsed);
             } else if (currentEvent === 'done') {
-              onDone?.(parsed);
+              if (parsed?.type === 'clarification') {
+                onClarification?.(parsed);
+              } else {
+                onDone?.(parsed);
+              }
             } else if (currentEvent === 'error') {
               onError?.(parsed.error || 'Unknown streaming error');
             }
