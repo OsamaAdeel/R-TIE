@@ -27,6 +27,15 @@ _CASE_BRANCH_IN_RE = re.compile(
 )
 
 
+class CatalogBuildError(RuntimeError):
+    """Raised when a catalog build does not produce a usable catalog.
+
+    Either the extraction raised mid-scan, or the post-build completeness
+    validation failed. Either way, the module-level ``_catalog`` is NOT
+    updated when this is raised.
+    """
+
+
 class OriginsCatalog:
     """
     Extracts origin patterns from the graph at startup.
@@ -54,19 +63,27 @@ class OriginsCatalog:
     # -----------------------------------------------------------------
 
     def build(self) -> dict:
-        """Scan every function graph in Redis and populate the catalog."""
+        """Scan every function graph in Redis and populate the catalog.
+
+        On success, returns a summary dict of the populated counts. On any
+        extraction failure or completeness check failure, raises
+        ``CatalogBuildError`` (or lets a lower-level exception propagate) so
+        the caller can refuse to swap the module global.
+        """
         pattern = f"graph:{self.schema}:*"
         raw_keys = self.redis.keys(pattern) or []
 
+        # Enumerate the expected function names from Redis keys first, so
+        # we can validate afterwards that every function got processed.
+        expected_functions: set[str] = set()
         for raw_key in raw_keys:
             key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
             parts = key.split(":")
-            # Valid function graph keys look like: graph:{schema}:{function_name}
-            # Skip if the second segment is one of the reserved subkeys.
             if len(parts) < 3 or parts[1] in _FUNCTION_GRAPH_SUBKEYS:
                 continue
-            function_name = parts[2]
+            expected_functions.add(parts[2])
 
+        for function_name in expected_functions:
             graph = get_function_graph(self.redis, self.schema, function_name)
             if not graph:
                 continue
@@ -87,6 +104,8 @@ class OriginsCatalog:
             code: dict(info) for code, info in BOOTSTRAP_ETL_ORIGINS.items()
         }
 
+        self._validate_completeness(expected_functions)
+
         return {
             "plsql_origin_count": len(self.plsql_origins),
             "etl_origin_count": len(self.etl_origins),
@@ -94,6 +113,50 @@ class OriginsCatalog:
             "eop_override_count": len(self.gl_eop_overrides),
             "function_count": len(self.known_functions),
         }
+
+    def _validate_completeness(self, expected_functions: set[str]) -> None:
+        """Fail loudly if the built catalog is not fit to serve requests.
+
+        Checks:
+          * Every key in ``BOOTSTRAP_ETL_ORIGINS`` must appear in
+            ``etl_origins``. Missing entries mean the bootstrap seeding
+            did not run — classify_origin would silently miss T24 etc.
+          * ``known_functions`` must equal the set of function-graph keys
+            present in Redis. A mismatch means one or more graphs failed
+            to load mid-scan.
+          * If any functions are known, ``plsql_origins`` must be non-empty.
+            Twelve functions with zero V_DATA_ORIGIN literals is a bug in
+            extraction, not a legitimate empty state.
+        """
+        missing_bootstrap = [
+            code for code in BOOTSTRAP_ETL_ORIGINS.keys()
+            if code not in self.etl_origins
+        ]
+        if missing_bootstrap:
+            raise CatalogBuildError(
+                "OriginsCatalog completeness check failed: bootstrap ETL "
+                f"origins missing from etl_origins: {sorted(missing_bootstrap)}. "
+                "The bootstrap seeding in build() did not run — the catalog "
+                "would silently misclassify ETL-origin rows."
+            )
+
+        missing_functions = sorted(expected_functions - self.known_functions)
+        if missing_functions:
+            raise CatalogBuildError(
+                "OriginsCatalog completeness check failed: "
+                f"{len(missing_functions)} function graph(s) present in "
+                f"Redis but not processed by build(): {missing_functions}. "
+                "The scan loop terminated early."
+            )
+
+        if self.known_functions and not self.plsql_origins:
+            raise CatalogBuildError(
+                "OriginsCatalog completeness check failed: "
+                f"{len(self.known_functions)} function graph(s) processed "
+                "but zero PL/SQL origins extracted. The extraction logic "
+                "is broken — classify_origin would misclassify every "
+                "PL/SQL-produced row as UNKNOWN."
+            )
 
     # -----------------------------------------------------------------
     # PLSQL origin extraction
@@ -218,10 +281,40 @@ def get_catalog() -> OriginsCatalog:
 
 
 def build_catalog(redis_client, schema: str) -> OriginsCatalog:
-    """Build the catalog by scanning the graph. Call once at startup."""
+    """Build the catalog by scanning the graph. Call once at startup.
+
+    The module-level ``_catalog`` is updated ATOMICALLY: the new catalog
+    is built into a local variable, and only assigned to the global after
+    a successful build + completeness validation. On any failure:
+
+    * If this is the first build (module global was None), ``_catalog``
+      stays None and subsequent ``get_catalog()`` calls raise RuntimeError.
+    * If a previous build succeeded, ``_catalog`` keeps the previously
+      working instance — a failing refresh does not degrade a running
+      system.
+
+    This prevents the "half-initialised catalog" failure mode where a
+    Redis outage mid-scan would leave the global pointing at an empty
+    catalog that silently misclassifies every row.
+    """
     global _catalog
-    _catalog = OriginsCatalog(redis_client, schema)
-    summary = _catalog.build()
+
+    new_catalog = OriginsCatalog(redis_client, schema)
+    try:
+        summary = new_catalog.build()
+    except Exception:
+        # Propagate to the caller; _catalog is intentionally untouched.
+        logger.exception(
+            "OriginsCatalog build failed; module global _catalog left "
+            "unchanged (was %s)",
+            "None" if _catalog is None else "previously-built catalog",
+        )
+        raise
+
+    # Successful build — atomically swap in the new catalog BEFORE logging
+    # the summary. The "built" log line is therefore a trustworthy signal
+    # that the live catalog is serving that catalog's data.
+    _catalog = new_catalog
     logger.info(
         "OriginsCatalog.build summary: "
         "plsql=%d etl=%d gl_blocked=%d eop_overrides=%d functions=%d",
