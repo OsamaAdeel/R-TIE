@@ -93,7 +93,7 @@ export default function ChatInput({ onSend, disabled }) {
   };
 
   return (
-    <div className="border-t border-border bg-bg-primary">
+    <div className="bg-bg-primary">
       <form onSubmit={handleSubmit} className="max-w-4xl mx-auto px-4 pt-3 pb-4">
         <div className="relative">
           {menuOpen && (

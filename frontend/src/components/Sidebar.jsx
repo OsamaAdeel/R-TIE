@@ -1,4 +1,4 @@
-import { Plus, MessageSquare, Trash2, Activity, Zap } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Activity } from 'lucide-react';
 import clsx from 'clsx';
 
 export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete, health }) {
@@ -8,11 +8,27 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
       <div className="p-4 border-b border-white/10">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-400 to-indigo-500 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-500/25">
-              <Zap size={18} />
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center"
+              style={{
+                background: '#ffffff',
+                boxShadow:
+                  '0 4px 10px -2px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(15, 23, 42, 0.08)',
+              }}
+              aria-label="R-TIE"
+            >
+              <svg width="22" height="22" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+                <path
+                  d="M11 9 V31 M11 9 H22 C26.5 9 29 12 29 15.75 C29 19.5 26.5 22.5 22 22.5 H11 M20.5 22.5 L30 31"
+                  stroke="var(--color-sidebar)"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </div>
             <div>
-              <h1 className="text-sm font-bold text-white leading-tight tracking-tight">RTIE</h1>
+              <h1 className="text-sm font-bold text-white leading-tight tracking-tight">R-TIE</h1>
               <p className="text-[11px] text-sidebar-muted font-medium">Regulatory Trace Engine</p>
             </div>
           </div>
