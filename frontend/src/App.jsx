@@ -90,6 +90,22 @@ export default function App() {
           setLoading(false);
         },
 
+        onClarification: (payload) => {
+          updateLastMessage(sid, (msg) => ({
+            ...msg,
+            loading: false,
+            streaming: false,
+            streamedMarkdown: undefined,
+            stage: undefined,
+            meta: undefined,
+            data: null,
+            clarification: {
+              message: payload?.message || 'Could you clarify your request?',
+            },
+          }));
+          setLoading(false);
+        },
+
         onError: (errorMsg) => {
           updateLastMessage(sid, (msg) => ({
             ...msg,
