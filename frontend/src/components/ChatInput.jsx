@@ -166,9 +166,8 @@ export default function ChatInput({ onSend, disabled }) {
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
               placeholder="Ask about a PL/SQL function, or type / for commands…"
-              disabled={disabled}
               rows={1}
-              className="w-full resize-none bg-transparent px-4 pt-3.5 pb-12 text-sm text-text-primary placeholder-text-muted focus:outline-none disabled:opacity-60"
+              className="w-full resize-none bg-transparent px-4 pt-3.5 pb-12 text-sm text-text-primary placeholder-text-muted focus:outline-none"
               style={{ minHeight: '52px', maxHeight: '200px' }}
             />
 
