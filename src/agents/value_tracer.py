@@ -18,6 +18,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from src.agents.ambiguity import (
+    build_identifier_ambiguous_response,
+    detect_identifier_ambiguity,
+)
+from src.agents.data_query import build_tables_to_columns
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.query_engine import (
@@ -111,6 +116,34 @@ class ValueTracerAgent:
             "value_tracer: target=%s schema=%s filters=%s | correlation_id=%s",
             target_variable, schema, filters, correlation_id,
         )
+
+        # Identifier-ambiguity check — short-circuits before table selection
+        # when the target column exists on multiple tables and the user gave
+        # only a bare identifier. Pure catalog lookup, no LLM call.
+        try:
+            tables_to_columns = build_tables_to_columns(self._redis, schema)
+        except Exception as exc:
+            logger.warning("ValueTracer catalog build failed: %s", exc)
+            tables_to_columns = {}
+
+        ambiguity_candidates = detect_identifier_ambiguity(
+            target_column=target_variable,
+            filters=filters,
+            tables_to_columns=tables_to_columns,
+            user_query=user_query,
+        )
+        if ambiguity_candidates:
+            logger.info(
+                "ValueTracer identifier ambiguous | target=%s candidates=%s",
+                target_variable,
+                [c["table"] for c in ambiguity_candidates],
+            )
+            return build_identifier_ambiguous_response(
+                target_column=(target_variable or "").strip().upper(),
+                filters=filters,
+                user_query=user_query,
+                candidates=ambiguity_candidates,
+            )
 
         # ---- Stage 1: determine target table and fetch the row ----
         target_table = self._determine_target_table(target_variable)

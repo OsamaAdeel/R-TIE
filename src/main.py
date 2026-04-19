@@ -856,6 +856,21 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
         return
 
+    # Identifier-ambiguity short-circuit — the trace never ran because the
+    # target column is ambiguous across multiple tables. Surface the
+    # explanatory message + suggestions instead of a trace response.
+    if result.get("type") == "identifier_ambiguous":
+        message = result.get("message") or ""
+        for chunk in _chunk_text(message):
+            yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+        done_payload = {
+            **result,
+            "explanation": {"markdown": message},
+            "correlation_id": correlation_id,
+        }
+        yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+        return
+
     # Row-first result shape (new): status, row, origin, route, evidence,
     # explanation, sanity_warnings, used_fallback, verification_sql
     origin = result.get("origin") or {}
@@ -944,10 +959,26 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
             filters=filters,
             provider=provider,
             model=model,
+            target_variable=(state.get("target_variable") or None),
         )
     except Exception as exc:
         logger.error(f"DATA_QUERY failed: {exc}\n{traceback.format_exc()}")
         yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        return
+
+    # Identifier-ambiguity short-circuit — no SQL was generated because
+    # the target column is ambiguous across multiple tables. Surface the
+    # explanatory message + suggestions instead of a data_query response.
+    if result.get("type") == "identifier_ambiguous":
+        message = result.get("message") or ""
+        for chunk in _chunk_text(message):
+            yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+        done_payload = {
+            **result,
+            "explanation": {"markdown": message},
+            "correlation_id": correlation_id,
+        }
+        yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
         return
 
     meta = {

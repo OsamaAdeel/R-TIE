@@ -23,6 +23,10 @@ from typing import Any, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from tenacity import RetryError
 
+from src.agents.ambiguity import (
+    build_identifier_ambiguous_response,
+    detect_identifier_ambiguity,
+)
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
@@ -150,6 +154,7 @@ class DataQueryAgent:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         force: bool = False,
+        target_variable: Optional[str] = None,
     ) -> dict:
         """Generate + execute SQL for a data query. Returns a dict describing
         the outcome.
@@ -166,6 +171,9 @@ class DataQueryAgent:
         force:
             When True, bypass the warn threshold confirmation gate and
             proceed with execution anyway. Used for user-confirmed retries.
+        target_variable:
+            The target column the classifier extracted from the query. Used
+            for identifier-ambiguity detection before SQL generation.
         """
         correlation_id = get_correlation_id()
         filters = dict(filters or {})
@@ -176,6 +184,28 @@ class DataQueryAgent:
             logger.warning("DataQuery catalog build failed: %s", exc)
             catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
             tables_to_columns = {}
+
+        # Identifier-ambiguity check — short-circuits before SQL generation
+        # when the target column lives on multiple tables and the user gave
+        # only a bare identifier. Detection is a pure catalog lookup.
+        ambiguity_candidates = detect_identifier_ambiguity(
+            target_column=target_variable,
+            filters=filters,
+            tables_to_columns=tables_to_columns,
+            user_query=user_query,
+        )
+        if ambiguity_candidates:
+            logger.info(
+                "DataQuery identifier ambiguous | target=%s candidates=%s",
+                target_variable,
+                [c["table"] for c in ambiguity_candidates],
+            )
+            return build_identifier_ambiguous_response(
+                target_column=(target_variable or "").strip().upper(),
+                filters=filters,
+                user_query=user_query,
+                candidates=ambiguity_candidates,
+            )
 
         try:
             plan = await self._generate_sql(
@@ -480,43 +510,7 @@ class DataQueryAgent:
               SQLGuardian.validate_column_residency to reject SQL that
               references a column against the wrong table.
         """
-        tables_to_columns: dict[str, set[str]] = {}
-
-        if self._redis is not None:
-            try:
-                keys = self._redis.keys(f"graph:{schema}:*") or []
-            except Exception as exc:
-                logger.warning("Redis keys() failed during catalog build: %s", exc)
-                keys = []
-
-            from src.parsing.store import (
-                get_function_graph,
-                get_raw_source,
-            )
-
-            reserved = {"full", "index", "aliases", "source", "meta"}
-            for raw_key in keys:
-                key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
-                parts = key.split(":")
-                if len(parts) < 3 or parts[1] in reserved:
-                    continue
-                function_name = parts[2]
-                graph = get_function_graph(self._redis, schema, function_name)
-                if not graph:
-                    continue
-                for node in graph.get("nodes", []) or []:
-                    _collect_table_columns(node, tables_to_columns)
-                    for arm in node.get("union_arms", []) or []:
-                        _collect_table_columns(
-                            arm,
-                            tables_to_columns,
-                            fallback_target=node.get("target_table"),
-                        )
-
-                raw_lines = get_raw_source(self._redis, schema, function_name)
-                if raw_lines:
-                    for table, cols in _parse_insert_column_lists(raw_lines).items():
-                        tables_to_columns.setdefault(table, set()).update(cols)
+        tables_to_columns = build_tables_to_columns(self._redis, schema)
 
         if not tables_to_columns:
             return "(no tables discovered — schema catalog empty)", {}
@@ -609,6 +603,55 @@ class DataQueryAgent:
 # ---------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------
+
+def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
+    """Build per-table `{table: {columns}}` mapping from the graph in Redis.
+
+    Shared by `DataQueryAgent` (for SQL generation + residency checks) and
+    `ValueTracerAgent` (for identifier-ambiguity detection). Returns an
+    empty dict when Redis is unavailable or no graphs are stored.
+    """
+    tables_to_columns: dict[str, set[str]] = {}
+    if redis_client is None:
+        return tables_to_columns
+
+    try:
+        keys = redis_client.keys(f"graph:{schema}:*") or []
+    except Exception as exc:
+        logger.warning("Redis keys() failed during catalog build: %s", exc)
+        return tables_to_columns
+
+    from src.parsing.store import (
+        get_function_graph,
+        get_raw_source,
+    )
+
+    reserved = {"full", "index", "aliases", "source", "meta"}
+    for raw_key in keys:
+        key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+        parts = key.split(":")
+        if len(parts) < 3 or parts[1] in reserved:
+            continue
+        function_name = parts[2]
+        graph = get_function_graph(redis_client, schema, function_name)
+        if not graph:
+            continue
+        for node in graph.get("nodes", []) or []:
+            _collect_table_columns(node, tables_to_columns)
+            for arm in node.get("union_arms", []) or []:
+                _collect_table_columns(
+                    arm,
+                    tables_to_columns,
+                    fallback_target=node.get("target_table"),
+                )
+
+        raw_lines = get_raw_source(redis_client, schema, function_name)
+        if raw_lines:
+            for table, cols in _parse_insert_column_lists(raw_lines).items():
+                tables_to_columns.setdefault(table, set()).update(cols)
+
+    return tables_to_columns
+
 
 _IDENT_RE = re.compile(r"\b[A-Z_][A-Z0-9_]*\b")
 _SKIP_TABLE_TOKENS = frozenset({
