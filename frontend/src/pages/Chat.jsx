@@ -1,17 +1,41 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import ModelSelector from '../components/ModelSelector';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, ChevronDown } from 'lucide-react';
+
+const NEAR_BOTTOM_THRESHOLD = 100;
 
 export default function Chat({ session, onSend, loading, provider, model, onProviderChange, onModelChange }) {
+  const scrollRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const messageCount = session?.messages?.length || 0;
 
-  // Only auto-scroll when a new message is added, not during streaming updates
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_THRESHOLD;
+      setIsAtBottom(atBottom);
+    };
+    onScroll();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
   }, [messageCount]);
+
+  // Only auto-scroll when a new message is added AND the user was already near the bottom.
+  // Skipping when they've scrolled up avoids yanking them away while they're reading.
+  useEffect(() => {
+    if (!isAtBottom) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messageCount, isAtBottom]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const showScrollButton = messageCount > 0 && !isAtBottom;
 
   return (
     <div className="flex-1 flex flex-col h-screen bg-bg-primary">
@@ -29,21 +53,33 @@ export default function Chat({ session, onSend, loading, provider, model, onProv
       </div>
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto">
-        {session?.messages.length === 0 ? (
-          <EmptyState onSend={onSend} />
-        ) : (
-          <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
-            {session.messages.map((msg, i) => (
-              <MessageBubble
-                key={i}
-                message={msg}
-                onRetry={msg.role === 'user' ? () => onSend(msg.content) : undefined}
-                onEdit={msg.role === 'user' ? (newText) => onSend(newText) : undefined}
-              />
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
+      <div className="relative flex-1 overflow-hidden">
+        <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
+          {session?.messages.length === 0 ? (
+            <EmptyState onSend={onSend} />
+          ) : (
+            <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
+              {session.messages.map((msg, i) => (
+                <MessageBubble
+                  key={i}
+                  message={msg}
+                  onRetry={msg.role === 'user' ? () => onSend(msg.content) : undefined}
+                  onEdit={msg.role === 'user' ? (newText) => onSend(newText) : undefined}
+                />
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+        {showScrollButton && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            aria-label="Scroll to latest message"
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 inline-flex items-center justify-center h-9 w-9 rounded-full bg-bg-secondary border border-border shadow-md text-text-secondary hover:text-text-primary hover:bg-bg-tertiary hover:border-border-strong transition-colors"
+          >
+            <ChevronDown size={18} strokeWidth={2.25} />
+          </button>
         )}
       </div>
 
