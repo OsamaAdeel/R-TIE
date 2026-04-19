@@ -60,6 +60,16 @@ logger = get_logger(__name__, concern="app")
 env = os.getenv("ENVIRONMENT", "dev")
 load_dotenv(f".env.{env}")
 
+# LangSmith: langchain auto-enables tracing when LANGSMITH_TRACING=true
+# and LANGSMITH_API_KEY is set. No extra wiring needed — this log just
+# surfaces the state at boot so misconfig is visible.
+if os.getenv("LANGSMITH_TRACING", "").lower() == "true" and os.getenv("LANGSMITH_API_KEY"):
+    # Older langchain builds still read LANGCHAIN_* — mirror for safety.
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGCHAIN_API_KEY", os.environ["LANGSMITH_API_KEY"])
+    os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT", "RTIE"))
+    os.environ.setdefault("LANGCHAIN_ENDPOINT", os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"))
+
 
 def _load_settings() -> Dict[str, Any]:
     """Load and merge YAML configuration files.
@@ -339,6 +349,13 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:
             logger.warning(f"Auto-indexing failed for {module_name} (non-fatal): {exc}")
+
+    logger.info(
+        "LangSmith tracing: %s (project=%s)",
+        "ENABLED" if os.getenv("LANGSMITH_TRACING", "").lower() == "true"
+        and os.getenv("LANGSMITH_API_KEY") else "DISABLED",
+        os.getenv("LANGSMITH_PROJECT", "RTIE"),
+    )
 
     logger.info("RTIE application started successfully")
     yield
