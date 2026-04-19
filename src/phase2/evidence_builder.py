@@ -129,12 +129,45 @@ class EvidenceBuilder:
             "verification_sql": self._verification_sql(row, classification, []),
         }
 
-    def build_for_missing_row(self, filters: dict[str, Any]) -> dict:
-        """No row matched the user's filters."""
+    def build_for_missing_row(
+        self,
+        filters: dict[str, Any],
+        eop_override: dict | None = None,
+        gl_blocked: bool = False,
+    ) -> dict:
+        """No row matched the user's filters.
+
+        If the filters named a GL code that the origins catalog already knows
+        about (either on the hardcoded EOP override list or on the block
+        list), the matching catalog entries are surfaced in
+        ``known_overrides`` so the LLM can explain what WOULD happen if a
+        row were loaded for that GL code. When no catalog match is found,
+        ``known_overrides`` is an empty list.
+        """
+        gl_code = filters.get("gl_code") or filters.get("V_GL_CODE")
+
+        known_overrides: list[dict] = []
+        if eop_override:
+            known_overrides.append({
+                "type": "eop_override",
+                "gl_code": gl_code,
+                "node": eop_override.get("node_id"),
+                "line": eop_override.get("line"),
+                "effect": "N_EOP_BAL would be forced to 0",
+            })
+        if gl_blocked:
+            known_overrides.append({
+                "type": "block_list",
+                "gl_code": gl_code,
+                "node": "POPULATE_PP_FROMGL:node_4",
+                "effect": "F_EXPOSURE_ENABLED_IND would be set to 'N'",
+            })
+
         return {
             "kind": "missing_row",
             "filters": {k: v for k, v in filters.items() if v is not None and v != ""},
             "row_facts": {},
+            "known_overrides": known_overrides,
             "verification_sql": "",
         }
 

@@ -29,6 +29,7 @@ from src.parsing.query_engine import (
 from src.phase2.evidence_builder import EvidenceBuilder
 from src.phase2.explainer import Phase2Explainer
 from src.phase2.origin_classifier import OriginClassifier
+from src.phase2.origins_catalog import get_eop_override, is_gl_blocked
 from src.phase2.row_inspector import RowInspector
 from src.phase2.trace_router import TraceRouter
 from src.phase2.value_fetcher import ValueFetcher
@@ -133,7 +134,14 @@ class ValueTracerAgent:
             }
 
         if fetch_result["status"] == "not_found":
-            evidence = self._evidence_builder.build_for_missing_row(filters)
+            gl_code = filters.get("gl_code") or filters.get("V_GL_CODE")
+            eop_override = get_eop_override(gl_code) if gl_code else None
+            gl_blocked = is_gl_blocked(gl_code) if gl_code else False
+            evidence = self._evidence_builder.build_for_missing_row(
+                filters,
+                eop_override=eop_override,
+                gl_blocked=gl_blocked,
+            )
             explainer_result = await self._explainer.explain(
                 route="missing_row",
                 evidence=evidence,
