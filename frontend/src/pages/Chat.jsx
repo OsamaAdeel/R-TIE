@@ -125,11 +125,11 @@ function EmptyState({ onSend }) {
             <button
               key={example.text}
               onClick={() => onSend(example.text)}
-              className="w-full flex items-center gap-3 text-sm text-text-secondary bg-bg-secondary rounded-xl px-5 py-3.5 border-2 border-border hover:border-accent hover:text-accent hover:shadow-lg hover:shadow-accent/5 cursor-pointer transition-all duration-200 group"
+              className="w-full flex items-center gap-3 text-sm text-text-secondary bg-bg-secondary rounded-lg px-4 py-2.5 hover:bg-bg-tertiary hover:text-text-primary cursor-pointer transition-colors duration-150 group"
             >
-              <span className="text-lg">{example.icon}</span>
+              <span className="text-base">{example.icon}</span>
               <span className="flex-1 font-medium">{example.text}</span>
-              <ArrowRight size={14} className="text-text-muted group-hover:text-accent group-hover:translate-x-0.5 transition-all" />
+              <ArrowRight size={13} className="text-text-muted group-hover:translate-x-0.5 transition-transform" />
             </button>
           ))}
         </div>
