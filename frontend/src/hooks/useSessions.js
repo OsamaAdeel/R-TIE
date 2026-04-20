@@ -34,14 +34,20 @@ export function useSessions() {
   const activeSession = sessions.find((s) => s.id === activeId) || sessions[0];
 
   const addSession = useCallback(() => {
-    const s = createSession();
+    let created = null;
     setSessions((prev) => {
-      const next = [s, ...prev];
+      const empty = prev.find((s) => s.messages.length === 0);
+      if (empty) {
+        setActiveId(empty.id);
+        return prev;
+      }
+      created = createSession();
+      const next = [created, ...prev];
       persist(next);
       return next;
     });
-    setActiveId(s.id);
-    return s;
+    if (created) setActiveId(created.id);
+    return created;
   }, [persist]);
 
   const deleteSession = useCallback((id) => {
