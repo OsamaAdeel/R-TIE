@@ -23,7 +23,13 @@ from src.parsing.store import (
     store_full_graph,
     store_column_index,
     store_raw_source,
+    store_batch_hierarchy,
     is_graph_stale,
+)
+from src.parsing.manifest import (
+    BatchManifest,
+    ManifestValidationError,
+    load_manifest,
 )
 from src.logger import get_logger
 
@@ -171,10 +177,42 @@ def load_all_functions(
             "errors": [msg],
         }
 
-    sql_pattern = os.path.join(resolved_dir, "*.sql")
-    sql_files = sorted(glob.glob(sql_pattern))
+    # ------------------------------------------------------------------
+    # Manifest resolution
+    # ------------------------------------------------------------------
+    # The module root is the parent of functions_dir (i.e. .../<batch>/).
+    # A sibling manifest.yaml, if present, drives the parse order, the
+    # schema, and attaches hierarchy metadata to every produced graph.
+    module_dir = os.path.dirname(resolved_dir)
+    manifest: BatchManifest | None = load_manifest(module_dir)
 
-    if not sql_files:
+    effective_schema_default = schema
+    if manifest is not None:
+        logger.info(
+            "Module %s: manifest found with %d processes, %d active tasks, "
+            "%d inactive tasks",
+            manifest.batch,
+            manifest.process_count(),
+            manifest.active_task_count(),
+            manifest.inactive_task_count(),
+        )
+        if manifest.schema != schema:
+            logger.warning(
+                "Module %s: manifest schema '%s' overrides config schema '%s' "
+                "for this batch",
+                manifest.batch, manifest.schema, schema,
+            )
+            effective_schema_default = manifest.schema
+    else:
+        logger.info(
+            "Module %s: no manifest.yaml found, using flat structure",
+            os.path.basename(module_dir) or functions_dir,
+        )
+
+    sql_pattern = os.path.join(resolved_dir, "*.sql")
+    fs_sql_files = sorted(glob.glob(sql_pattern))
+
+    if not fs_sql_files and manifest is None:
         msg = f"No .sql files found in {resolved_dir}"
         logger.warning(msg)
         return {
@@ -188,6 +226,32 @@ def load_all_functions(
             "execution_order": [],
             "errors": [msg],
         }
+
+    # Build the parse order: manifest order (declaration order, both active
+    # and inactive) when the manifest exists, otherwise filesystem order.
+    # Also identify extra .sql files not referenced in the manifest so we
+    # can warn and skip them ("strict" mode).
+    if manifest is not None:
+        sql_files: list[str] = []
+        manifest_file_keys: set[str] = set()
+        for task in manifest.iter_all_tasks():
+            manifest_file_keys.add(
+                os.path.splitext(os.path.basename(task.source_file))[0].upper()
+            )
+            sql_files.append(os.path.join(resolved_dir, task.source_file))
+
+        fs_keys = {
+            _function_name_from_file(f): f for f in fs_sql_files
+        }
+        for fs_key, fs_path in fs_keys.items():
+            if fs_key not in manifest_file_keys:
+                logger.warning(
+                    "Module %s: source file %s not referenced in manifest.yaml — "
+                    "skipping (strict mode)",
+                    manifest.batch, os.path.basename(fs_path),
+                )
+    else:
+        sql_files = fs_sql_files
 
     # ------------------------------------------------------------------
     # Per-function parse loop
@@ -214,8 +278,8 @@ def load_all_functions(
                 source_lines = fh.readlines()
 
             extracted_schema = _extract_schema_from_source(source_lines)
-            effective_schema = extracted_schema or schema
-            if extracted_schema and extracted_schema != schema:
+            effective_schema = extracted_schema or effective_schema_default
+            if extracted_schema and extracted_schema != effective_schema_default:
                 logger.warning(
                     "Parsed %s.%s into graph:%s:%s. "
                     "Note: full multi-schema support (W35) is not yet implemented. "
@@ -223,12 +287,23 @@ def load_all_functions(
                     extracted_schema, func_name, extracted_schema, func_name,
                 )
 
-            # Staleness check (keyed by effective schema, not the directory default)
+            # Hierarchy metadata (None when no manifest)
+            hierarchy: dict | None = None
+            if manifest is not None:
+                task = manifest.get_task_by_file(sql_file)
+                if task is not None:
+                    hierarchy = task.to_node_hierarchy()
+
+            # Staleness check (keyed by effective schema, not the directory
+            # default). Cached graphs are only trusted when the hierarchy
+            # metadata on the cached graph matches what the manifest
+            # currently says — otherwise we re-parse so manifest edits
+            # propagate without needing force_reparse.
             if not force_reparse and not is_graph_stale(
                 redis_client, effective_schema, func_name, sql_file
             ):
                 cached = get_function_graph(redis_client, effective_schema, func_name)
-                if cached is not None:
+                if cached is not None and cached.get("hierarchy") == hierarchy:
                     all_graphs[func_name] = cached
                     graph_schemas[func_name] = effective_schema
                     total_nodes += len(cached.get("nodes", []))
@@ -245,6 +320,7 @@ def load_all_functions(
                 function_name=func_name,
                 file_name=os.path.basename(sql_file),
                 schema=effective_schema,
+                hierarchy=hierarchy,
             )
 
             # Store in Redis
@@ -285,20 +361,24 @@ def load_all_functions(
     # ------------------------------------------------------------------
     execution_order: list[str] = []
 
-    # Cross-function indices are scoped to the passed-in (primary) schema
-    # only. Functions stored under alternate schemas (e.g. OFSERM) still
-    # live at graph:<schema>:<fn> so the W37 pre-check can find them, but
-    # they are intentionally excluded from the primary-schema rollups
-    # until full multi-schema support lands (W35).
+    # Cross-function indices are scoped to the primary schema only.
+    # Functions stored under alternate schemas (e.g. OFSERM) still live at
+    # graph:<schema>:<fn> so the W37 pre-check can find them, but they are
+    # intentionally excluded from the primary-schema rollups until full
+    # multi-schema support lands (W35). The primary schema follows the
+    # manifest when one is present (the manifest's schema field is the
+    # authoritative owner of the batch's output tables), otherwise it
+    # falls back to the config-supplied schema.
+    primary_schema = manifest.schema if manifest is not None else schema
     primary_graphs = [
         g for fn, g in all_graphs.items()
-        if graph_schemas.get(fn, schema) == schema
+        if graph_schemas.get(fn, primary_schema) == primary_schema
     ]
 
     if primary_graphs:
         try:
             full_graph = build_cross_function_graph(primary_graphs)
-            store_full_graph(redis_client, schema, full_graph)
+            store_full_graph(redis_client, primary_schema, full_graph)
         except Exception:
             tb = traceback.format_exc()
             errors.append(f"Failed to build cross-function graph: {tb}")
@@ -306,7 +386,7 @@ def load_all_functions(
 
         try:
             column_index = build_global_column_index(primary_graphs)
-            store_column_index(redis_client, schema, column_index)
+            store_column_index(redis_client, primary_schema, column_index)
         except Exception:
             tb = traceback.format_exc()
             errors.append(f"Failed to build global column index: {tb}")
@@ -323,12 +403,23 @@ def load_all_functions(
             alias_map = build_alias_map()
             # Store alias map in Redis using the standard key pattern
             from src.parsing.serializer import to_msgpack
-            alias_key = f"graph:aliases:{schema}"
+            alias_key = f"graph:aliases:{primary_schema}"
             redis_client.set(alias_key, to_msgpack(alias_map))
         except Exception:
             tb = traceback.format_exc()
             errors.append(f"Failed to build alias map: {tb}")
             logger.error("Error building alias map:\n%s", tb)
+
+    # ------------------------------------------------------------------
+    # Persist manifest hierarchy
+    # ------------------------------------------------------------------
+    if manifest is not None:
+        try:
+            store_batch_hierarchy(redis_client, manifest.batch, manifest.to_dict())
+        except Exception:
+            tb = traceback.format_exc()
+            errors.append(f"Failed to store batch hierarchy: {tb}")
+            logger.error("Error storing batch hierarchy:\n%s", tb)
 
     # ------------------------------------------------------------------
     # Summary

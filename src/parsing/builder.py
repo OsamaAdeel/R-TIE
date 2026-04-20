@@ -58,16 +58,29 @@ def build_function_graph(
     function_name: str,
     file_name: str,
     schema: str,
+    hierarchy: dict | None = None,
 ) -> dict:
     """Build a complete function graph from PL/SQL source lines.
 
     Calls ``parse_function`` to obtain raw blocks, then converts each
     block into a typed node, derives edges and a column index.
 
+    Parameters
+    ----------
+    source_lines, function_name, file_name, schema:
+        Required inputs as before.
+    hierarchy:
+        Optional dict of batch/process/sub-process/task metadata produced
+        by :meth:`TaskEntry.to_node_hierarchy`. When provided it is stored
+        at the top of the returned graph AND copied onto every node so
+        downstream consumers (query_engine, logic_explainer) can filter
+        by ``hierarchy.active`` and render hierarchy headers without an
+        extra lookup.
+
     Returns:
         A dict with keys: function, file, schema, parsed_at,
         total_source_lines, execution_condition, nodes, edges,
-        commented_out_nodes, column_index.
+        commented_out_nodes, column_index, and (optionally) hierarchy.
     """
     parsed = parse_function(source_lines, function_name)
 
@@ -85,18 +98,22 @@ def build_function_graph(
         node_id = f"{function_name}_N{idx + 1}"
         node = build_node(block, node_id)
         if node is not None:
+            if hierarchy is not None:
+                node["hierarchy"] = dict(hierarchy)
             nodes.append(node)
 
     for idx, block in enumerate(commented_blocks):
         node_id = f"{function_name}_COMMENTED_{idx + 1}"
         node = build_node(block, node_id)
         if node is not None:
+            if hierarchy is not None:
+                node["hierarchy"] = dict(hierarchy)
             commented_out_nodes.append(node)
 
     edges = build_intra_function_edges(nodes, function_name)
     column_index = build_function_column_index(nodes, function_name)
 
-    return {
+    graph: dict = {
         "function": function_name,
         "file": file_name,
         "schema": schema,
@@ -108,6 +125,9 @@ def build_function_graph(
         "commented_out_nodes": commented_out_nodes,
         "column_index": column_index,
     }
+    if hierarchy is not None:
+        graph["hierarchy"] = dict(hierarchy)
+    return graph
 
 
 # ===================================================================

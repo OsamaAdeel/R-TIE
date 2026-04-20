@@ -108,10 +108,36 @@ def resolve_aliases(term: str, schema: str, redis_client: Any) -> list[str]:
 # 3. Variable node resolution
 # ---------------------------------------------------------------------------
 
+def _is_inactive_node(node: dict | None) -> bool:
+    """Return True if *node* carries manifest hierarchy with ``active=False``.
+
+    Nodes without a ``hierarchy`` block (legacy, or modules without a
+    ``manifest.yaml``) are always treated as active so the default
+    behaviour is unchanged when no manifest is in play.
+    """
+    if not node:
+        return False
+    hierarchy = node.get("hierarchy")
+    if not hierarchy:
+        return False
+    return hierarchy.get("active") is False
+
+
+def _node_by_id(graph: dict | None, node_id: str) -> dict | None:
+    """Return the node dict inside *graph* whose id matches *node_id*."""
+    if not graph:
+        return None
+    for node in graph.get("nodes", []):
+        if node.get("id") == node_id:
+            return node
+    return None
+
+
 def resolve_variable_nodes(
     target_variable: str,
     schema: str,
     redis_client: Any,
+    include_inactive: bool = False,
 ) -> list[str]:
     """Resolve a variable/column name to node IDs via alias expansion,
     column-index lookup, and cross-function edge traversal.
@@ -124,6 +150,12 @@ def resolve_variable_nodes(
     to ``FN_B:node_Z``, then ``FN_B:node_Z`` is added when ``FN_B`` has
     the target variable in its column index.
 
+    When *include_inactive* is False (default) nodes whose hierarchy
+    metadata marks them ``active=false`` — via an authored
+    ``manifest.yaml`` — are excluded from both the direct matches and
+    cross-function edge traversal. This prevents tasks OFSAA has removed
+    from production from polluting upstream/downstream analyses.
+
     Returns a deduplicated list of node IDs.
     """
     aliases = resolve_aliases(target_variable, schema, redis_client)
@@ -133,6 +165,20 @@ def resolve_variable_nodes(
         logger.warning("No column index found for schema %s", schema)
         return []
 
+    # Cache per-function graphs so the inactive-filter lookup stays O(1)
+    # after a one-time fetch per function.
+    fn_graph_cache: dict[str, dict | None] = {}
+
+    def _is_inactive(nid: str) -> bool:
+        if include_inactive:
+            return False
+        bare = nid.split(":", 1)[1] if ":" in nid else nid
+        fn = _extract_function_name(bare)
+        if fn not in fn_graph_cache:
+            fn_graph_cache[fn] = get_function_graph(redis_client, schema, fn)
+        node = _node_by_id(fn_graph_cache[fn], bare)
+        return _is_inactive_node(node)
+
     seen: set[str] = set()
     direct_nodes: list[str] = []
 
@@ -140,9 +186,12 @@ def resolve_variable_nodes(
         alias_upper = alias.upper()
         node_ids = col_index.get(alias_upper, [])
         for nid in node_ids:
-            if nid not in seen:
-                seen.add(nid)
-                direct_nodes.append(nid)
+            if nid in seen:
+                continue
+            if _is_inactive(nid):
+                continue
+            seen.add(nid)
+            direct_nodes.append(nid)
 
     logger.debug("resolve_variable_nodes: aliases=%s, direct_matches=%s", aliases, direct_nodes)
 
@@ -175,10 +224,10 @@ def resolve_variable_nodes(
 
                 from_matches = from_node in direct_ids
                 to_matches = to_node in direct_ids
-                if from_matches and to_node not in seen:
+                if from_matches and to_node not in seen and not _is_inactive(to_node):
                     seen.add(to_node)
                     result.append(to_node)
-                if to_matches and from_node not in seen:
+                if to_matches and from_node not in seen and not _is_inactive(from_node):
                     seen.add(from_node)
                     result.append(from_node)
 
@@ -277,6 +326,7 @@ def fetch_nodes_by_ids(
     schema: str,
     redis_client: Any,
     include_upstream: bool = True,
+    include_inactive: bool = False,
 ) -> list[dict]:
     """Fetch node dicts for each ID, grouped by function.
 
@@ -290,6 +340,10 @@ def fetch_nodes_by_ids(
     ``from_node`` of such an edge corresponds to a ``SCALAR_COMPUTE`` node,
     that node is fetched and included in the result with
     ``"is_upstream": True``.
+
+    When *include_inactive* is False (default) nodes whose hierarchy
+    metadata marks them ``active=false`` are omitted from the result.
+    Set to True when explicitly debugging a removed OFSAA task.
     """
     # Group node IDs by function name
     fn_groups: dict[str, list[str]] = {}
@@ -313,6 +367,8 @@ def fetch_nodes_by_ids(
         id_set = set(ids_in_fn)
         for node in graph.get("nodes", []):
             if node.get("id") in id_set:
+                if not include_inactive and _is_inactive_node(node):
+                    continue
                 results.append({
                     "function": fn_name,
                     "node": node,
