@@ -269,10 +269,15 @@ async def lifespan(app: FastAPI):
     try:
         import redis as _redis
         from src.parsing.loader import load_all_functions, discover_module_folders
+        from src.parsing.manifest import ManifestValidationError
         _graph_redis = _redis.Redis(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
         )
+        # Wire the graph Redis client into the logic explainer so it can
+        # look up batch/process hierarchy and prepend a one-line context
+        # header on streamed explanations.
+        _logic_explainer.set_redis_client(_graph_redis)
 
         # W38: auto-discover every module folder under db/modules/ that has a
         # functions/ subdirectory. Union with any explicit functions_dirs from
@@ -333,6 +338,11 @@ async def lifespan(app: FastAPI):
                 f"{len(catalog.gl_block_list)} blocked GL codes, "
                 f"{len(catalog.gl_eop_overrides)} EOP overrides"
             )
+    except ManifestValidationError as exc:
+        # A malformed manifest is a developer error: refuse to start so the
+        # broken module is fixed rather than silently loaded from cache.
+        logger.error("Manifest validation failed: %s", exc)
+        raise
     except Exception as exc:
         logger.warning(f"Graph pipeline failed (non-fatal): {exc}")
 
@@ -787,6 +797,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating detailed explanation...'})}\n\n"
 
             full_markdown = ""
+
+            # Hierarchy header (W39): emitted once before branching so every
+            # streaming path — variable tracer, graph-pipeline, and the
+            # plain semantic explainer — receives the same context line.
+            hierarchy_prefix = _logic_explainer.hierarchy_header(state)
+            if hierarchy_prefix:
+                full_markdown += hierarchy_prefix
+                yield f"event: token\ndata: {json_mod.dumps(hierarchy_prefix)}\n\n"
+
             if state.get("llm_payload"):
                 # Graph pipeline produced a structured payload — use it
                 async for token in _logic_explainer.stream_semantic(

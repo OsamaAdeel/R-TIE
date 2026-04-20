@@ -374,6 +374,81 @@ class LogicExplainer:
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._langsmith_project = langsmith_project
+        # Optional Redis client used to look up batch/process/sub-process
+        # hierarchy for streamed explanations. Wired post-construction from
+        # main.py because the graph Redis client is created later in the
+        # lifespan. Absence is non-fatal — the hierarchy header is then
+        # simply omitted.
+        self._redis_client = None
+
+    def set_redis_client(self, redis_client) -> None:
+        """Inject the Redis client used to look up hierarchy metadata."""
+        self._redis_client = redis_client
+
+    def hierarchy_header(self, state: LogicState) -> str:
+        """Build the one-line hierarchy context header for a response.
+
+        Resolves the primary function (top-ranked ``multi_source`` entry by
+        score, falling back to ``object_name``) and fetches its graph from
+        Redis. If the graph carries a ``hierarchy`` block, returns a
+        prefix string that can be prepended to the explanation; otherwise
+        returns an empty string. Also prefixes the inactive-task notice
+        when the primary function is marked inactive.
+        """
+        if self._redis_client is None:
+            return ""
+
+        multi_source = state.get("multi_source") or {}
+        primary_fn: str = ""
+        if multi_source:
+            ranked = sorted(
+                multi_source.items(),
+                key=lambda kv: (kv[1] or {}).get("score", 0) or 0,
+                reverse=True,
+            )
+            primary_fn = ranked[0][0]
+        if not primary_fn:
+            primary_fn = (state.get("object_name") or "").strip()
+        if not primary_fn:
+            return ""
+
+        schema = (state.get("schema") or "").strip() or "OFSMDM"
+
+        try:
+            from src.parsing.store import get_function_graph
+            graph = get_function_graph(self._redis_client, schema, primary_fn.upper())
+        except Exception as exc:  # Redis miss / serialisation error shouldn't
+            logger.debug("hierarchy lookup failed for %s: %s", primary_fn, exc)
+            return ""
+        if graph is None:
+            return ""
+
+        hierarchy = graph.get("hierarchy")
+        if not hierarchy:
+            return ""
+
+        batch = hierarchy.get("batch") or ""
+        process = hierarchy.get("process") or ""
+        sub_process = hierarchy.get("sub_process") or ""
+        order = hierarchy.get("task_order")
+        parts = [p for p in (batch, process, sub_process) if p]
+        if not parts:
+            return ""
+
+        order_suffix = f" (task #{order})" if isinstance(order, int) else ""
+        header = (
+            f"This function runs in {' → '.join(parts)}{order_suffix}.\n\n"
+        )
+
+        if hierarchy.get("active") is False:
+            reason = hierarchy.get("inactive_reason") or "reason not recorded"
+            header = (
+                "_Note: This task is marked inactive in the current batch "
+                f"configuration (reason: {reason}). The explanation below "
+                "describes what it would do if it were active._\n\n"
+                + header
+            )
+        return header
 
     def _get_llm(
         self,
@@ -562,6 +637,11 @@ class LogicExplainer:
         response = await llm.ainvoke(messages)
         markdown_content = response.content.strip()
 
+        # Prepend hierarchy context header when available
+        header = self.hierarchy_header(state)
+        if header:
+            markdown_content = header + markdown_content
+
         # Store as markdown explanation
         state["explanation"] = {
             "markdown": markdown_content,
@@ -642,6 +722,11 @@ class LogicExplainer:
             SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
             HumanMessage(content=user_prompt),
         ]
+
+        # The hierarchy header is emitted by the caller (main.py's stream
+        # endpoint) once before any stream_* call, so that VARIABLE_TRACE
+        # queries that bypass this method still get a header. We
+        # deliberately do NOT emit it here to avoid duplication.
 
         async for chunk in llm.astream(messages):
             if chunk.content:

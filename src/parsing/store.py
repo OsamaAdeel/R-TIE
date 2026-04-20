@@ -20,6 +20,8 @@ REDIS_KEYS = {
     "alias_map": "graph:aliases:{schema}",
     "raw_source": "graph:source:{schema}:{function_name}",
     "parse_metadata": "graph:meta:{schema}:{function_name}",
+    "batch_hierarchy": "hierarchy:{batch_name}",
+    "batch_set": "hierarchy:batches",
 }
 
 
@@ -208,6 +210,52 @@ def is_graph_stale(redis_client, schema: str, function_name: str, file_path: str
             schema, function_name, file_path, e,
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# Batch hierarchy (manifest.yaml)
+# ---------------------------------------------------------------------------
+
+def store_batch_hierarchy(redis_client, batch_name: str, manifest_dict: dict) -> bool:
+    """Store a parsed batch manifest under ``hierarchy:<batch_name>``.
+
+    Also adds *batch_name* to the ``hierarchy:batches`` set so callers can
+    enumerate known batches without scanning keys.
+    """
+    try:
+        key = _key("batch_hierarchy", batch_name=batch_name)
+        redis_client.set(key, to_json(manifest_dict))
+        redis_client.sadd(_key("batch_set"), batch_name)
+        return True
+    except Exception as e:
+        logger.warning("Failed to store hierarchy for batch %s: %s", batch_name, e)
+        return False
+
+
+def get_batch_hierarchy(redis_client, batch_name: str) -> dict | None:
+    """Retrieve a stored batch manifest dict, or None if absent."""
+    try:
+        key = _key("batch_hierarchy", batch_name=batch_name)
+        data = redis_client.get(key)
+        if data is None:
+            return None
+        return from_json(data)
+    except Exception as e:
+        logger.warning("Failed to get hierarchy for batch %s: %s", batch_name, e)
+        return None
+
+
+def list_batch_names(redis_client) -> list[str]:
+    """Return the set of known batch names recorded via ``store_batch_hierarchy``."""
+    try:
+        members = redis_client.smembers(_key("batch_set"))
+        if not members:
+            return []
+        # Redis returns bytes by default; normalise to str.
+        return sorted(m.decode() if isinstance(m, bytes) else m for m in members)
+    except Exception as e:
+        logger.warning("Failed to list batch names: %s", e)
+        return []
 
 
 # ---------------------------------------------------------------------------
