@@ -26,9 +26,15 @@ from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from src.agents.orchestrator import Orchestrator
+from src.agents.orchestrator import (
+    Orchestrator,
+    extract_function_candidates,
+    function_exists_in_graph,
+    find_similar_function_names,
+    build_function_not_found_response,
+)
 from src.agents.metadata_interpreter import MetadataInterpreter
-from src.agents.logic_explainer import LogicExplainer
+from src.agents.logic_explainer import LogicExplainer, evaluate_grounding
 from src.agents.variable_tracer import VariableTracer
 from src.agents.value_tracer import ValueTracerAgent
 from src.agents.data_query import DataQueryAgent
@@ -262,12 +268,44 @@ async def lifespan(app: FastAPI):
     _graph_available = False
     try:
         import redis as _redis
-        from src.parsing.loader import load_all_functions
+        from src.parsing.loader import load_all_functions, discover_module_folders
         _graph_redis = _redis.Redis(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
         )
+
+        # W38: auto-discover every module folder under db/modules/ that has a
+        # functions/ subdirectory. Union with any explicit functions_dirs from
+        # config so existing deployments keep working.
+        modules_base = graph_cfg.get("modules_base_dir", "db/modules")
+        discovered = discover_module_folders(modules_base)
+        logger.info(
+            "Discovered %d module folders: %s",
+            len(discovered),
+            [m["module_name"] for m in discovered],
+        )
+        for mod in discovered:
+            logger.info(
+                "Module %s: %d .sql files found",
+                mod["module_name"], mod["sql_count"],
+            )
+
+        # Build the final load list: discovered modules first, then any
+        # explicit functions_dirs from config that weren't already discovered.
+        load_targets: list[tuple[str, str]] = [
+            (mod["module_name"], mod["functions_dir"]) for mod in discovered
+        ]
+        seen_dirs = {os.path.abspath(t[1]) for t in load_targets}
         for fn_dir in graph_cfg.get("functions_dirs", []):
+            abs_dir = os.path.abspath(fn_dir)
+            if abs_dir in seen_dirs:
+                continue
+            seen_dirs.add(abs_dir)
+            # Derive a module name from the path for log consistency.
+            mod_name = os.path.basename(os.path.dirname(abs_dir)) or fn_dir
+            load_targets.append((mod_name, fn_dir))
+
+        for mod_name, fn_dir in load_targets:
             result = load_all_functions(
                 functions_dir=fn_dir,
                 schema=oracle_cfg["schema"],
@@ -275,10 +313,12 @@ async def lifespan(app: FastAPI):
                 force_reparse=graph_cfg.get("force_reparse_on_startup", False),
             )
             logger.info(
-                f"Graph pipeline: {result['status']} — "
-                f"{result['functions_parsed']} parsed, "
-                f"{result['functions_skipped']} skipped, "
-                f"{result['functions_failed']} failed"
+                "Module %s: loaded %d, skipped %d, failed %d (status=%s)",
+                mod_name,
+                result["functions_parsed"],
+                result["functions_skipped"],
+                result["functions_failed"],
+                result["status"],
             )
             if result["status"] in ("success", "partial"):
                 _graph_available = True
@@ -653,6 +693,17 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     yield event
                 return
 
+            # --- Function-name pre-check (W37): if the user named a specific
+            # PL/SQL function that isn't in the graph, short-circuit with a
+            # DECLINED response. This prevents the semantic-search fallback
+            # from fabricating an explanation from adjacent functions.
+            if state.get("query_type") in ("COLUMN_LOGIC", "VARIABLE_TRACE", "FUNCTION_LOGIC"):
+                precheck = _run_function_precheck(request.query, correlation_id)
+                if precheck is not None:
+                    async for event in _stream_declined_response(precheck):
+                        yield event
+                    return
+
             # Stage 2: Semantic search
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Searching across database schemas...'})}\n\n"
             from langchain_openai import OpenAIEmbeddings
@@ -782,16 +833,43 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     full_markdown += token
                     yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
 
-            # Send done event with final metadata
+            # --- Grounding evaluation (W37): decide VERIFIED vs UNVERIFIED
+            # based on citations, identifier presence, and contradiction
+            # phrases. Replaces a previously-hardcoded VERIFIED payload that
+            # ignored what the LLM actually produced.
+            multi_source = state.get("multi_source", {}) or {}
+            functions_analyzed = list(multi_source.keys())
+            grounding = evaluate_grounding(
+                raw_query=request.query,
+                markdown=full_markdown,
+                multi_source=multi_source,
+                functions_analyzed=functions_analyzed,
+                query_type=state.get("query_type", ""),
+            )
+
+            # Stream caveat tokens before closing so the user sees them inline.
+            final_markdown = full_markdown
+            if grounding["sanity_messages"]:
+                caveat_block = (
+                    "\n\n---\n\n"
+                    "**Caveats:**\n"
+                    + "\n".join(f"- {msg}" for msg in grounding["sanity_messages"])
+                )
+                for chunk in _chunk_text(caveat_block):
+                    yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+                final_markdown = full_markdown + caveat_block
+
             done_payload = {
-                "confidence": 1.0,
-                "validated": True,
-                "badge": "VERIFIED",
-                "source_citations": [],
+                "confidence": grounding["confidence"],
+                "validated": grounding["badge"] == "VERIFIED",
+                "badge": grounding["badge"],
+                "source_citations": grounding["source_citations"],
+                "warnings": grounding["warnings"],
+                "functions_analyzed": functions_analyzed,
                 "correlation_id": correlation_id,
                 "explanation": {
-                    "markdown": full_markdown,
-                    "summary": full_markdown[:200],
+                    "markdown": final_markdown,
+                    "summary": final_markdown[:200],
                 },
             }
             yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
@@ -1049,6 +1127,61 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "verification_sql": result.get("verification_sql"),
     }
     yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+
+
+def _run_function_precheck(query: str, correlation_id: str) -> Optional[Dict[str, Any]]:
+    """Return a DECLINED payload if *query* names a function we don't have.
+
+    Extracts PL/SQL-looking identifiers from the raw query. If any extracted
+    token looks like a function name (per the stopword-filtered heuristic in
+    orchestrator.extract_function_candidates) but has no graph stored in any
+    known schema, returns a pre-built DECLINED response. Returns None when
+    no named function is referenced, or when every referenced function was
+    found in the graph.
+    """
+    if _graph_redis is None:
+        return None
+    candidates = extract_function_candidates(query)
+    if not candidates:
+        return None
+    missing = [
+        cand for cand in candidates
+        if not function_exists_in_graph(cand, _graph_redis)
+    ]
+    if not missing:
+        return None
+    # Decline on the first missing candidate — it's almost always the one
+    # the user actually asked about. Similar-function suggestions help the
+    # user recover quickly from a typo or wrong spelling.
+    requested = missing[0]
+    similar = find_similar_function_names(requested, _graph_redis, top_n=3)
+    logger.info(
+        "Function-name pre-check declined query: requested=%s, missing=%s, "
+        "similar=%s | correlation_id=%s",
+        requested, missing, similar, correlation_id,
+    )
+    return build_function_not_found_response(
+        requested_function=requested,
+        similar_functions=similar,
+        correlation_id=correlation_id,
+    )
+
+
+async def _stream_declined_response(payload: Dict[str, Any]):
+    """Yield a DECLINED response as SSE tokens + meta + done events."""
+    meta = {
+        "type": payload.get("type", "function_not_found"),
+        "status": "declined",
+        "requested_function": payload.get("requested_function"),
+        "similar_functions": payload.get("similar_functions") or [],
+        "correlation_id": payload.get("correlation_id"),
+    }
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Named function not found in graph'})}\n\n"
+    yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
+    message = payload.get("message") or ""
+    for chunk in _chunk_text(message):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
 
 
 async def _unsupported_stream(state, correlation_id):

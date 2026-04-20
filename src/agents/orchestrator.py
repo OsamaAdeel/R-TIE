@@ -10,6 +10,8 @@ prepares the query for the pipeline.
 
 import asyncio
 import json
+import re
+from difflib import get_close_matches
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
@@ -20,8 +22,34 @@ from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.store import get_function_graph
 
 logger = get_logger(__name__, concern="app")
+
+# Candidate PL/SQL function identifiers: letter-start, at least one underscore,
+# word-chars only. Post-filtered on length and stopwords.
+_FUNCTION_NAME_CANDIDATE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)\b"
+)
+
+# OFSAA column naming convention: a single type-prefix letter followed by an
+# underscore and caps (N_, V_, F_, D_, T_ prefixes). These are never PL/SQL
+# function names — they're always staging-table columns — so the pre-check
+# must not decline on them.
+_COLUMN_TYPE_PREFIX = re.compile(r"^[A-Z]_[A-Z]")
+
+# Tokens that look like function names but are really PL/SQL parameters,
+# date identifiers, or English phrases. These are NEVER checked against the graph.
+_NAME_STOPWORDS = frozenset({
+    "FIC_MIS_DATE", "MIS_DATE", "RUN_ID", "BATCH_ID", "RUN_SKEY", "RUN_EXECUTION_ID",
+    "START_DATE", "END_DATE", "ACCOUNT_NUMBER", "TARGET_VARIABLE",
+    "STG_GL_DATA", "V_GL_CODE", "V_PROD_CODE", "V_LOB_CODE", "V_LV_CODE",
+})
+
+# Schemas to check when resolving a function name. Kept in sync with the
+# schemas discovered by the loader. Extending this list is the minimal
+# cross-schema support required for W37 pre-check.
+_PRECHECK_SCHEMAS = ("OFSMDM", "OFSERM")
 
 
 class ClassificationResult(BaseModel):
@@ -383,3 +411,136 @@ class Orchestrator:
             f"correlation_id={correlation_id}"
         )
         return state
+
+
+def extract_function_candidates(query: str) -> List[str]:
+    """Return PL/SQL-looking identifiers from the query.
+
+    Heuristic: a candidate must start with a letter, contain at least one
+    underscore, and be at least 6 characters long. Further filters:
+      * stopwords (known parameter/column names) are dropped
+      * single-letter type-prefixed tokens (``N_...``, ``V_...``, ``F_...``)
+        are dropped — OFSAA uses these for column names, never functions
+
+    Case is preserved on the way out so callers can log the original
+    spelling.
+    """
+    seen: set[str] = set()
+    out: List[str] = []
+    for match in _FUNCTION_NAME_CANDIDATE.finditer(query):
+        cand = match.group(1)
+        cand_upper = cand.upper()
+        if cand_upper in seen:
+            continue
+        seen.add(cand_upper)
+        if len(cand) < 6:
+            continue
+        if cand_upper in _NAME_STOPWORDS:
+            continue
+        if _COLUMN_TYPE_PREFIX.match(cand_upper):
+            continue
+        out.append(cand)
+    return out
+
+
+def function_exists_in_graph(
+    function_name: str,
+    redis_client,
+    schemas: Optional[List[str]] = None,
+) -> bool:
+    """Return True if any of *schemas* holds a parsed graph for *function_name*.
+
+    Lookup is case-insensitive on the function name (Redis keys are stored
+    upper-cased by the loader). Returns False on any Redis exception so the
+    caller can fail open rather than decline legitimate queries.
+    """
+    if redis_client is None:
+        return False
+    schemas = list(schemas) if schemas else list(_PRECHECK_SCHEMAS)
+    func_upper = function_name.upper()
+    for schema in schemas:
+        try:
+            if get_function_graph(redis_client, schema, func_upper) is not None:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def find_similar_function_names(
+    target: str,
+    redis_client,
+    schemas: Optional[List[str]] = None,
+    top_n: int = 3,
+) -> List[str]:
+    """Return up to *top_n* graph function names similar to *target*.
+
+    Scans ``graph:<schema>:<function_name>`` keys only (three-segment keys)
+    and returns the closest matches by ratio. Empty list on Redis failure.
+    """
+    if redis_client is None:
+        return []
+    schemas = list(schemas) if schemas else list(_PRECHECK_SCHEMAS)
+    all_names: set[str] = set()
+    for schema in schemas:
+        try:
+            cursor = 0
+            pattern = f"graph:{schema}:*"
+            while True:
+                cursor, keys = redis_client.scan(
+                    cursor=cursor, match=pattern, count=200
+                )
+                for k in keys:
+                    key_str = k.decode("utf-8") if isinstance(k, (bytes, bytearray)) else k
+                    parts = key_str.split(":")
+                    # Three-segment keys only — skip graph:full:<schema>,
+                    # graph:source:<schema>:<fn>, graph:meta:..., graph:aliases:...
+                    if len(parts) == 3 and parts[0] == "graph":
+                        all_names.add(parts[2])
+                if cursor == 0:
+                    break
+        except Exception:
+            continue
+    if not all_names:
+        return []
+    return get_close_matches(
+        target.upper(), list(all_names), n=top_n, cutoff=0.5
+    )
+
+
+def build_function_not_found_response(
+    requested_function: str,
+    similar_functions: List[str],
+    correlation_id: str,
+) -> Dict[str, Any]:
+    """Assemble a DECLINED response for a query that names a function we don't have.
+
+    The frontend renders the message as a single-block markdown response; the
+    structured fields let automated checks assert the DECLINED outcome.
+    """
+    parts = [
+        f"The function `{requested_function}` was not found in the loaded graph.",
+        "",
+        "RTIE can only explain functions that have been indexed. If you believe "
+        "this function should be available, verify the file exists under "
+        "`db/modules/<module>/functions/` and that the module is configured.",
+    ]
+    if similar_functions:
+        parts.append("")
+        parts.append("Did you mean one of these?")
+        for name in similar_functions:
+            parts.append(f"- `{name}`")
+    message = "\n".join(parts)
+    return {
+        "type": "function_not_found",
+        "status": "declined",
+        "requested_function": requested_function,
+        "similar_functions": similar_functions,
+        "validated": False,
+        "badge": "DECLINED",
+        "confidence": 0.0,
+        "source_citations": [],
+        "message": message,
+        "explanation": {"markdown": message, "summary": message[:200]},
+        "correlation_id": correlation_id,
+    }

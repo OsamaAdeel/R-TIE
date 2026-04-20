@@ -9,7 +9,8 @@ switching per request.
 """
 
 import json
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -20,6 +21,232 @@ from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
 logger = get_logger(__name__, concern="app")
+
+# Phrases that signal the LLM is flagging missing information. If the model
+# emits one of these AND then continues to generate substantive text, we
+# treat the response as self-contradictory and downgrade the badge.
+_FORBIDDEN_CONTRADICTION_PHRASES = (
+    "source not provided",
+    "source not available",
+    "i cannot determine",
+    "i do not have access",
+    "source was not included",
+    "could not locate",
+    "was not provided",
+)
+
+# Business-identifier pattern: "CAP973", "ABL013" etc. — at least two letters
+# followed by at least two digits, optionally with trailing alphanumerics.
+_IDENTIFIER_CODE_RE = re.compile(r"\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]*)\b")
+
+# Inline line references in markdown: "Line 203", "Lines 5-10", "L42".
+_LINE_REF_RE = re.compile(
+    r"\b(?:Lines?|L)\s*(\d+)(?:\s*[-\u2013]\s*(\d+))?\b"
+)
+
+# Query types for which grounded citations are expected. Other types
+# (DATA_QUERY, VALUE_TRACE, etc.) have their own validation paths.
+_REQUIRES_CITATIONS = frozenset({"VARIABLE_TRACE", "COLUMN_LOGIC", "FUNCTION_LOGIC"})
+
+
+def evaluate_grounding(
+    raw_query: str,
+    markdown: str,
+    multi_source: Dict[str, Any],
+    functions_analyzed: List[str],
+    query_type: str,
+) -> Dict[str, Any]:
+    """Evaluate whether a streamed explanation is grounded in retrieved source.
+
+    Runs four independent checks:
+      - forbidden-phrase self-contradiction
+      - business-identifier grounding (CAP codes, etc.)
+      - line-citation presence
+      - empty source_citations rule for logic-explaining query types
+
+    Returns a dict with keys ``badge`` (VERIFIED | UNVERIFIED), ``confidence``,
+    ``source_citations`` (line-reference stubs), ``warnings`` (machine-readable),
+    and ``sanity_messages`` (user-facing caveats that the caller should append
+    to the streamed response).
+    """
+    warnings: List[str] = []
+    sanity_messages: List[str] = []
+
+    citations = _extract_line_citations(markdown)
+
+    if _has_self_contradiction(markdown):
+        warnings.append(
+            "CONTRADICTION: response claims missing information but continues "
+            "to provide substantive explanation"
+        )
+        sanity_messages.append(
+            "The response appears to contradict itself — it states information "
+            "is missing but then provides it. Please verify against the "
+            "production code before relying on this explanation."
+        )
+
+    query_identifiers = set(_IDENTIFIER_CODE_RE.findall(raw_query.upper()))
+    if query_identifiers:
+        raw_source_text = _concat_multi_source(multi_source).upper()
+        ungrounded = sorted(
+            ident for ident in query_identifiers if ident not in raw_source_text
+        )
+        if ungrounded:
+            ident_list = ", ".join(ungrounded)
+            warnings.append(
+                f"UNGROUNDED_IDENTIFIERS: {ident_list} mentioned in query but "
+                f"not found in any loaded function source"
+            )
+            sanity_messages.append(
+                f"This explanation may not fully describe {ident_list}. The "
+                f"identifier was mentioned but no loaded function was confirmed "
+                f"to compute it. The explanation below reflects what the loaded "
+                f"functions do — please verify against the actual production "
+                f"code."
+            )
+
+    # Requested-function grounding: if the user named a specific PL/SQL
+    # function and it didn't make it into functions_analyzed, the semantic
+    # search produced adjacent functions instead of the real one. This
+    # catches the exact W37 failure mode where the vector store doesn't
+    # index a schema (e.g. OFSERM) but the graph does have it — the
+    # pre-check passes but semantic search silently substitutes neighbors.
+    requested_functions = _extract_function_candidates_local(raw_query)
+    if requested_functions:
+        analyzed_upper = {f.upper() for f in functions_analyzed}
+        missing = [
+            name for name in requested_functions
+            if name.upper() not in analyzed_upper
+        ]
+        if missing:
+            names = ", ".join(missing)
+            warnings.append(
+                f"NAMED_FUNCTION_NOT_RETRIEVED: {names} named in query but not "
+                f"present in functions_analyzed={list(analyzed_upper)}"
+            )
+            sanity_messages.append(
+                f"The explanation below may describe functions related to "
+                f"{names} rather than {names} itself — the semantic search "
+                f"returned different functions than the one you asked about. "
+                f"Please verify against the actual production code."
+            )
+
+    requires_citations = query_type in _REQUIRES_CITATIONS
+    # A response is "citationally grounded" if it either has explicit line
+    # references OR analyzed at least one function (which implies the LLM
+    # was given real source to work from).
+    has_citations = bool(citations) or bool(functions_analyzed)
+
+    if requires_citations and not has_citations:
+        badge = "UNVERIFIED"
+        confidence = 0.0
+        warnings.append(
+            "CITATIONS: response has no line references and no functions were "
+            "analyzed — cannot verify grounding"
+        )
+    elif warnings:
+        badge = "UNVERIFIED"
+        confidence = 0.4 if citations else 0.2
+    else:
+        badge = "VERIFIED"
+        confidence = 0.95 if citations else 0.8
+
+    return {
+        "badge": badge,
+        "confidence": confidence,
+        "source_citations": citations,
+        "warnings": warnings,
+        "sanity_messages": sanity_messages,
+    }
+
+
+def _extract_line_citations(markdown: str) -> List[Dict[str, Any]]:
+    """Return citation stubs for every Line-N reference found in *markdown*.
+
+    Ranges like "Lines 203-223" expand into one stub per line. De-duplicated
+    by line number so a heavily-cited line only shows up once.
+    """
+    citations: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for match in _LINE_REF_RE.finditer(markdown):
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        if end < start or end - start > 500:
+            # Guard against degenerate regex matches (huge spans, reversed).
+            continue
+        for line_num in range(start, end + 1):
+            if line_num in seen:
+                continue
+            seen.add(line_num)
+            citations.append({
+                "line": line_num,
+                "text": "",
+                "context": "inline reference",
+                "source": "markdown",
+            })
+    return citations
+
+
+def _has_self_contradiction(markdown: str) -> bool:
+    """Return True if a forbidden phrase precedes >50 tokens of continuation."""
+    low = markdown.lower()
+    for phrase in _FORBIDDEN_CONTRADICTION_PHRASES:
+        idx = low.find(phrase)
+        if idx < 0:
+            continue
+        rest = markdown[idx + len(phrase):]
+        tokens = [t for t in re.split(r"\s+", rest) if t]
+        if len(tokens) > 50:
+            return True
+    return False
+
+
+def _concat_multi_source(multi_source: Dict[str, Any]) -> str:
+    """Flatten every function's source_code lines into one searchable string."""
+    parts: List[str] = []
+    for fn_data in multi_source.values():
+        src = fn_data.get("source_code") or []
+        for item in src:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+    return " ".join(parts)
+
+
+# Local copy of the function-name extractor used during grounding evaluation.
+# Kept in sync with src.agents.orchestrator.extract_function_candidates —
+# duplicated here to avoid an import cycle (orchestrator imports from store,
+# grounding is called from main.py after orchestrator has already run).
+_FN_CANDIDATE_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)\b")
+_FN_COLUMN_PREFIX_RE = re.compile(r"^[A-Z]_[A-Z]")
+_FN_STOPWORDS = frozenset({
+    "FIC_MIS_DATE", "MIS_DATE", "RUN_ID", "BATCH_ID", "RUN_SKEY",
+    "RUN_EXECUTION_ID", "START_DATE", "END_DATE", "ACCOUNT_NUMBER",
+    "TARGET_VARIABLE", "STG_GL_DATA", "V_GL_CODE", "V_PROD_CODE",
+    "V_LOB_CODE", "V_LV_CODE",
+})
+
+
+def _extract_function_candidates_local(query: str) -> List[str]:
+    """Same heuristic as orchestrator.extract_function_candidates; duplicated
+    here to avoid an import cycle during grounding evaluation."""
+    seen: set[str] = set()
+    out: List[str] = []
+    for match in _FN_CANDIDATE_RE.finditer(query):
+        cand = match.group(1)
+        cu = cand.upper()
+        if cu in seen:
+            continue
+        seen.add(cu)
+        if len(cand) < 6:
+            continue
+        if cu in _FN_STOPWORDS:
+            continue
+        if _FN_COLUMN_PREFIX_RE.match(cu):
+            continue
+        out.append(cand)
+    return out
 
 
 EXPLANATION_SYSTEM_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
