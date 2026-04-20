@@ -155,7 +155,7 @@ export default function ChatInput({ onSend, disabled }) {
           <div
             className={[
               'relative rounded-2xl bg-bg-secondary border transition-colors',
-              focused ? 'border-accent shadow-[0_0_0_3px_var(--color-accent-soft)]' : 'border-border hover:border-border-strong',
+              focused ? 'border-[#1e293b]' : 'border-border hover:border-border-strong',
             ].join(' ')}
           >
             <textarea
