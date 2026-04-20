@@ -8,7 +8,7 @@ import os
 import traceback
 from typing import Any
 
-from src.parsing.parser import parse_function
+from src.parsing.parser import parse_function, PATTERNS
 from src.parsing.builder import build_function_graph
 from src.parsing.indexer import (
     build_cross_function_graph,
@@ -62,6 +62,63 @@ def _resolve_functions_dir(functions_dir: str) -> str | None:
 def _function_name_from_file(file_path: str) -> str:
     """Derive a function name from the SQL file's basename (without extension)."""
     return os.path.splitext(os.path.basename(file_path))[0].upper()
+
+
+def _extract_schema_from_source(source_lines: list[str]) -> str | None:
+    """Return the schema prefix from ``CREATE OR REPLACE FUNCTION schema.name``.
+
+    Scans the first 40 lines only — the function signature always appears
+    near the top of an OFSAA .sql file. Returns upper-cased schema name or
+    None if the signature is absent or unprefixed.
+    """
+    head = "".join(source_lines[:40])
+    match = PATTERNS["FUNCTION_DEF"].search(head)
+    if match and match.group(1):
+        return match.group(1).rstrip(".").upper()
+    return None
+
+
+# ===================================================================
+# Module discovery — scan db/modules/*/functions/
+# ===================================================================
+
+def discover_module_folders(base_dir: str) -> list[dict]:
+    """Scan *base_dir* for ``<module>/functions/`` folders containing .sql files.
+
+    Returns a list of ``{"module_name", "functions_dir", "sql_count"}`` dicts,
+    one per module that has at least one .sql file. Top-level directories
+    under ``base_dir`` that do not contain a ``functions/`` subdirectory are
+    ignored, so schema-name folders like ``db/modules/OFSERM/`` are silently
+    skipped when they nest their module folders one level deeper.
+
+    The *base_dir* is resolved relative to the project root if not absolute.
+    """
+    candidates = [base_dir, os.path.join(_RTIE_ROOT, base_dir)]
+    resolved_base: str | None = None
+    for candidate in candidates:
+        abs_candidate = os.path.abspath(candidate)
+        if os.path.isdir(abs_candidate):
+            resolved_base = abs_candidate
+            break
+    if resolved_base is None:
+        logger.warning("Module discovery: base directory not found: %s", base_dir)
+        return []
+
+    modules: list[dict] = []
+    for entry in sorted(os.listdir(resolved_base)):
+        module_path = os.path.join(resolved_base, entry)
+        if not os.path.isdir(module_path):
+            continue
+        functions_dir = os.path.join(module_path, "functions")
+        if not os.path.isdir(functions_dir):
+            continue
+        sql_files = glob.glob(os.path.join(functions_dir, "*.sql"))
+        modules.append({
+            "module_name": entry,
+            "functions_dir": functions_dir,
+            "sql_count": len(sql_files),
+        })
+    return modules
 
 
 # ===================================================================
@@ -144,48 +201,68 @@ def load_all_functions(
     total_edges = 0
     compression_stats: list[dict] = []
 
+    # Track per-file effective schema so the cross-function indexer at the
+    # end groups graphs by their actual stored schema, not the directory default.
+    graph_schemas: dict[str, str] = {}
+
     for sql_file in sql_files:
         func_name = _function_name_from_file(sql_file)
         try:
-            # Staleness check
-            if not force_reparse and not is_graph_stale(redis_client, schema, func_name, sql_file):
-                # Use cached graph
-                cached = get_function_graph(redis_client, schema, func_name)
+            # Read source lines up-front so we can detect the schema prefix
+            # before the staleness/storage path (which writes under that schema).
+            with open(sql_file, "r", encoding="utf-8") as fh:
+                source_lines = fh.readlines()
+
+            extracted_schema = _extract_schema_from_source(source_lines)
+            effective_schema = extracted_schema or schema
+            if extracted_schema and extracted_schema != schema:
+                logger.warning(
+                    "Parsed %s.%s into graph:%s:%s. "
+                    "Note: full multi-schema support (W35) is not yet implemented. "
+                    "Queries about this function may produce partial results.",
+                    extracted_schema, func_name, extracted_schema, func_name,
+                )
+
+            # Staleness check (keyed by effective schema, not the directory default)
+            if not force_reparse and not is_graph_stale(
+                redis_client, effective_schema, func_name, sql_file
+            ):
+                cached = get_function_graph(redis_client, effective_schema, func_name)
                 if cached is not None:
                     all_graphs[func_name] = cached
+                    graph_schemas[func_name] = effective_schema
                     total_nodes += len(cached.get("nodes", []))
                     total_edges += len(cached.get("edges", []))
                     skipped_count += 1
-                    logger.info("Skipped (cached) %s.%s", schema, func_name)
+                    logger.info(
+                        "Skipped (cached) %s.%s", effective_schema, func_name
+                    )
                     continue
-
-            # Read source lines
-            with open(sql_file, "r", encoding="utf-8") as fh:
-                source_lines = fh.readlines()
 
             # Build function graph
             graph = build_function_graph(
                 source_lines=source_lines,
                 function_name=func_name,
                 file_name=os.path.basename(sql_file),
-                schema=schema,
+                schema=effective_schema,
             )
 
             # Store in Redis
-            store_function_graph(redis_client, schema, func_name, graph)
-            store_raw_source(redis_client, schema, func_name, source_lines)
+            store_function_graph(redis_client, effective_schema, func_name, graph)
+            store_raw_source(redis_client, effective_schema, func_name, source_lines)
 
             # Compression stats
             comp = calculate_compression_ratio(len(source_lines), graph)
             compression_stats.append({func_name: comp})
 
             all_graphs[func_name] = graph
+            graph_schemas[func_name] = effective_schema
             total_nodes += len(graph.get("nodes", []))
             total_edges += len(graph.get("edges", []))
             parsed_count += 1
             logger.info(
                 "Parsed %s.%s — %d nodes, %d edges",
-                schema,
+                effective_schema,
                 func_name,
                 len(graph.get("nodes", [])),
                 len(graph.get("edges", [])),
@@ -196,16 +273,31 @@ def load_all_functions(
             err_msg = f"Failed to parse {func_name}: {tb}"
             errors.append(err_msg)
             failed_count += 1
-            logger.error("Error parsing %s.%s:\n%s", schema, func_name, tb)
+            # Log the filename so developers can immediately identify which
+            # file broke — W38 requires no silent skips.
+            logger.error(
+                "FAILED to parse %s (schema=%s):\n%s",
+                os.path.basename(sql_file), schema, tb,
+            )
 
     # ------------------------------------------------------------------
     # Cross-function indices (only if we have at least one graph)
     # ------------------------------------------------------------------
     execution_order: list[str] = []
 
-    if all_graphs:
+    # Cross-function indices are scoped to the passed-in (primary) schema
+    # only. Functions stored under alternate schemas (e.g. OFSERM) still
+    # live at graph:<schema>:<fn> so the W37 pre-check can find them, but
+    # they are intentionally excluded from the primary-schema rollups
+    # until full multi-schema support lands (W35).
+    primary_graphs = [
+        g for fn, g in all_graphs.items()
+        if graph_schemas.get(fn, schema) == schema
+    ]
+
+    if primary_graphs:
         try:
-            full_graph = build_cross_function_graph(list(all_graphs.values()))
+            full_graph = build_cross_function_graph(primary_graphs)
             store_full_graph(redis_client, schema, full_graph)
         except Exception:
             tb = traceback.format_exc()
@@ -213,7 +305,7 @@ def load_all_functions(
             logger.error("Error building cross-function graph:\n%s", tb)
 
         try:
-            column_index = build_global_column_index(list(all_graphs.values()))
+            column_index = build_global_column_index(primary_graphs)
             store_column_index(redis_client, schema, column_index)
         except Exception:
             tb = traceback.format_exc()
@@ -221,7 +313,7 @@ def load_all_functions(
             logger.error("Error building global column index:\n%s", tb)
 
         try:
-            execution_order = resolve_execution_order(list(all_graphs.values()))
+            execution_order = resolve_execution_order(primary_graphs)
         except Exception:
             tb = traceback.format_exc()
             errors.append(f"Failed to resolve execution order: {tb}")
