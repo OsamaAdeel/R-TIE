@@ -357,7 +357,7 @@ def test_data_query_short_circuits_on_ambiguity(monkeypatch):
     monkeypatch.setattr(
         agent,
         "_build_schema_catalog",
-        lambda schema: ("(stub)", catalog),
+        lambda schema: ("(stub)", catalog, {}),
     )
 
     async def fail_generate(*args, **kwargs):
@@ -408,7 +408,7 @@ def test_data_query_does_not_trigger_when_target_unambiguous(monkeypatch):
     monkeypatch.setattr(
         agent,
         "_build_schema_catalog",
-        lambda schema: ("(stub)", catalog),
+        lambda schema: ("(stub)", catalog, {}),
     )
 
     generate_called: dict[str, bool] = {"value": False}

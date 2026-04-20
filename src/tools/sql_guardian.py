@@ -56,6 +56,38 @@ class ColumnResidencyError(GuardianRejectionError):
         )
 
 
+class CharPaddingError(GuardianRejectionError):
+    """Raised when a CHAR(n) column is compared directly to a bind variable
+    without an RTRIM/TRIM/LTRIM wrapper.
+
+    Oracle stores CHAR values blank-padded to the declared length, and a
+    bind of VARCHAR2 type is compared with non-padded semantics — so the
+    unwrapped predicate silently returns zero rows. Carries the offending
+    column + table so callers can produce a specific user message.
+    """
+
+    def __init__(
+        self,
+        column: str,
+        table: str,
+        char_length: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        self.column = column
+        self.table = table
+        self.char_length = char_length
+        length_hint = f" CHAR({char_length})" if char_length else " CHAR"
+        super().__init__(
+            message
+            or (
+                f"Column '{column}' on table '{table}' is{length_hint} and "
+                "is compared against a bind variable without RTRIM. Wrap "
+                f"the column as RTRIM({column}) = :bind to avoid Oracle's "
+                "blank-padding mismatch."
+            )
+        )
+
+
 # Tokens and keywords that indicate write operations
 FORBIDDEN_KEYWORDS = {
     "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
@@ -397,6 +429,117 @@ class SQLGuardian:
         )
         return True
 
+    def validate_char_column_comparisons(
+        self,
+        sql: str,
+        column_types: Mapping[str, Mapping[str, Mapping[str, object]]],
+    ) -> bool:
+        """Reject predicates that compare a CHAR(n) column to a bind
+        variable without wrapping the column in RTRIM/TRIM/LTRIM.
+
+        Oracle's CHAR(n) columns are blank-padded, and a bind variable is
+        typed as VARCHAR2 at the protocol level — equality against an
+        unwrapped CHAR column therefore returns zero rows whenever the
+        bind value is shorter than the declared length.
+
+        Strategy:
+          1. Compute the character spans inside RTRIM/TRIM/LTRIM function
+             calls — columns that fall inside those spans are considered
+             safely normalized and skipped.
+          2. Find every predicate of the form ``<col> <op> :bind`` or
+             ``<col> IN (:bind, ...)`` (op in ``= != <> < > LIKE``).
+          3. Resolve each column's data type via FROM-clause tables.
+          4. If the column is CHAR (or NCHAR with length > 1) and the
+             predicate is NOT inside an RTRIM/TRIM/LTRIM span, raise
+             ``CharPaddingError``.
+
+        CHAR-to-CHAR column comparisons (both sides are columns) and
+        VARCHAR2/NUMBER/DATE columns are untouched.
+
+        Args:
+            sql: The SQL string to validate (pre-injection).
+            column_types: ``{TABLE_UPPER: {COL_UPPER: type_info}}`` — the
+                type metadata from the Oracle schema snapshot. An empty
+                dict disables the check (we can't prove anything without
+                types).
+
+        Returns:
+            True when every CHAR predicate is either wrapped or not
+            compared to a bind variable.
+
+        Raises:
+            CharPaddingError: A CHAR(n) column is compared to a bind
+                variable without RTRIM/TRIM/LTRIM.
+        """
+        if not column_types:
+            logger.debug(
+                "validate_char_column_comparisons skipped — empty types map"
+            )
+            return True
+
+        canonical: Dict[str, Dict[str, Dict[str, object]]] = {
+            str(t).upper(): {str(c).upper(): info for c, info in cols.items()}
+            for t, cols in column_types.items()
+        }
+
+        sql_text = _strip_string_literals(sql)
+
+        trim_spans = _find_trim_wrapped_spans(sql_text)
+
+        alias_to_table: Dict[str, str] = {}
+        from_tables: list[str] = []
+        for match in _FROM_TABLE_RE.finditer(sql_text):
+            raw_table = match.group(1)
+            alias = match.group(2)
+            table = raw_table.split(".")[-1].upper()
+            if table not in from_tables:
+                from_tables.append(table)
+            alias_to_table[table] = table
+            if alias:
+                alias_up = alias.upper()
+                if alias_up not in _SQL_NON_COLUMN_TOKENS:
+                    alias_to_table[alias_up] = table
+
+        for match in _CHAR_PREDICATE_RE.finditer(sql_text):
+            qualifier = (match.group(1) or "").upper()
+            col = match.group(2).upper()
+            if col in _SQL_NON_COLUMN_TOKENS or col.isdigit():
+                continue
+
+            col_start = match.start(2)
+            if _position_in_spans(col_start, trim_spans):
+                continue
+
+            resolved = _resolve_column_type(
+                qualifier=qualifier,
+                column=col,
+                alias_to_table=alias_to_table,
+                from_tables=from_tables,
+                canonical=canonical,
+            )
+            if not resolved:
+                continue
+            table, type_info = resolved
+            if not _is_unwrapped_char(type_info):
+                continue
+
+            char_length = _as_int(type_info.get("data_length"))
+            logger.error(
+                "CHAR padding violation | column=%s table=%s length=%s sql=%s",
+                col, table, char_length, sql.strip(),
+            )
+            raise CharPaddingError(
+                column=col,
+                table=table,
+                char_length=char_length,
+            )
+
+        logger.info(
+            "CHAR column comparison check passed — every CHAR predicate "
+            "is either wrapped or does not compare to a bind variable"
+        )
+        return True
+
 
 def _strip_string_literals(sql: str) -> str:
     """Replace single-quoted string contents with empty strings so regex
@@ -404,3 +547,117 @@ def _strip_string_literals(sql: str) -> str:
     (e.g. `WHERE V_CODE = 'V_ACCOUNT_NUMBER'`).
     """
     return re.sub(r"'(?:[^']|'')*'", "''", sql)
+
+
+# Predicate of the form `<col> <op> :bind` or `<col> IN (:bind, ...)`.
+# Captures: (1) optional alias/table qualifier; (2) column name. The RHS
+# must begin with `:bind`, otherwise it's a column-to-column comparison
+# or a literal (which is fine for CHAR semantics).
+_CHAR_PREDICATE_RE = re.compile(
+    r"(?:([A-Za-z_]\w*)\.)?([A-Z_][A-Z0-9_]*)\s*"
+    r"(?:"
+    r"(?:=|!=|<>|<|>|\bLIKE\b)\s*:[A-Za-z_]\w*"
+    r"|"
+    r"\bIN\b\s*\(\s*:[A-Za-z_]\w*"
+    r")",
+    re.IGNORECASE,
+)
+
+# Matches the name of an RTRIM/TRIM/LTRIM function call head. Used with
+# manual paren-balancing to find the span of characters wrapped inside.
+_TRIM_CALL_RE = re.compile(r"\b(?:RTRIM|LTRIM|TRIM)\s*\(", re.IGNORECASE)
+
+
+def _find_trim_wrapped_spans(sql: str) -> list[tuple[int, int]]:
+    """Return `(inner_start, inner_end)` spans of every RTRIM/TRIM/LTRIM
+    call in the SQL. Positions are indices into the original string and
+    delimit the characters *inside* the outermost parentheses so a column
+    whose position lies in the span is considered safely wrapped.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in _TRIM_CALL_RE.finditer(sql):
+        start = m.end()  # just after the opening paren
+        depth = 1
+        i = start
+        while i < len(sql) and depth > 0:
+            ch = sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth == 0:
+            spans.append((start, i))
+    return spans
+
+
+def _position_in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
+    """True when ``pos`` falls inside any `(start, end)` span."""
+    return any(start <= pos < end for start, end in spans)
+
+
+def _resolve_column_type(
+    qualifier: str,
+    column: str,
+    alias_to_table: Dict[str, str],
+    from_tables: list[str],
+    canonical: Dict[str, Dict[str, Dict[str, object]]],
+) -> Optional[tuple[str, Dict[str, object]]]:
+    """Resolve a predicate column to ``(table, type_info)``.
+
+    When a qualifier is present it takes precedence (alias or table name
+    from the FROM clause). When absent, search the FROM tables in order
+    and return the first known column — preferring a CHAR match so the
+    validator flags the tighter constraint when a column name exists on
+    multiple tables with different types.
+    """
+    if qualifier:
+        table = alias_to_table.get(qualifier)
+        if not table:
+            return None
+        table_cols = canonical.get(table)
+        if not table_cols:
+            return None
+        info = table_cols.get(column)
+        return (table, dict(info)) if info else None
+
+    char_hit: Optional[tuple[str, Dict[str, object]]] = None
+    other_hit: Optional[tuple[str, Dict[str, object]]] = None
+    for table in from_tables:
+        table_cols = canonical.get(table)
+        if not table_cols:
+            continue
+        info = table_cols.get(column)
+        if not info:
+            continue
+        if _is_unwrapped_char(info):
+            char_hit = (table, dict(info))
+            break
+        if other_hit is None:
+            other_hit = (table, dict(info))
+    return char_hit or other_hit
+
+
+def _is_unwrapped_char(type_info: Mapping[str, object]) -> bool:
+    """True when the column is a CHAR (or NCHAR with length > 1) — the
+    shape that suffers from Oracle's blank-padding equality semantics.
+    CHAR(1) and NCHAR(1) are excluded because a one-character bind is
+    exact-length by definition."""
+    dtype = str(type_info.get("data_type") or "").upper().strip()
+    if dtype not in ("CHAR", "NCHAR"):
+        return False
+    length = _as_int(type_info.get("data_length"))
+    if length is None:
+        return True
+    return length > 1
+
+
+def _as_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

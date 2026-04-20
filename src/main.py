@@ -335,6 +335,25 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"DataQueryAgent init failed (non-fatal): {exc}")
 
+    # Prime the schema-type snapshot in Redis so DataQueryAgent can
+    # render column data types in its LLM catalog and SQLGuardian can
+    # reject CHAR bind comparisons. Non-fatal: on failure the catalog
+    # falls back to name-only columns, matching pre-W33 behavior.
+    try:
+        if _cache_manager is not None:
+            snap = await _cache_manager.refresh_schema_snapshot(
+                oracle_cfg["schema"]
+            )
+            logger.info(
+                "Schema-type snapshot primed for %s (%s)",
+                oracle_cfg["schema"],
+                snap.get("summary") if isinstance(snap, dict) else snap,
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Schema snapshot refresh failed at startup (non-fatal): {exc}"
+        )
+
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
     for module_name in auto_index_modules:
@@ -998,12 +1017,16 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
 
     status = result.get("status")
-    validated = status == "answered"
-    badge = (
-        "VERIFIED" if status == "answered"
-        else "REVIEW" if status == "confirmation_required"
-        else "REJECTED"
-    )
+    suspicious = bool(result.get("suspicious"))
+    validated = status == "answered" and not suspicious
+    if suspicious:
+        badge = "UNVERIFIED"
+    elif status == "answered":
+        badge = "VERIFIED"
+    elif status == "confirmation_required":
+        badge = "REVIEW"
+    else:
+        badge = "REJECTED"
     done_payload = {
         "type": "data_query",
         "status": status,
@@ -1011,6 +1034,8 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "validated": validated,
         "badge": badge,
         "sanity_warnings": result.get("sanity_warnings") or [],
+        "suspicious": suspicious,
+        "suspicion_reason": result.get("suspicion_reason"),
         "summary": result.get("summary"),
         "correlation_id": correlation_id,
         "explanation": {"markdown": explanation},

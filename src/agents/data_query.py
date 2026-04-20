@@ -32,6 +32,7 @@ from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_column_index
 from src.tools.sql_guardian import (
+    CharPaddingError,
     ColumnResidencyError,
     GuardianRejectionError,
 )
@@ -66,6 +67,29 @@ HARD CONSTRAINTS — violating any of these produces an invalid response:
   be bound via `TO_DATE(:param_name, 'YYYY-MM-DD')`, not as bare strings.
   Pass the date as a 'YYYY-MM-DD' string in params. Apply this rule to
   BOTH the main SQL and count_sql.
+
+CHAR COLUMN HANDLING — Oracle CHAR(n) columns store blank-padded values.
+A direct equality between a CHAR(n) column and a VARCHAR2 bind variable
+is evaluated with non-padded semantics and returns ZERO matches when
+n > len(value). The schema block below spells out each column's data
+type; every column shown as `CHAR(n)` (not VARCHAR2, not NUMBER) needs
+special handling:
+- When comparing a CHAR column to a bind variable, ALWAYS wrap the
+  column reference in RTRIM so the trailing spaces are stripped:
+    WRONG:   WHERE F_EXPOSURE_ENABLED_IND = :exposure_ind
+    CORRECT: WHERE RTRIM(F_EXPOSURE_ENABLED_IND) = :exposure_ind
+- The rule applies to `=`, `!=`, `<>`, and `IN (:bind, ...)` predicates
+  on CHAR columns. Apply it in the main SQL AND in count_sql.
+- VARCHAR2 / NUMBER / DATE columns NEVER need RTRIM. Adding it to a
+  VARCHAR2 column is harmless but pointless — don't do it by default.
+- CHAR-to-CHAR column comparisons (no bind involved) do not need RTRIM;
+  Oracle's blank-padded comparison semantics handle those correctly.
+
+Positive example (F_EXPOSURE_ENABLED_IND is CHAR(3)):
+  SELECT COUNT(DISTINCT V_ACCOUNT_NUMBER) AS ACCOUNT_COUNT
+  FROM STG_PRODUCT_PROCESSOR
+  WHERE RTRIM(F_EXPOSURE_ENABLED_IND) = :exposure_ind
+    AND FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')
 
 AGGREGATION PREFERENCE — if the question can be answered by an aggregate,
 generate an aggregate, not a row list:
@@ -179,11 +203,12 @@ class DataQueryAgent:
         filters = dict(filters or {})
 
         try:
-            catalog_text, tables_to_columns = self._build_schema_catalog(schema)
+            catalog_text, tables_to_columns, column_types = self._build_schema_catalog(schema)
         except Exception as exc:
             logger.warning("DataQuery catalog build failed: %s", exc)
             catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
             tables_to_columns = {}
+            column_types = {}
 
         # Identifier-ambiguity check — short-circuits before SQL generation
         # when the target column lives on multiple tables and the user gave
@@ -296,6 +321,40 @@ class DataQueryAgent:
                     suggestion=(
                         "Try naming the target table explicitly, or rephrase "
                         "with the column you actually want to see."
+                    ),
+                )
+
+        # Pre-execution CHAR-padding check — catches Oracle CHAR(n) columns
+        # compared against a VARCHAR2 bind without RTRIM, which silently
+        # returns zero matches due to trailing-space padding semantics.
+        if column_types:
+            try:
+                self._guardian.validate_char_column_comparisons(sql, column_types)
+                if count_sql:
+                    self._guardian.validate_char_column_comparisons(
+                        count_sql, column_types
+                    )
+            except CharPaddingError as exc:
+                logger.error(
+                    "DataQuery CHAR padding rejected | column=%s table=%s sql=%s",
+                    exc.column, exc.table, sql,
+                )
+                return self._query_generation_error(
+                    reason="char_padding_mismatch",
+                    user_query=user_query,
+                    sql=sql,
+                    params=params,
+                    user_message=(
+                        f"The generated SQL compares CHAR column {exc.column} "
+                        f"(on {exc.table}) to a bind variable without using "
+                        "RTRIM. Oracle CHAR(n) columns are blank-padded, so "
+                        "this comparison would silently return zero rows. "
+                        "Please retry — the prompt now enforces RTRIM on "
+                        "CHAR comparisons."
+                    ),
+                    suggestion=(
+                        "If you re-ask the same question, the generator will "
+                        "wrap the CHAR column in RTRIM automatically."
                     ),
                 )
 
@@ -419,6 +478,41 @@ class DataQueryAgent:
                 row_count=row_count,
             )
 
+        # Post-execution suspicious-result check: a zero-result aggregate
+        # against a populated target table is a classic symptom of the
+        # CHAR/VARCHAR2 padding trap or similar silent filter failures.
+        # Downgrades the response from VERIFIED to UNVERIFIED.
+        suspicious, suspicion_reason = await self._check_suspicious_result(
+            sql=exec_sql,
+            query_kind=query_kind,
+            columns=columns,
+            rows=materialised,
+            params=params,
+        )
+        if suspicious:
+            warnings = list(warnings) + [
+                f"suspicious_zero_result: {suspicion_reason}"
+            ]
+            logger.warning(
+                "DataQuery suspicious result flagged | reason=%s sql=%s params=%s",
+                suspicion_reason, exec_sql, params,
+            )
+
+        explanation = _build_explanation(
+            summary=summary,
+            sql=exec_sql,
+            params=params,
+            rows=display_rows[: self._display_limit],
+            columns=columns,
+            truncated=row_count > self._display_limit,
+            display_limit=self._display_limit,
+        )
+        if suspicious:
+            explanation = (
+                "> \u26a0\ufe0f **UNVERIFIED — suspicious result.** "
+                f"{suspicion_reason}\n\n" + explanation
+            )
+
         return {
             "status": "answered",
             "query_kind": query_kind,
@@ -430,16 +524,10 @@ class DataQueryAgent:
             "row_count": row_count,
             "requested_dates": requested_dates,
             "summary": summary,
-            "explanation": _build_explanation(
-                summary=summary,
-                sql=exec_sql,
-                params=params,
-                rows=display_rows[: self._display_limit],
-                columns=columns,
-                truncated=row_count > self._display_limit,
-                display_limit=self._display_limit,
-            ),
+            "explanation": explanation,
             "sanity_warnings": warnings,
+            "suspicious": suspicious,
+            "suspicion_reason": suspicion_reason if suspicious else None,
             "verification_sql": count_sql or exec_sql,
             "correlation_id": correlation_id,
         }
@@ -492,40 +580,150 @@ class DataQueryAgent:
         parsed = json.loads(raw)
         return parsed
 
-    def _build_schema_catalog(self, schema: str) -> tuple[str, dict[str, set[str]]]:
-        """Build a per-table `{table: {columns}}` catalog from the graph.
+    def _build_schema_catalog(
+        self, schema: str
+    ) -> tuple[str, dict[str, set[str]], dict[str, dict[str, dict]]]:
+        """Build a per-table catalog from the graph + Oracle type snapshot.
 
-        Two data sources are combined:
-        1. Per-function graphs — INSERT/UPDATE column_maps give precise
+        Three data sources are combined:
+        1. Per-function graphs — INSERT/UPDATE column_maps give the precise
            `table → columns` mapping for the columns the PL/SQL touches.
         2. The raw source of each function — INSERT `(COL, COL, ...)`
            column lists are parsed and attributed to the target table.
+        3. The Oracle schema snapshot cached in Redis under
+           `rtie:schema:snapshot:<schema>` — provides each column's data
+           type, length, precision, and scale so the LLM can avoid the
+           CHAR(n) blank-padding trap.
 
         Returns
         -------
-        (catalog_text, tables_to_columns):
+        (catalog_text, tables_to_columns, column_types):
             * `catalog_text` is the per-table block rendered for the LLM
-              prompt (no flat column dump — that was the source of Bug A).
-            * `tables_to_columns` is the authoritative mapping used by
-              SQLGuardian.validate_column_residency to reject SQL that
-              references a column against the wrong table.
+              prompt, with each column annotated by its Oracle data type
+              when available.
+            * `tables_to_columns` is the authoritative `{TABLE: {COL, ...}}`
+              mapping used by SQLGuardian.validate_column_residency.
+            * `column_types` is `{TABLE: {COL: {data_type, length,
+              precision, scale}}}` — empty when the snapshot has not been
+              refreshed. Used by SQLGuardian.validate_char_column_comparisons
+              to reject CHAR(n) bind comparisons that skip RTRIM.
         """
         tables_to_columns = build_tables_to_columns(self._redis, schema)
+        column_types = load_column_types(self._redis, schema)
 
         if not tables_to_columns:
-            return "(no tables discovered — schema catalog empty)", {}
+            return "(no tables discovered — schema catalog empty)", {}, column_types
 
         lines: list[str] = []
         for table in sorted(tables_to_columns.keys()):
             cols = sorted(tables_to_columns[table])
             lines.append(f"Table: {table}")
-            if cols:
-                lines.append(f"Columns: {', '.join(cols)}")
-            else:
+            if not cols:
                 lines.append("Columns: (none discovered in graph)")
+                lines.append("")
+                continue
+            table_types = column_types.get(table, {})
+            if table_types:
+                lines.append("Columns:")
+                for col in cols:
+                    type_str = format_column_type(table_types.get(col))
+                    if type_str:
+                        lines.append(f"  {col} {type_str}")
+                    else:
+                        lines.append(f"  {col}")
+            else:
+                lines.append(f"Columns: {', '.join(cols)}")
             lines.append("")
 
-        return "\n".join(lines).rstrip(), tables_to_columns
+        return "\n".join(lines).rstrip(), tables_to_columns, column_types
+
+    async def _check_suspicious_result(
+        self,
+        sql: str,
+        query_kind: str,
+        columns: list[str],
+        rows: list[list],
+        params: dict,
+    ) -> tuple[bool, Optional[str]]:
+        """Flag a zero-result aggregate against a populated target table.
+
+        A COUNT/SUM/aggregate that returns 0 or NULL, while the target
+        table has rows at the same date filter, is a classic symptom of
+        silent filter failures (CHAR padding, case mismatches, stale
+        binds). We run one cheap Oracle query — the baseline row count
+        for the target table at the filter date — and flag when the
+        baseline is positive but the answer is zero.
+
+        Returns ``(suspicious, reason_text)``. ``suspicious`` is False
+        whenever we can't confidently make a call (unknown table, no
+        date filter, no non-date predicates, baseline query failed).
+        """
+        if query_kind != "AGGREGATE" or not rows:
+            return False, None
+
+        first_row = rows[0]
+        if not first_row:
+            return False, None
+        first_value = first_row[0]
+        if first_value not in (0, 0.0, None, "0"):
+            try:
+                if float(first_value) != 0.0:
+                    return False, None
+            except (TypeError, ValueError):
+                return False, None
+
+        # Require the SQL to have a non-date WHERE predicate — if the only
+        # filter is the date, the zero count is just "no data that day".
+        stripped = _strip_sql_literals(sql)
+        where_text = _extract_where_clause(stripped)
+        if not where_text:
+            return False, None
+        predicates = _extract_predicate_columns(where_text)
+        non_date_predicates = [
+            col for col in predicates
+            if col != "FIC_MIS_DATE" and not col.endswith("_DATE")
+        ]
+        if not non_date_predicates:
+            return False, None
+
+        mis_date = (
+            params.get("mis_date")
+            or params.get("fic_mis_date")
+            or params.get("date")
+        )
+        if not mis_date:
+            return False, None
+
+        target_table = _extract_primary_from_table(stripped)
+        if not target_table:
+            return False, None
+
+        baseline_sql = (
+            f"SELECT COUNT(*) FROM {target_table} "
+            "WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
+        )
+        try:
+            baseline_rows = await self._schema_tools.execute_raw(
+                baseline_sql, {"mis_date": mis_date}
+            )
+            baseline = int(baseline_rows[0][0]) if baseline_rows else 0
+        except Exception as exc:
+            logger.info(
+                "Suspicious-result baseline query failed (non-fatal): %s", exc
+            )
+            return False, None
+
+        if baseline <= 0:
+            return False, None
+
+        reason = (
+            f"The query returned 0, but table {target_table} has "
+            f"{baseline:,} row(s) at {mis_date}. The filter on "
+            f"{', '.join(non_date_predicates)} may have a data-type "
+            "mismatch (CHAR padding, case sensitivity) or a bad value. "
+            "Please verify the SQL before trusting this result."
+        )
+        return True, reason
 
     def _error_result(
         self,
@@ -604,6 +802,109 @@ class DataQueryAgent:
 # Module-level helpers
 # ---------------------------------------------------------------------
 
+def load_column_types(
+    redis_client,
+    schema: str,
+    key_prefix: str = "rtie",
+) -> dict[str, dict[str, dict]]:
+    """Load per-column Oracle data types from the cached schema snapshot.
+
+    The async CacheClient writes the snapshot under
+    ``<key_prefix>:schema:snapshot:<schema>`` during ``/refresh-schema``.
+    This helper reads that same key via the sync graph-pipeline Redis
+    client so DataQueryAgent can render types in the LLM catalog and the
+    SQLGuardian can validate CHAR comparisons.
+
+    Returns ``{TABLE_UPPER: {COL_UPPER: {data_type, data_length,
+    data_precision, data_scale}}}`` or ``{}`` when the snapshot is
+    absent, Redis is unavailable, or the payload is malformed. Never
+    raises — a missing snapshot degrades gracefully to an untyped catalog.
+    """
+    if redis_client is None:
+        return {}
+    key = f"{key_prefix}:schema:snapshot:{schema}"
+    try:
+        raw = redis_client.get(key)
+    except Exception as exc:
+        logger.info("Redis GET failed for schema snapshot %s: %s", key, exc)
+        return {}
+    if raw is None:
+        return {}
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+    except Exception as exc:
+        logger.info("Schema snapshot parse failed for %s: %s", key, exc)
+        return {}
+
+    tables = payload.get("tables") if isinstance(payload, dict) else None
+    if not isinstance(tables, dict):
+        return {}
+
+    out: dict[str, dict[str, dict]] = {}
+    for table_name, table_info in tables.items():
+        if not isinstance(table_info, dict):
+            continue
+        cols = table_info.get("columns")
+        if not isinstance(cols, dict):
+            continue
+        table_upper = str(table_name).upper()
+        table_out: dict[str, dict] = {}
+        for col_name, col_info in cols.items():
+            if not isinstance(col_info, dict):
+                continue
+            table_out[str(col_name).upper()] = {
+                "data_type": str(col_info.get("data_type") or "").upper(),
+                "data_length": col_info.get("data_length"),
+                "data_precision": col_info.get("data_precision"),
+                "data_scale": col_info.get("data_scale"),
+                "nullable": col_info.get("nullable"),
+            }
+        if table_out:
+            out[table_upper] = table_out
+    return out
+
+
+def format_column_type(type_info: Optional[dict]) -> str:
+    """Format a single column's type metadata as `VARCHAR2(50)`, `CHAR(3)`,
+    `NUMBER(10,2)`, `DATE`, etc.
+
+    Returns an empty string when ``type_info`` is missing so callers can
+    render the bare column name unchanged.
+    """
+    if not type_info:
+        return ""
+    dtype = str(type_info.get("data_type") or "").upper().strip()
+    if not dtype:
+        return ""
+    length = type_info.get("data_length")
+    precision = type_info.get("data_precision")
+    scale = type_info.get("data_scale")
+
+    if dtype in ("CHAR", "NCHAR", "VARCHAR2", "VARCHAR", "NVARCHAR2", "RAW"):
+        try:
+            n = int(length) if length is not None else None
+        except (TypeError, ValueError):
+            n = None
+        return f"{dtype}({n})" if n else dtype
+    if dtype == "NUMBER":
+        try:
+            p = int(precision) if precision is not None else None
+        except (TypeError, ValueError):
+            p = None
+        try:
+            s = int(scale) if scale is not None else None
+        except (TypeError, ValueError):
+            s = None
+        if p is not None and s is not None:
+            return f"NUMBER({p},{s})"
+        if p is not None:
+            return f"NUMBER({p})"
+        return "NUMBER"
+    return dtype
+
+
 def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
     """Build per-table `{table: {columns}}` mapping from the graph in Redis.
 
@@ -673,6 +974,59 @@ _COLUMN_PREFIX_RE = re.compile(r"^(N|V|F|D|FIC|LD|SETUP|B)_", re.IGNORECASE)
 
 
 _ORA_CODE_RE = re.compile(r"ORA-(\d{5})", re.IGNORECASE)
+
+
+_WHERE_CLAUSE_RE = re.compile(
+    r"\bWHERE\b(.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|"
+    r"\bFETCH\b|\bUNION\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FROM_PRIMARY_RE = re.compile(
+    r"\bFROM\s+([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?)",
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_literals(sql: str) -> str:
+    """Replace string literals with empty strings so regex predicate scans
+    don't pick up tokens inside literals."""
+    return re.sub(r"'(?:[^']|'')*'", "''", sql or "")
+
+
+def _extract_where_clause(sql: str) -> str:
+    """Return the WHERE clause body (excluding the WHERE keyword) or ''."""
+    match = _WHERE_CLAUSE_RE.search(sql)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_predicate_columns(where_text: str) -> list[str]:
+    """Extract OFSAA-shaped column names appearing in a WHERE clause.
+
+    Uses the N_/V_/F_/D_/FIC_/LD_/SETUP_/B_ naming conventions to identify
+    column tokens. Works equally well for bare (``V_LV_CODE = :x``),
+    qualified (``PP.V_LV_CODE = :x``), and function-wrapped
+    (``RTRIM(F_EXPOSURE_ENABLED_IND) = :x``) predicates. Duplicates are
+    returned — callers can dedupe if they care.
+    """
+    return [
+        match.group(1).upper()
+        for match in _COLUMN_PREFIX_IDENT_RE.finditer(where_text)
+    ]
+
+
+_COLUMN_PREFIX_IDENT_RE = re.compile(
+    r"\b((?:N|V|F|D|FIC|LD|SETUP|B)_[A-Za-z0-9_]+)\b"
+)
+
+
+def _extract_primary_from_table(sql: str) -> Optional[str]:
+    """Return the first table name after FROM (unqualified, upper-case).
+    Returns ``None`` when no FROM is found."""
+    match = _FROM_PRIMARY_RE.search(sql)
+    if not match:
+        return None
+    raw = match.group(1)
+    return raw.split(".")[-1].upper()
 
 
 def _unwrap_retry_error(exc: BaseException) -> BaseException:

@@ -144,7 +144,7 @@ def agent_with_graph(guardian, sample_graph) -> DataQueryAgent:
 # ---------------------------------------------------------------------
 
 def test_A_schema_catalog_attributes_columns_per_table(agent_with_graph):
-    text, mapping = agent_with_graph._build_schema_catalog("OFSMDM")
+    text, mapping, _column_types = agent_with_graph._build_schema_catalog("OFSMDM")
 
     assert set(mapping.keys()) == {"STG_GL_DATA", "STG_PRODUCT_PROCESSOR"}
 
@@ -165,7 +165,7 @@ def test_A_schema_catalog_attributes_columns_per_table(agent_with_graph):
 # ---------------------------------------------------------------------
 
 def test_B_prompt_has_per_table_blocks_not_flat_dump(agent_with_graph):
-    text, _ = agent_with_graph._build_schema_catalog("OFSMDM")
+    text, _mapping, _column_types = agent_with_graph._build_schema_catalog("OFSMDM")
 
     # The flat "Known columns in schema" header was the hallucination
     # accelerant — it must not appear in the new catalog.
