@@ -27,7 +27,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onNew, onDelete,
                 />
               </svg>
             </div>
-            <div>
+            <div style={{ fontFamily: "'Tomorrow', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
               <h1 className="text-sm font-bold text-white leading-tight tracking-tight">R-TIE</h1>
               <p className="text-[11px] text-sidebar-muted font-medium">Regulatory Trace Engine</p>
             </div>

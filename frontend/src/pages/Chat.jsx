@@ -100,13 +100,12 @@ function EmptyState({ onSend }) {
   return (
     <div className="h-full flex items-center justify-center p-8">
       <div className="text-center max-w-lg">
-        {/* Wordmark — serif display, Claude-style brand moment */}
+        {/* Wordmark — Tomorrow display */}
         <h1
           className="mb-3 text-text-primary"
           style={{
-            fontFamily: "'Instrument Serif', 'Times New Roman', serif",
-            fontStyle: 'italic',
-            fontWeight: 400,
+            fontFamily: "'Tomorrow', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            fontWeight: 700,
             fontSize: '76px',
             lineHeight: 1,
             letterSpacing: '-0.02em',
@@ -114,7 +113,10 @@ function EmptyState({ onSend }) {
         >
           R-TIE
         </h1>
-        <p className="text-sm text-text-secondary mb-10 leading-relaxed max-w-md mx-auto">
+        <p
+          className="text-sm text-text-secondary mb-10 leading-relaxed max-w-md mx-auto"
+          style={{ fontFamily: "'Tomorrow', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}
+        >
           Trace, explain, and reason about your Oracle OFSAA system — with
           cited answers grounded in the source.
         </p>
