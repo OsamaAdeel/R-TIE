@@ -31,6 +31,7 @@ from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_column_index
+from src.telemetry import stage_timer
 from src.tools.sql_guardian import (
     CharPaddingError,
     ColumnResidencyError,
@@ -203,7 +204,8 @@ class DataQueryAgent:
         filters = dict(filters or {})
 
         try:
-            catalog_text, tables_to_columns, column_types = self._build_schema_catalog(schema)
+            with stage_timer("data_query_schema_catalog_build", correlation_id):
+                catalog_text, tables_to_columns, column_types = self._build_schema_catalog(schema)
         except Exception as exc:
             logger.warning("DataQuery catalog build failed: %s", exc)
             catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
@@ -233,13 +235,14 @@ class DataQueryAgent:
             )
 
         try:
-            plan = await self._generate_sql(
-                user_query=user_query,
-                filters=filters,
-                catalog_text=catalog_text,
-                provider=provider,
-                model=model,
-            )
+            with stage_timer("llm_api_sql_generate", correlation_id, provider=(provider or "default")):
+                plan = await self._generate_sql(
+                    user_query=user_query,
+                    filters=filters,
+                    catalog_text=catalog_text,
+                    provider=provider,
+                    model=model,
+                )
         except Exception as exc:
             logger.error("DataQuery SQL generation failed: %s", exc)
             return self._error_result(
@@ -365,7 +368,8 @@ class DataQueryAgent:
                 self._guardian.validate(count_sql)
                 if params:
                     self._guardian.check_bind_variables(count_sql, params)
-                count_rows = await self._schema_tools.execute_raw(count_sql, params)
+                with stage_timer("oracle_count_precheck", correlation_id):
+                    count_rows = await self._schema_tools.execute_raw(count_sql, params)
                 total_rows = int(count_rows[0][0]) if count_rows else 0
             except Exception as exc:
                 logger.warning("DataQuery count pre-check failed: %s", exc)
@@ -433,7 +437,8 @@ class DataQueryAgent:
 
         # Execute
         try:
-            rows = await self._schema_tools.execute_raw(exec_sql, params)
+            with stage_timer("oracle_query_execute", correlation_id, query_kind=query_kind):
+                rows = await self._schema_tools.execute_raw(exec_sql, params)
         except Exception as exc:
             inner = _unwrap_retry_error(exc)
             ora_code, ora_message = _extract_oracle_error(inner)
@@ -482,13 +487,14 @@ class DataQueryAgent:
         # against a populated target table is a classic symptom of the
         # CHAR/VARCHAR2 padding trap or similar silent filter failures.
         # Downgrades the response from VERIFIED to UNVERIFIED.
-        suspicious, suspicion_reason = await self._check_suspicious_result(
-            sql=exec_sql,
-            query_kind=query_kind,
-            columns=columns,
-            rows=materialised,
-            params=params,
-        )
+        with stage_timer("suspicious_result_check", correlation_id):
+            suspicious, suspicion_reason = await self._check_suspicious_result(
+                sql=exec_sql,
+                query_kind=query_kind,
+                columns=columns,
+                rows=materialised,
+                params=params,
+            )
         if suspicious:
             warnings = list(warnings) + [
                 f"suspicious_zero_result: {suspicion_reason}"

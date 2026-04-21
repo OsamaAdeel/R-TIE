@@ -58,6 +58,7 @@ from src.monitoring.health import HealthChecker
 from src.middleware.correlation_id import CorrelationIdMiddleware, get_correlation_id
 from src.llm_factory import list_available_models, get_default_provider, get_default_model
 from src.logger import get_logger
+from src.telemetry import stage_timer, mark_event
 import yaml
 
 logger = get_logger(__name__, concern="app")
@@ -597,6 +598,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
     model = request.model
 
     async def event_stream():
+        mark_event("request_arrived", correlation_id, endpoint="/v1/stream")
         try:
             # Check for slash commands — not streamable, return as single event
             cmd = _orchestrator.check_command(request.query)
@@ -653,9 +655,10 @@ async def stream_endpoint(request: QueryRequest, req: Request):
 
             # Stage 1: Classify
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Understanding your question...'})}\n\n"
-            state = await _orchestrator.classify_query(
-                request.query, state, provider=provider, model=model
-            )
+            with stage_timer("orchestrator_classify", correlation_id):
+                state = await _orchestrator.classify_query(
+                    request.query, state, provider=provider, model=model
+                )
 
             if state.get("partial_flag"):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
@@ -708,7 +711,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # DECLINED response. This prevents the semantic-search fallback
             # from fabricating an explanation from adjacent functions.
             if state.get("query_type") in ("COLUMN_LOGIC", "VARIABLE_TRACE", "FUNCTION_LOGIC"):
-                precheck = _run_function_precheck(request.query, correlation_id)
+                with stage_timer("function_precheck", correlation_id):
+                    precheck = _run_function_precheck(request.query, correlation_id)
                 if precheck is not None:
                     async for event in _stream_declined_response(precheck):
                         yield event
@@ -728,15 +732,18 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
             )
             search_query = state.get("object_name", state["raw_query"])
-            query_embedding = await embeddings.aembed_query(search_query)
-            results = await _vector_store.search(query_embedding=query_embedding, top_k=5)
+            with stage_timer("embedding_create", correlation_id):
+                query_embedding = await embeddings.aembed_query(search_query)
+            with stage_timer("vector_search", correlation_id):
+                results = await _vector_store.search(query_embedding=query_embedding, top_k=5)
             state["search_results"] = results
             state["schema"] = state.get("schema") or "OFSMDM"
 
             # Stage 3: Fetch source code
             fn_names = list(dict.fromkeys(r["function_name"] for r in results)) if results else []
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': f'Reading source code for {len(fn_names)} functions...', 'functions': fn_names})}\n\n"
-            state = await _metadata_interpreter.fetch_multi_logic(state)
+            with stage_timer("metadata_fetch_multi", correlation_id, functions=len(fn_names)):
+                state = await _metadata_interpreter.fetch_multi_logic(state)
 
             # Send metadata event
             meta = {
@@ -765,26 +772,31 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         g_query_type = "variable"
                         g_search_term = state["raw_query"]
 
-                    node_ids = resolve_query_to_nodes(
-                        query_type=g_query_type,
-                        target_variable=g_search_term if g_query_type == "variable" else "",
-                        function_name=g_search_term if g_query_type == "function" else "",
-                        table_name="",
-                        schema=g_schema,
-                        redis_client=_graph_redis,
-                    )
+                    with stage_timer("graph_resolve_nodes", correlation_id):
+                        node_ids = resolve_query_to_nodes(
+                            query_type=g_query_type,
+                            target_variable=g_search_term if g_query_type == "variable" else "",
+                            function_name=g_search_term if g_query_type == "function" else "",
+                            table_name="",
+                            schema=g_schema,
+                            redis_client=_graph_redis,
+                        )
 
                     if node_ids:
-                        fetched_nodes = fetch_nodes_by_ids(node_ids, g_schema, _graph_redis)
-                        relevant_edges = fetch_relevant_edges(node_ids, g_schema, _graph_redis)
-                        exec_order = determine_execution_order(fetched_nodes, relevant_edges)
-                        payload = assemble_llm_payload(
-                            nodes=fetched_nodes,
-                            edges=relevant_edges,
-                            target_variable=g_search_term,
-                            user_query=state["raw_query"],
-                            execution_order=exec_order,
-                        )
+                        with stage_timer("graph_fetch_nodes", correlation_id, node_count=len(node_ids)):
+                            fetched_nodes = fetch_nodes_by_ids(node_ids, g_schema, _graph_redis)
+                        with stage_timer("graph_fetch_edges", correlation_id):
+                            relevant_edges = fetch_relevant_edges(node_ids, g_schema, _graph_redis)
+                        with stage_timer("graph_determine_exec_order", correlation_id):
+                            exec_order = determine_execution_order(fetched_nodes, relevant_edges)
+                        with stage_timer("graph_assemble_payload", correlation_id):
+                            payload = assemble_llm_payload(
+                                nodes=fetched_nodes,
+                                edges=relevant_edges,
+                                target_variable=g_search_term,
+                                user_query=state["raw_query"],
+                                execution_order=exec_order,
+                            )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
                         logger.info("Using graph pipeline for query: %s", state.get("raw_query"))
@@ -801,18 +813,25 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # Hierarchy header (W39): emitted once before branching so every
             # streaming path — variable tracer, graph-pipeline, and the
             # plain semantic explainer — receives the same context line.
-            hierarchy_prefix = _logic_explainer.hierarchy_header(state)
+            with stage_timer("hierarchy_header", correlation_id):
+                hierarchy_prefix = _logic_explainer.hierarchy_header(state)
             if hierarchy_prefix:
                 full_markdown += hierarchy_prefix
+                mark_event("first_sse_token_emit", correlation_id, source="hierarchy_header")
                 yield f"event: token\ndata: {json_mod.dumps(hierarchy_prefix)}\n\n"
 
             if state.get("llm_payload"):
                 # Graph pipeline produced a structured payload — use it
-                async for token in _logic_explainer.stream_semantic(
-                    state, provider, model
-                ):
-                    full_markdown += token
-                    yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+                with stage_timer("llm_stream_semantic_graph", correlation_id):
+                    _first_token = True
+                    async for token in _logic_explainer.stream_semantic(
+                        state, provider, model
+                    ):
+                        if _first_token:
+                            mark_event("llm_first_token", correlation_id, branch="graph_payload")
+                            _first_token = False
+                        full_markdown += token
+                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
             elif state.get("query_type") == "VARIABLE_TRACE":
                 # Run variable resolver + extraction first (fast, non-streaming)
                 target_var = state.get("target_variable", "").strip()
@@ -823,34 +842,53 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         functions_source[fn_name] = src
 
                 if target_var and functions_source:
-                    seeds = await _variable_tracer.resolve_variable_names(
-                        target_var, functions_source, provider, model
-                    )
-                    alias_map = _variable_tracer.build_alias_map(seeds, functions_source)
-                    tagged = _variable_tracer.extract_relevant_lines(
-                        target_var, functions_source, alias_map, seeds
-                    )
-                    chain_text = _variable_tracer.build_transformation_chain(
-                        target_var, tagged, seeds
-                    )
-                    async for token in _variable_tracer.stream_chain(
-                        target_var, chain_text, request.query, provider, model
-                    ):
-                        full_markdown += token
-                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+                    with stage_timer("variable_resolve_llm", correlation_id):
+                        seeds = await _variable_tracer.resolve_variable_names(
+                            target_var, functions_source, provider, model
+                        )
+                    with stage_timer("variable_alias_map_build", correlation_id):
+                        alias_map = _variable_tracer.build_alias_map(seeds, functions_source)
+                    with stage_timer("variable_relevant_lines_extract", correlation_id):
+                        tagged = _variable_tracer.extract_relevant_lines(
+                            target_var, functions_source, alias_map, seeds
+                        )
+                    with stage_timer("variable_transformation_chain_build", correlation_id):
+                        chain_text = _variable_tracer.build_transformation_chain(
+                            target_var, tagged, seeds
+                        )
+                    with stage_timer("llm_stream_variable_trace", correlation_id):
+                        _first_token = True
+                        async for token in _variable_tracer.stream_chain(
+                            target_var, chain_text, request.query, provider, model
+                        ):
+                            if _first_token:
+                                mark_event("llm_first_token", correlation_id, branch="variable_trace")
+                                _first_token = False
+                            full_markdown += token
+                            yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
                 else:
                     # Fallback to semantic stream
+                    with stage_timer("llm_stream_semantic_fallback_vt", correlation_id):
+                        _first_token = True
+                        async for token in _logic_explainer.stream_semantic(
+                            state, provider, model
+                        ):
+                            if _first_token:
+                                mark_event("llm_first_token", correlation_id, branch="semantic_fallback_vt")
+                                _first_token = False
+                            full_markdown += token
+                            yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+            else:
+                with stage_timer("llm_stream_semantic_fallback", correlation_id):
+                    _first_token = True
                     async for token in _logic_explainer.stream_semantic(
                         state, provider, model
                     ):
+                        if _first_token:
+                            mark_event("llm_first_token", correlation_id, branch="semantic_fallback")
+                            _first_token = False
                         full_markdown += token
                         yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
-            else:
-                async for token in _logic_explainer.stream_semantic(
-                    state, provider, model
-                ):
-                    full_markdown += token
-                    yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
 
             # --- Grounding evaluation (W37): decide VERIFIED vs UNVERIFIED
             # based on citations, identifier presence, and contradiction
@@ -858,13 +896,14 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # ignored what the LLM actually produced.
             multi_source = state.get("multi_source", {}) or {}
             functions_analyzed = list(multi_source.keys())
-            grounding = evaluate_grounding(
-                raw_query=request.query,
-                markdown=full_markdown,
-                multi_source=multi_source,
-                functions_analyzed=functions_analyzed,
-                query_type=state.get("query_type", ""),
-            )
+            with stage_timer("grounding_evaluate", correlation_id):
+                grounding = evaluate_grounding(
+                    raw_query=request.query,
+                    markdown=full_markdown,
+                    multi_source=multi_source,
+                    functions_analyzed=functions_analyzed,
+                    query_type=state.get("query_type", ""),
+                )
 
             # Stream caveat tokens before closing so the user sees them inline.
             final_markdown = full_markdown
@@ -874,8 +913,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     "**Caveats:**\n"
                     + "\n".join(f"- {msg}" for msg in grounding["sanity_messages"])
                 )
-                for chunk in _chunk_text(caveat_block):
-                    yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+                with stage_timer("caveat_stream", correlation_id, chunks=len(caveat_block) // 4 + 1):
+                    for chunk in _chunk_text(caveat_block):
+                        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
                 final_markdown = full_markdown + caveat_block
 
             done_payload = {
@@ -891,14 +931,20 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     "summary": final_markdown[:200],
                 },
             }
-            yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
+            with stage_timer("done_emit", correlation_id):
+                yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
 
         except Exception as exc:
             logger.error(f"Stream failed: {exc}\n{traceback.format_exc()}")
             yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
 
+    async def _timed_event_stream():
+        with stage_timer("total_request", correlation_id):
+            async for event in event_stream():
+                yield event
+
     return StreamingResponse(
-        event_stream(),
+        _timed_event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -946,27 +992,29 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
 
     try:
         if query_type == "DIFFERENCE_EXPLANATION":
-            result = await _value_tracer.explain_difference(
-                target_variable=target,
-                filters=filters,
-                schema=schema,
-                bank_value=float(state.get("phase2_expected_value") or 0.0),
-                system_value=float(state.get("phase2_actual_value") or 0.0),
-                user_query=user_query,
-                provider=provider,
-                model=model,
-            )
+            with stage_timer("phase2_explain_difference", correlation_id):
+                result = await _value_tracer.explain_difference(
+                    target_variable=target,
+                    filters=filters,
+                    schema=schema,
+                    bank_value=float(state.get("phase2_expected_value") or 0.0),
+                    system_value=float(state.get("phase2_actual_value") or 0.0),
+                    user_query=user_query,
+                    provider=provider,
+                    model=model,
+                )
         else:
             # VALUE_TRACE (and anything else mis-routed here) -> single-row trace.
-            result = await _value_tracer.trace_value(
-                target_variable=target,
-                filters=filters,
-                schema=schema,
-                expected_value=state.get("phase2_expected_value"),
-                user_query=user_query,
-                provider=provider,
-                model=model,
-            )
+            with stage_timer("phase2_trace_value", correlation_id):
+                result = await _value_tracer.trace_value(
+                    target_variable=target,
+                    filters=filters,
+                    schema=schema,
+                    expected_value=state.get("phase2_expected_value"),
+                    user_query=user_query,
+                    provider=provider,
+                    model=model,
+                )
     except Exception as exc:
         logger.error(f"Phase 2 trace failed: {exc}\n{traceback.format_exc()}")
         yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
@@ -1011,8 +1059,10 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
     # The explanation is already produced + sanity-checked. Stream it as
     # whitespace-preserving chunks so the frontend renders it progressively.
     full_markdown = result.get("explanation") or "(no explanation available)"
-    for chunk in _chunk_text(full_markdown):
-        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    mark_event("first_sse_token_emit", correlation_id, branch="phase2_rechunk")
+    with stage_timer("phase2_token_stream", correlation_id, chars=len(full_markdown)):
+        for chunk in _chunk_text(full_markdown):
+            yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
 
     done_payload = {
         "type": query_type.lower(),
@@ -1028,7 +1078,8 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         "evidence": result.get("evidence"),
         "verification_sql": result.get("verification_sql"),
     }
-    yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+    with stage_timer("done_emit", correlation_id, route="phase2"):
+        yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
 
 
 def _chunk_text(text: str, chunk_size: int = 4):
@@ -1069,14 +1120,15 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Executing read-only query against Oracle...'})}\n\n"
 
     try:
-        result = await _data_query.answer(
-            user_query=user_query,
-            schema=schema,
-            filters=filters,
-            provider=provider,
-            model=model,
-            target_variable=(state.get("target_variable") or None),
-        )
+        with stage_timer("data_query_answer", correlation_id):
+            result = await _data_query.answer(
+                user_query=user_query,
+                schema=schema,
+                filters=filters,
+                provider=provider,
+                model=model,
+                target_variable=(state.get("target_variable") or None),
+            )
     except Exception as exc:
         logger.error(f"DATA_QUERY failed: {exc}\n{traceback.format_exc()}")
         yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
@@ -1110,8 +1162,10 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Formatting results...'})}\n\n"
 
     explanation = result.get("explanation") or "(no explanation available)"
-    for chunk in _chunk_text(explanation):
-        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    mark_event("first_sse_token_emit", correlation_id, branch="data_query_rechunk")
+    with stage_timer("data_query_token_stream", correlation_id, chars=len(explanation)):
+        for chunk in _chunk_text(explanation):
+            yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
 
     status = result.get("status")
     suspicious = bool(result.get("suspicious"))
@@ -1145,7 +1199,8 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "requested_dates": result.get("requested_dates") or [],
         "verification_sql": result.get("verification_sql"),
     }
-    yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+    with stage_timer("done_emit", correlation_id, route="data_query"):
+        yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
 
 
 def _run_function_precheck(query: str, correlation_id: str) -> Optional[Dict[str, Any]]:

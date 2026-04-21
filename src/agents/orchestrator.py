@@ -23,6 +23,7 @@ from src.llm_factory import create_llm
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_function_graph
+from src.telemetry import stage_timer
 
 logger = get_logger(__name__, concern="app")
 
@@ -360,7 +361,8 @@ class Orchestrator:
             HumanMessage(content=query),
         ]
 
-        response = await llm.ainvoke(messages)
+        with stage_timer("llm_api_classify", correlation_id, provider=(provider or "default")):
+            response = await llm.ainvoke(messages)
         raw_content = response.content.strip()
 
         # Strip markdown fences if present
