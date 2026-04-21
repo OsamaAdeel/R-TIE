@@ -203,7 +203,7 @@ class VariableTracer:
             provider=provider or "openai",
             model=model or "gpt-4o",
             temperature=0,
-            max_tokens=500,
+            max_tokens=4000,
             json_mode=(provider or "openai") != "anthropic",
         )
 
