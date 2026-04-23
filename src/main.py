@@ -62,6 +62,7 @@ from src.telemetry import stage_timer, mark_event
 import yaml
 
 logger = get_logger(__name__, concern="app")
+_w43_diag = get_logger("rtie.w43_diag", concern="app")
 
 # Load environment based on ENVIRONMENT variable
 env = os.getenv("ENVIRONMENT", "dev")
@@ -772,6 +773,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         g_query_type = "variable"
                         g_search_term = state["raw_query"]
 
+                    _w43_diag.info(
+                        "[W43_DIAG] correlation_id=%s stage=graph_pipeline_entry"
+                        " query_type=%r target_variable=%r object_name_len=%d"
+                        " g_query_type=%r g_search_term=%r g_schema=%r",
+                        correlation_id,
+                        state.get("query_type"),
+                        target_var or None,
+                        len(obj_name),
+                        g_query_type,
+                        g_search_term[:120] if g_search_term else "",
+                        g_schema,
+                    )
+
                     with stage_timer("graph_resolve_nodes", correlation_id):
                         node_ids = resolve_query_to_nodes(
                             query_type=g_query_type,
@@ -781,6 +795,14 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             schema=g_schema,
                             redis_client=_graph_redis,
                         )
+
+                    _w43_diag.info(
+                        "[W43_DIAG] correlation_id=%s stage=graph_resolve_nodes_result"
+                        " node_ids_count=%d fallback_triggered=%s",
+                        correlation_id,
+                        len(node_ids),
+                        not bool(node_ids),
+                    )
 
                     if node_ids:
                         with stage_timer("graph_fetch_nodes", correlation_id, node_count=len(node_ids)):
@@ -799,10 +821,31 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
+                        _w43_diag.info(
+                            "[W43_DIAG] correlation_id=%s stage=graph_path_selected"
+                            " fetched_nodes=%d edges=%d payload_chars=%d",
+                            correlation_id,
+                            len(fetched_nodes),
+                            len(relevant_edges),
+                            len(payload),
+                        )
                         logger.info("Using graph pipeline for query: %s", state.get("raw_query"))
                     else:
+                        _w43_diag.info(
+                            "[W43_DIAG] correlation_id=%s stage=fallback_selected"
+                            " reason=no_nodes_returned g_query_type=%r g_search_term=%r",
+                            correlation_id,
+                            g_query_type,
+                            g_search_term[:120] if g_search_term else "",
+                        )
                         logger.info("Graph returned no nodes, falling back to raw source for query: %s", state.get("raw_query"))
                 except Exception as exc:
+                    _w43_diag.warning(
+                        "[W43_DIAG] correlation_id=%s stage=graph_pipeline_exception"
+                        " exc=%r fallback_triggered=true",
+                        correlation_id,
+                        str(exc)[:200],
+                    )
                     logger.warning("Graph pipeline failed (non-fatal), falling back to raw source: %s", exc)
 
             # Stage 4: Generate explanation
