@@ -16,6 +16,7 @@ from src.parsing.serializer import from_json
 from src.logger import get_logger
 
 logger = get_logger(__name__, concern="app")
+_w43_diag = get_logger("rtie.w43_diag", concern="app")
 
 
 # ---------------------------------------------------------------------------
@@ -53,10 +54,30 @@ def resolve_query_to_nodes(
         Matching node IDs.
     """
     qt = query_type.strip().lower()
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_query_to_nodes_entry"
+        " query_type=%r qt=%r target_variable=%r function_name=%r"
+        " table_name=%r schema=%r",
+        query_type, qt,
+        target_variable[:80] if target_variable else None,
+        function_name[:80] if function_name else None,
+        table_name or None,
+        schema,
+    )
     if qt == "variable":
-        return resolve_variable_nodes(target_variable, schema, redis_client)
+        result = resolve_variable_nodes(target_variable, schema, redis_client)
+        _w43_diag.info(
+            "[W43_DIAG] stage=resolve_query_to_nodes_result branch=variable"
+            " node_count=%d", len(result),
+        )
+        return result
     if qt == "function":
-        return resolve_function_nodes(function_name, schema, redis_client)
+        result = resolve_function_nodes(function_name, schema, redis_client)
+        _w43_diag.info(
+            "[W43_DIAG] stage=resolve_query_to_nodes_result branch=function"
+            " node_count=%d", len(result),
+        )
+        return result
     if qt == "table":
         return resolve_table_nodes(table_name, schema, redis_client)
 
@@ -160,10 +181,35 @@ def resolve_variable_nodes(
     """
     aliases = resolve_aliases(target_variable, schema, redis_client)
 
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_variable_nodes_entry"
+        " target_variable=%r schema=%r resolved_aliases=%r"
+        " target_looks_like_function=%s",
+        target_variable[:80] if target_variable else None,
+        schema,
+        aliases,
+        bool(target_variable and "_" in target_variable and target_variable == target_variable.upper() and len(target_variable) > 8),
+    )
+
     col_index = get_column_index(redis_client, schema)
     if col_index is None:
+        _w43_diag.info(
+            "[W43_DIAG] stage=resolve_variable_nodes_result"
+            " target_variable=%r col_index_present=false node_count=0",
+            target_variable[:80] if target_variable else None,
+        )
         logger.warning("No column index found for schema %s", schema)
         return []
+
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_variable_nodes_index_lookup"
+        " schema=%r col_index_size=%d aliases=%r"
+        " alias_hits=%r",
+        schema,
+        len(col_index),
+        aliases,
+        {a: col_index.get(a.upper(), []) for a in aliases},
+    )
 
     # Cache per-function graphs so the inactive-filter lookup stays O(1)
     # after a one-time fetch per function.
@@ -233,6 +279,14 @@ def resolve_variable_nodes(
 
     logger.debug("resolve_variable_nodes: after edge walk, total=%d", len(result))
 
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_variable_nodes_result"
+        " target_variable=%r direct_nodes=%d after_edge_walk=%d",
+        target_variable[:80] if target_variable else None,
+        len(direct_nodes),
+        len(result),
+    )
+
     return result
 
 
@@ -249,13 +303,42 @@ def resolve_function_nodes(
 
     Node IDs are returned as ``"FUNCTION_NAME:node_id"``.
     """
+    from src.parsing.store import REDIS_KEYS
+    candidate_key = REDIS_KEYS["function_graph"].format(schema=schema, function_name=function_name)
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_function_nodes_entry"
+        " function_name=%r schema=%r redis_key_attempted=%r"
+        " function_name_len=%d function_name_is_multiword=%s",
+        function_name[:80] if function_name else None,
+        schema,
+        candidate_key[:120],
+        len(function_name) if function_name else 0,
+        " " in (function_name or ""),
+    )
     graph = get_function_graph(redis_client, schema, function_name)
     if graph is None:
+        _w43_diag.info(
+            "[W43_DIAG] stage=resolve_function_nodes_result"
+            " redis_key=%r cache_hit=false node_count=0"
+            " diagnosis='key_miss_or_deserialize_error'",
+            candidate_key[:120],
+        )
         logger.warning("No graph found for function %s in schema %s", function_name, schema)
         return []
 
     nodes = graph.get("nodes", [])
     fn = graph.get("function", function_name)
+    node_types = list({n.get("type", "UNKNOWN") for n in nodes})
+    has_hierarchy = any("hierarchy" in n for n in nodes)
+    _w43_diag.info(
+        "[W43_DIAG] stage=resolve_function_nodes_result"
+        " redis_key=%r cache_hit=true node_count=%d"
+        " node_types=%r has_hierarchy=%s",
+        candidate_key[:120],
+        len(nodes),
+        node_types,
+        has_hierarchy,
+    )
     return [f"{fn}:{node['id']}" for node in nodes if "id" in node]
 
 
