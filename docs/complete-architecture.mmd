@@ -1,0 +1,240 @@
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize': '14px', 'fontFamily': 'Inter, system-ui, sans-serif'}}}%%
+graph TB
+    %% ============ USER LAYER ============
+    subgraph CLIENT["👤 CLIENT LAYER"]
+        direction LR
+        USER(["User<br/><i>Analyst / Engineer</i>"])
+        CLI["CLI<br/><i>cli.py ask</i>"]
+        UI["React + Vite UI<br/><i>localhost:5173</i><br/>Chat • SSE • Slash cmds"]
+    end
+
+    %% ============ API GATEWAY ============
+    subgraph APILAYER["🌐 API LAYER — FastAPI (localhost:8000)"]
+        direction LR
+        STREAM["POST /v1/stream<br/><i>SSE streaming endpoint</i>"]
+        HEALTH["GET /health<br/><i>Dependency checks</i>"]
+        MODELS["GET /v1/models<br/><i>List LLM providers</i>"]
+        MID["Middleware<br/><i>Correlation ID • Retry • CORS</i>"]
+    end
+
+    %% ============ ORCHESTRATION ============
+    subgraph ORCHLAYER["🧭 ORCHESTRATION LAYER — LangGraph StateGraph"]
+        direction TB
+        ORC["Orchestrator<br/><i>Classifier LLM call</i><br/>7 query types"]
+        ROUTER{{"Conditional Router"}}
+        STATE["LogicState<br/><i>TypedDict</i>"]
+        VALIDATOR["Validator<br/><i>Output + confidence</i>"]
+        RENDERER["Renderer<br/><i>Final assembly</i>"]
+    end
+
+    %% ============ THREE ENGINES ============
+    subgraph ENGINES["⚙️ QUERY ENGINES"]
+        direction TB
+
+        subgraph LOGIC["Phase 1 — LOGIC ENGINE"]
+            LE["Logic Explainer<br/><i>logic_explainer.py</i>"]
+            QE["Query Engine<br/><i>query_engine.py</i><br/>alias→col→nodes→payload"]
+            VT["Variable Tracer<br/><i>variable_tracer.py</i><br/><b>Fallback</b>"]
+        end
+
+        subgraph VALUE["Phase 2 — VALUE ENGINE"]
+            RI["Row Inspector<br/><i>row_inspector.py</i><br/>Fetches target row first"]
+            OC["Origin Classifier<br/><i>origin_classifier.py</i><br/>PLSQL / ETL / UNKNOWN"]
+            TR["Trace Router<br/><i>trace_router.py</i>"]
+            EB["Evidence Builder<br/><i>evidence_builder.py</i>"]
+            P2E["Phase2 Explainer<br/><i>explainer.py</i><br/>Hallucination-forbidden"]
+        end
+
+        subgraph DATA["Option A — DATA ENGINE"]
+            DQ["Data Query Agent<br/><i>data_query.py</i><br/>NL → SQL"]
+            SG["SQL Guardian<br/><i>sql_guardian.py</i><br/>SELECT-only • AST parse"]
+            RC["Row Count Pre-check<br/><i>10K reject / 100-10K ask</i>"]
+            RF["Result Formatter<br/><i>Deterministic markdown</i>"]
+        end
+    end
+
+    %% ============ SUPPORT COMPONENTS ============
+    subgraph SUPPORT["🔧 SUPPORT COMPONENTS"]
+        direction LR
+        MI["Metadata Interpreter<br/><i>Source code fetch</i><br/>Redis → Oracle → Disk"]
+        SS["Semantic Search<br/><i>OpenAI embeddings<br/>RediSearch KNN</i>"]
+        ORIGINS["Origins Catalog<br/><i>origins_catalog.py</i><br/>Auto-derived from graph"]
+        CM["Cache Manager<br/><i>Slash commands</i>"]
+    end
+
+    %% ============ STARTUP PIPELINE ============
+    subgraph STARTUP["🚀 STARTUP — Graph Parsing Pipeline (one-time per deploy)"]
+        direction LR
+        SQL[(".sql files<br/><i>db/modules/*/functions</i>")]
+        PARSER["1. Parser<br/><i>Regex blocks<br/>Comment stripping</i>"]
+        BUILDER["2. Builder<br/><i>Typed nodes<br/>column_maps</i>"]
+        INDEXER["3. Indexer<br/><i>Cross-function edges<br/>Global column index</i>"]
+        SERIALIZER["4. Serializer<br/><i>MessagePack<br/>86.6% compression</i>"]
+        IDX["Vector Indexer<br/><i>OpenAI embeddings<br/>per function</i>"]
+    end
+
+    %% ============ LLM LAYER ============
+    subgraph LLMLAYER["🤖 LLM LAYER — llm_factory.py"]
+        direction LR
+        OAI["OpenAI<br/><i>gpt-4o-mini (default)<br/>text-embedding-3-small</i>"]
+        ANT["Anthropic<br/><i>Claude Sonnet<br/>(optional, UI-selectable)</i>"]
+    end
+
+    %% ============ DATA LAYER ============
+    subgraph DATALAYER["💾 DATA LAYER"]
+        direction LR
+        REDIS[("Redis Stack<br/><i>port 6379</i><br/>• Graph store (MessagePack)<br/>• Column index<br/>• Vector index (RediSearch)<br/>• Origins catalog<br/>• Source cache")]
+        PG[("PostgreSQL<br/><i>port 5432</i><br/>LangGraph checkpointer<br/>Conversation state")]
+        ORACLE[("Oracle OFSAA FSAPPS<br/><i>port 1521 • READ-ONLY</i><br/>• OFSMDM schema<br/>• OFSERM schema<br/>• Real row data")]
+    end
+
+    %% ============ OBSERVABILITY ============
+    subgraph OBS["📊 OBSERVABILITY"]
+        LS["LangSmith<br/><i>Tracing (optional)</i>"]
+        LOG["Structured Logs<br/><i>Correlation ID per request</i>"]
+        HEALTHMON["Health Monitor<br/><i>monitoring/health.py</i>"]
+    end
+
+    %% ============ CONNECTIONS — RUNTIME ============
+    USER --> UI
+    USER --> CLI
+    UI -- "HTTP + SSE" --> STREAM
+    CLI --> STREAM
+    STREAM --> MID --> ORC
+    ORC --> ROUTER
+    ORC -. "reads/writes" .-> STATE
+
+    ROUTER -- "VARIABLE_TRACE<br/>COLUMN_LOGIC<br/>FUNCTION_LOGIC" --> LE
+    ROUTER -- "VALUE_TRACE<br/>DIFFERENCE_EXPLANATION" --> RI
+    ROUTER -- "DATA_QUERY" --> DQ
+    ROUTER -- "UNSUPPORTED" --> RENDERER
+
+    %% Logic engine flow
+    LE --> QE
+    QE -- "miss" --> VT
+    QE --> REDIS
+    VT --> MI
+
+    %% Value engine flow
+    RI --> ORACLE
+    RI --> OC
+    OC --> ORIGINS
+    OC --> TR
+    TR --> EB
+    EB --> QE
+    EB --> ORACLE
+    EB --> P2E
+
+    %% Data engine flow
+    DQ --> SG
+    SG --> RC
+    RC --> ORACLE
+    ORACLE --> RF
+
+    %% Support
+    MI --> REDIS
+    MI --> ORACLE
+    SS --> REDIS
+    ORC --> SS
+    ORIGINS --> REDIS
+
+    %% LLM calls
+    ORC -. "classify" .-> OAI
+    LE -. "explain" .-> LLMLAYER
+    P2E -. "explain" .-> LLMLAYER
+    DQ -. "NL → SQL" .-> LLMLAYER
+    VT -. "resolve + explain" .-> LLMLAYER
+    IDX -. "embed" .-> OAI
+
+    %% Output
+    LE --> VALIDATOR
+    P2E --> VALIDATOR
+    RF --> VALIDATOR
+    VALIDATOR --> RENDERER
+    RENDERER -- "SSE tokens<br/>stage • meta • token • done" --> UI
+
+    %% Checkpointing
+    ORC -. "checkpoint" .-> PG
+
+    %% ============ CONNECTIONS — STARTUP ============
+    SQL --> PARSER --> BUILDER --> INDEXER --> SERIALIZER --> REDIS
+    SQL --> IDX --> REDIS
+    REDIS -. "build on boot" .-> ORIGINS
+
+    %% ============ OBSERVABILITY ============
+    ORC -. "traces" .-> LS
+    LE -. "traces" .-> LS
+    P2E -. "traces" .-> LS
+    DQ -. "traces" .-> LS
+    STREAM -. "logs" .-> LOG
+    HEALTH --> HEALTHMON
+    HEALTHMON --> REDIS
+    HEALTHMON --> PG
+    HEALTHMON --> ORACLE
+
+    %% ============ STYLES ============
+    style USER fill:#1e293b,color:#fff,stroke:#fff,stroke-width:2px
+    style CLI fill:#334155,color:#fff,stroke:none
+    style UI fill:#4f46e5,color:#fff,stroke:none
+
+    style STREAM fill:#0f766e,color:#fff,stroke:none
+    style HEALTH fill:#0f766e,color:#fff,stroke:none
+    style MODELS fill:#0f766e,color:#fff,stroke:none
+    style MID fill:#14b8a6,color:#fff,stroke:none
+
+    style ORC fill:#7c3aed,color:#fff,stroke:none
+    style ROUTER fill:#a855f7,color:#fff,stroke:none
+    style STATE fill:#c084fc,color:#000,stroke:none
+    style VALIDATOR fill:#9333ea,color:#fff,stroke:none
+    style RENDERER fill:#d97706,color:#fff,stroke:none
+
+    style LE fill:#0369a1,color:#fff,stroke:none
+    style QE fill:#0284c7,color:#fff,stroke:none
+    style VT fill:#b45309,color:#fff,stroke:none
+
+    style RI fill:#059669,color:#fff,stroke:none
+    style OC fill:#10b981,color:#fff,stroke:none
+    style TR fill:#14b8a6,color:#fff,stroke:none
+    style EB fill:#059669,color:#fff,stroke:none
+    style P2E fill:#047857,color:#fff,stroke:none
+
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style SG fill:#dc2626,color:#fff,stroke:none
+    style RC fill:#ea580c,color:#fff,stroke:none
+    style RF fill:#d97706,color:#fff,stroke:none
+
+    style MI fill:#059669,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style ORIGINS fill:#0d9488,color:#fff,stroke:none
+    style CM fill:#475569,color:#fff,stroke:none
+
+    style SQL fill:#6b7280,color:#fff,stroke:none
+    style PARSER fill:#7c3aed,color:#fff,stroke:none
+    style BUILDER fill:#0369a1,color:#fff,stroke:none
+    style INDEXER fill:#059669,color:#fff,stroke:none
+    style SERIALIZER fill:#b45309,color:#fff,stroke:none
+    style IDX fill:#6d28d9,color:#fff,stroke:none
+
+    style OAI fill:#10a37f,color:#fff,stroke:none
+    style ANT fill:#d97706,color:#fff,stroke:none
+
+    style REDIS fill:#dc2626,color:#fff,stroke:none
+    style PG fill:#2563eb,color:#fff,stroke:none
+    style ORACLE fill:#9333ea,color:#fff,stroke:none
+
+    style LS fill:#f59e0b,color:#000,stroke:none
+    style LOG fill:#64748b,color:#fff,stroke:none
+    style HEALTHMON fill:#0f766e,color:#fff,stroke:none
+
+    style CLIENT fill:#f1f5f9,stroke:#1e293b,stroke-width:2px,color:#000
+    style APILAYER fill:#ccfbf1,stroke:#0f766e,stroke-width:2px,color:#000
+    style ORCHLAYER fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#000
+    style ENGINES fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#000
+    style LOGIC fill:#e0f2fe,stroke:#0369a1,stroke-width:2px,color:#000
+    style VALUE fill:#dcfce7,stroke:#059669,stroke-width:2px,color:#000
+    style DATA fill:#ffedd5,stroke:#b45309,stroke-width:2px,color:#000
+    style SUPPORT fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#000
+    style STARTUP fill:#fae8ff,stroke:#7c3aed,stroke-width:2px,color:#000
+    style LLMLAYER fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#000
+    style DATALAYER fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#000
+    style OBS fill:#f5f5f4,stroke:#44403c,stroke-width:2px,color:#000

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RTIE — Complete Architecture</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: #111a33;
+    --ink: #e6edf7;
+    --muted: #9aa6bf;
+    --accent: #7c3aed;
+    --accent2: #06b6d4;
+    --border: #1f2a48;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink);
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(90deg, #0b1020 0%, #111a33 100%);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+  header .tag { font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    background: rgba(124,58,237,.18); color: #c4b5fd; border: 1px solid rgba(124,58,237,.35); }
+  header .sub { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .spacer { flex: 1; }
+  .btn {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; transition: all .15s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: #fff; }
+  .btn.primary { background: linear-gradient(90deg, #7c3aed, #06b6d4); border: none; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+
+  .shell {
+    display: grid; grid-template-columns: 260px 1fr; height: calc(100vh - 57px);
+  }
+  aside {
+    border-right: 1px solid var(--border); padding: 16px; overflow-y: auto;
+    background: rgba(17,26,51,.4);
+  }
+  aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted); margin: 0 0 10px 0; }
+  aside .legend-item { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+  aside .chip { width: 14px; height: 14px; border-radius: 4px; flex: 0 0 14px; }
+  aside .note { font-size: 11px; color: var(--muted); margin-top: 16px; line-height: 1.5; }
+
+  main { position: relative; overflow: hidden; background:
+    radial-gradient(1200px 600px at 20% 0%, rgba(124,58,237,.10), transparent 60%),
+    radial-gradient(1000px 500px at 80% 100%, rgba(6,182,212,.08), transparent 60%),
+    var(--bg);
+  }
+  #canvas { width: 100%; height: 100%; overflow: auto; cursor: grab; }
+  #canvas.dragging { cursor: grabbing; }
+  #diagram {
+    transform-origin: 0 0;
+    padding: 40px;
+    min-width: 100%;
+    min-height: 100%;
+  }
+  #diagram svg { display: block; max-width: none !important; height: auto !important; }
+
+  .zoom-bar {
+    position: absolute; right: 18px; bottom: 18px; z-index: 5;
+    display: flex; flex-direction: column; gap: 6px;
+    background: rgba(17,26,51,.85); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 10px; padding: 6px;
+  }
+  .zoom-bar button {
+    width: 34px; height: 34px; border-radius: 6px; border: none;
+    background: transparent; color: var(--ink); font-size: 16px; cursor: pointer;
+  }
+  .zoom-bar button:hover { background: rgba(124,58,237,.2); }
+  .zoom-level { font-size: 11px; color: var(--muted); text-align: center; padding: 4px 0; }
+
+  .loading { color: var(--muted); font-size: 13px; padding: 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RTIE — Complete Architecture</h1>
+  <span class="tag">Regulatory Trace &amp; Intelligence Engine</span>
+  <span class="sub">read-only • multi-agent • BASEL-grade</span>
+  <div class="spacer"></div>
+  <div class="toolbar">
+    <button class="btn" onclick="fit()">⛶ Fit</button>
+    <button class="btn" onclick="reset()">↺ Reset</button>
+    <button class="btn primary" onclick="exportSVG()">⬇ Export SVG</button>
+    <button class="btn" onclick="exportPNG()">⬇ PNG</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside>
+    <h2>Layers</h2>
+    <div class="legend-item"><span class="chip" style="background:#4f46e5"></span>Client</div>
+    <div class="legend-item"><span class="chip" style="background:#0f766e"></span>API Gateway</div>
+    <div class="legend-item"><span class="chip" style="background:#7c3aed"></span>Orchestration (LangGraph)</div>
+    <div class="legend-item"><span class="chip" style="background:#0369a1"></span>Logic Engine (Phase 1)</div>
+    <div class="legend-item"><span class="chip" style="background:#059669"></span>Value Engine (Phase 2)</div>
+    <div class="legend-item"><span class="chip" style="background:#b45309"></span>Data Engine (Option A)</div>
+    <div class="legend-item"><span class="chip" style="background:#dc2626"></span>SQL Guardian</div>
+    <div class="legend-item"><span class="chip" style="background:#6d28d9"></span>Semantic Search</div>
+    <div class="legend-item"><span class="chip" style="background:#10a37f"></span>LLM — OpenAI</div>
+    <div class="legend-item"><span class="chip" style="background:#d97706"></span>LLM — Anthropic</div>
+    <div class="legend-item"><span class="chip" style="background:#dc2626"></span>Redis Stack</div>
+    <div class="legend-item"><span class="chip" style="background:#2563eb"></span>PostgreSQL</div>
+    <div class="legend-item"><span class="chip" style="background:#9333ea"></span>Oracle OFSAA (read-only)</div>
+
+    <h2 style="margin-top:24px">Controls</h2>
+    <div class="note">
+      <b>Drag</b> the canvas to pan.<br/>
+      <b>Ctrl + mouse wheel</b> to zoom.<br/>
+      Buttons on the right for zoom in / out / fit.<br/>
+      <b>Export</b> buttons save the diagram as SVG or PNG.
+    </div>
+
+    <h2 style="margin-top:24px">Three query types</h2>
+    <div class="note">
+      <b>Logic</b> — "how is X calculated?"<br/>
+      <b>Value</b> — "why is row Y = Z?"<br/>
+      <b>Data</b> — "what's the total of X?"
+    </div>
+  </aside>
+
+  <main>
+    <div id="canvas">
+      <div id="diagram"><div class="loading">Loading diagram…</div></div>
+    </div>
+    <div class="zoom-bar">
+      <button title="Zoom in" onclick="zoom(1.2)">+</button>
+      <div class="zoom-level" id="zoomLevel">100%</div>
+      <button title="Zoom out" onclick="zoom(1/1.2)">−</button>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "dark",
+  themeVariables: {
+    fontFamily: "Inter, system-ui, sans-serif",
+    fontSize: "14px",
+    primaryColor: "#1e293b",
+    primaryTextColor: "#fff",
+    lineColor: "#64748b",
+    background: "transparent",
+  },
+  flowchart: { htmlLabels: true, curve: "basis", padding: 18, nodeSpacing: 40, rankSpacing: 60 },
+  securityLevel: "loose",
+});
+
+const source = `
+graph TB
+    subgraph CLIENT["👤 CLIENT LAYER"]
+        direction LR
+        USER(["User<br/>Analyst / Engineer"])
+        CLI["CLI<br/>cli.py ask"]
+        UI["React + Vite UI<br/>localhost:5173<br/>Chat • SSE • Slash cmds"]
+    end
+
+    subgraph APILAYER["🌐 API LAYER — FastAPI localhost:8000"]
+        direction LR
+        STREAM["POST /v1/stream<br/>SSE streaming"]
+        HEALTH["GET /health"]
+        MODELS["GET /v1/models"]
+        MID["Middleware<br/>Correlation ID • Retry • CORS"]
+    end
+
+    subgraph ORCHLAYER["🧭 ORCHESTRATION — LangGraph StateGraph"]
+        direction TB
+        ORC["Orchestrator<br/>Classifier LLM call<br/>7 query types"]
+        ROUTER{{"Conditional Router"}}
+        STATE["LogicState<br/>TypedDict"]
+        VALIDATOR["Validator<br/>Output + confidence"]
+        RENDERER["Renderer<br/>Final assembly"]
+    end
+
+    subgraph ENGINES["⚙️ QUERY ENGINES"]
+        direction TB
+        subgraph LOGIC["Phase 1 — LOGIC ENGINE"]
+            LE["Logic Explainer<br/>logic_explainer.py"]
+            QE["Query Engine<br/>alias → col → nodes → payload"]
+            VT["Variable Tracer<br/>FALLBACK"]
+        end
+        subgraph VALUE["Phase 2 — VALUE ENGINE"]
+            RI["Row Inspector<br/>Fetches target row first"]
+            OC["Origin Classifier<br/>PLSQL / ETL / UNKNOWN"]
+            TR["Trace Router"]
+            EB["Evidence Builder"]
+            P2E["Phase2 Explainer<br/>Hallucination-forbidden"]
+        end
+        subgraph DATA["Option A — DATA ENGINE"]
+            DQ["Data Query Agent<br/>NL → SQL"]
+            SG["SQL Guardian<br/>SELECT-only • AST parse"]
+            RC["Row Count Pre-check<br/>10K reject / 100-10K ask"]
+            RF["Result Formatter"]
+        end
+    end
+
+    subgraph SUPPORT["🔧 SUPPORT COMPONENTS"]
+        direction LR
+        MI["Metadata Interpreter<br/>Redis → Oracle → Disk"]
+        SS["Semantic Search<br/>OpenAI embeddings<br/>RediSearch KNN"]
+        ORIGINS["Origins Catalog<br/>Auto-derived from graph"]
+        CM["Cache Manager<br/>Slash commands"]
+    end
+
+    subgraph STARTUP["🚀 STARTUP — Graph Parsing Pipeline"]
+        direction LR
+        SQL[(".sql files<br/>db/modules/*/functions")]
+        PARSER["1. Parser<br/>Regex blocks<br/>Comment stripping"]
+        BUILDER["2. Builder<br/>Typed nodes + column_maps"]
+        INDEXER["3. Indexer<br/>Cross-function edges<br/>Global column index"]
+        SERIALIZER["4. Serializer<br/>MessagePack<br/>86.6% compression"]
+        IDX["Vector Indexer<br/>OpenAI embeddings"]
+    end
+
+    subgraph LLMLAYER["🤖 LLM LAYER — llm_factory.py"]
+        direction LR
+        OAI["OpenAI<br/>gpt-4o-mini (default)<br/>text-embedding-3-small"]
+        ANT["Anthropic<br/>Claude Sonnet<br/>optional, UI-selectable"]
+    end
+
+    subgraph DATALAYER["💾 DATA LAYER"]
+        direction LR
+        REDIS[("Redis Stack — port 6379<br/>• Graph store MessagePack<br/>• Column index<br/>• Vector index RediSearch<br/>• Origins catalog<br/>• Source cache")]
+        PG[("PostgreSQL — port 5432<br/>LangGraph checkpointer<br/>Conversation state")]
+        ORACLE[("Oracle OFSAA — port 1521<br/>READ-ONLY<br/>• OFSMDM • OFSERM<br/>• Real row data")]
+    end
+
+    subgraph OBS["📊 OBSERVABILITY"]
+        LS["LangSmith<br/>Tracing (optional)"]
+        LOG["Structured Logs<br/>Correlation ID"]
+        HEALTHMON["Health Monitor"]
+    end
+
+    USER --> UI
+    USER --> CLI
+    UI -- "HTTP + SSE" --> STREAM
+    CLI --> STREAM
+    STREAM --> MID --> ORC
+    ORC --> ROUTER
+    ORC -. "reads/writes" .-> STATE
+
+    ROUTER -- "VARIABLE_TRACE<br/>COLUMN_LOGIC<br/>FUNCTION_LOGIC" --> LE
+    ROUTER -- "VALUE_TRACE<br/>DIFFERENCE_EXPLANATION" --> RI
+    ROUTER -- "DATA_QUERY" --> DQ
+    ROUTER -- "UNSUPPORTED" --> RENDERER
+
+    LE --> QE
+    QE -- "miss" --> VT
+    QE --> REDIS
+    VT --> MI
+
+    RI --> ORACLE
+    RI --> OC
+    OC --> ORIGINS
+    OC --> TR
+    TR --> EB
+    EB --> QE
+    EB --> ORACLE
+    EB --> P2E
+
+    DQ --> SG
+    SG --> RC
+    RC --> ORACLE
+    ORACLE --> RF
+
+    MI --> REDIS
+    MI --> ORACLE
+    SS --> REDIS
+    ORC --> SS
+    ORIGINS --> REDIS
+
+    ORC -. "classify" .-> OAI
+    LE -. "explain" .-> LLMLAYER
+    P2E -. "explain" .-> LLMLAYER
+    DQ -. "NL → SQL" .-> LLMLAYER
+    VT -. "resolve + explain" .-> LLMLAYER
+    IDX -. "embed" .-> OAI
+
+    LE --> VALIDATOR
+    P2E --> VALIDATOR
+    RF --> VALIDATOR
+    VALIDATOR --> RENDERER
+    RENDERER -- "SSE tokens<br/>stage • meta • token • done" --> UI
+
+    ORC -. "checkpoint" .-> PG
+
+    SQL --> PARSER --> BUILDER --> INDEXER --> SERIALIZER --> REDIS
+    SQL --> IDX --> REDIS
+    REDIS -. "build on boot" .-> ORIGINS
+
+    ORC -. "traces" .-> LS
+    LE -. "traces" .-> LS
+    P2E -. "traces" .-> LS
+    DQ -. "traces" .-> LS
+    STREAM -. "logs" .-> LOG
+    HEALTH --> HEALTHMON
+    HEALTHMON --> REDIS
+    HEALTHMON --> PG
+    HEALTHMON --> ORACLE
+
+    style USER fill:#1e293b,color:#fff,stroke:#fff,stroke-width:2px
+    style CLI fill:#334155,color:#fff,stroke:none
+    style UI fill:#4f46e5,color:#fff,stroke:none
+    style STREAM fill:#0f766e,color:#fff,stroke:none
+    style HEALTH fill:#0f766e,color:#fff,stroke:none
+    style MODELS fill:#0f766e,color:#fff,stroke:none
+    style MID fill:#14b8a6,color:#fff,stroke:none
+    style ORC fill:#7c3aed,color:#fff,stroke:none
+    style ROUTER fill:#a855f7,color:#fff,stroke:none
+    style STATE fill:#c084fc,color:#000,stroke:none
+    style VALIDATOR fill:#9333ea,color:#fff,stroke:none
+    style RENDERER fill:#d97706,color:#fff,stroke:none
+    style LE fill:#0369a1,color:#fff,stroke:none
+    style QE fill:#0284c7,color:#fff,stroke:none
+    style VT fill:#b45309,color:#fff,stroke:none
+    style RI fill:#059669,color:#fff,stroke:none
+    style OC fill:#10b981,color:#fff,stroke:none
+    style TR fill:#14b8a6,color:#fff,stroke:none
+    style EB fill:#059669,color:#fff,stroke:none
+    style P2E fill:#047857,color:#fff,stroke:none
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style SG fill:#dc2626,color:#fff,stroke:none
+    style RC fill:#ea580c,color:#fff,stroke:none
+    style RF fill:#d97706,color:#fff,stroke:none
+    style MI fill:#059669,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style ORIGINS fill:#0d9488,color:#fff,stroke:none
+    style CM fill:#475569,color:#fff,stroke:none
+    style SQL fill:#6b7280,color:#fff,stroke:none
+    style PARSER fill:#7c3aed,color:#fff,stroke:none
+    style BUILDER fill:#0369a1,color:#fff,stroke:none
+    style INDEXER fill:#059669,color:#fff,stroke:none
+    style SERIALIZER fill:#b45309,color:#fff,stroke:none
+    style IDX fill:#6d28d9,color:#fff,stroke:none
+    style OAI fill:#10a37f,color:#fff,stroke:none
+    style ANT fill:#d97706,color:#fff,stroke:none
+    style REDIS fill:#dc2626,color:#fff,stroke:none
+    style PG fill:#2563eb,color:#fff,stroke:none
+    style ORACLE fill:#9333ea,color:#fff,stroke:none
+    style LS fill:#f59e0b,color:#000,stroke:none
+    style LOG fill:#64748b,color:#fff,stroke:none
+    style HEALTHMON fill:#0f766e,color:#fff,stroke:none
+`;
+
+const host = document.getElementById("diagram");
+const canvas = document.getElementById("canvas");
+const diagram = document.getElementById("diagram");
+const zoomLabel = document.getElementById("zoomLevel");
+let scale = 1;
+
+function applyScale() {
+  diagram.style.transform = `scale(${scale})`;
+  zoomLabel.textContent = Math.round(scale * 100) + "%";
+}
+
+function zoom(factor) {
+  scale = Math.min(4, Math.max(0.2, scale * factor));
+  applyScale();
+}
+
+function reset() { scale = 1; applyScale(); canvas.scrollTo(0,0); }
+
+function fit() {
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  const w = svg.clientWidth || svg.getBoundingClientRect().width || 1;
+  const h = svg.clientHeight || svg.getBoundingClientRect().height || 1;
+  const cw = canvas.clientWidth - 80;
+  const ch = canvas.clientHeight - 80;
+  scale = Math.min(cw / w, ch / h, 1.5);
+  if (!isFinite(scale) || scale <= 0) scale = 1;
+  applyScale();
+  canvas.scrollTo(0,0);
+}
+
+window.zoom = zoom;
+window.reset = reset;
+window.fit = fit;
+
+try {
+  const { svg } = await mermaid.render("rtie-complete", source);
+  host.innerHTML = svg;
+  fit();
+} catch (err) {
+  host.innerHTML = '<div class="loading" style="color:#fca5a5">Failed to render diagram: ' +
+    String(err?.message || err) + '<br/><br/>Check your internet connection — this page loads Mermaid from a CDN on first open.</div>';
+  console.error(err);
+}
+
+// Ctrl+wheel zoom
+canvas.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.1 : 1/1.1;
+  zoom(factor);
+}, { passive: false });
+
+// Drag to pan
+let dragging = false, startX = 0, startY = 0, scrollLeft = 0, scrollTop = 0;
+canvas.addEventListener("mousedown", (e) => {
+  dragging = true; canvas.classList.add("dragging");
+  startX = e.pageX; startY = e.pageY;
+  scrollLeft = canvas.scrollLeft; scrollTop = canvas.scrollTop;
+});
+window.addEventListener("mouseup", () => { dragging = false; canvas.classList.remove("dragging"); });
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  canvas.scrollLeft = scrollLeft - (e.pageX - startX);
+  canvas.scrollTop = scrollTop - (e.pageY - startY);
+});
+
+// ---- export -----------------------------------------------------------------
+window.exportSVG = () => {
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  const data = new XMLSerializer().serializeToString(svg);
+  const blob = new Blob([data], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "rtie-architecture.svg"; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+};
+
+window.exportPNG = async () => {
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  const data = new XMLSerializer().serializeToString(svg);
+  const img = new Image();
+  const svg64 = btoa(unescape(encodeURIComponent(data)));
+  img.src = "data:image/svg+xml;base64," + svg64;
+  await new Promise(r => img.onload = r);
+  const scale = 2;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = img.width * scale;
+  canvasEl.height = img.height * scale;
+  const ctx = canvasEl.getContext("2d");
+  ctx.fillStyle = "#0b1020";
+  ctx.fillRect(0,0,canvasEl.width,canvasEl.height);
+  ctx.scale(scale, scale);
+  ctx.drawImage(img, 0, 0);
+  const a = document.createElement("a");
+  a.href = canvasEl.toDataURL("image/png");
+  a.download = "rtie-architecture.png";
+  a.click();
+};
+</script>
+</body>
+</html>
