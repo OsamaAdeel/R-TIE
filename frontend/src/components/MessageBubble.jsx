@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import ResponseCard from './ResponseCard';
+import ValidationHeader from './ValidationHeader';
 
 // Code theme — transparent bg, wrapper handles the styling
 const codeTheme = {
@@ -53,10 +54,15 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
           <AgentThinking stage={message.stage} />
         ) : data?.type === 'command' ? (
           <CommandResult result={data.result} correlationId={data.correlation_id} />
-        ) : data?.explanation?.markdown ? (
-          <MarkdownResponse data={data} />
         ) : (
-          <ResponseCard data={data} />
+          <>
+            <ValidationHeader data={data} />
+            {data?.explanation?.markdown ? (
+              <MarkdownResponse data={data} />
+            ) : (
+              <ResponseCard data={data} />
+            )}
+          </>
         )}
       </div>
     </div>

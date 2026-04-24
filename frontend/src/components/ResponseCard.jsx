@@ -1,13 +1,11 @@
 import { useState } from 'react';
 import {
   ShieldCheck,
-  ShieldAlert,
   ChevronDown,
   ChevronRight,
   Database,
   GitBranch,
   BookOpen,
-  AlertTriangle,
   Hash,
   Zap,
 } from 'lucide-react';
@@ -26,7 +24,7 @@ export default function ResponseCard({ data }) {
     );
   }
 
-  const { explanation, confidence, validated, warnings, badge, object_name, object_type, schema, cache_hit, source_citations, correlation_id } = data;
+  const { explanation, confidence, object_name, object_type, schema, cache_hit, source_citations, correlation_id } = data;
 
   return (
     <div className="bg-bg-secondary border-2 border-border rounded-2xl rounded-bl-sm overflow-hidden shadow-sm">
@@ -50,7 +48,6 @@ export default function ResponseCard({ data }) {
             </span>
           )}
           <ConfidenceBadge confidence={confidence} />
-          <ValidationBadge badge={badge} validated={validated} />
         </div>
       </div>
 
@@ -149,18 +146,6 @@ export default function ResponseCard({ data }) {
           </CollapsibleSection>
         )}
 
-        {warnings?.length > 0 && (
-          <CollapsibleSection title={`Warnings (${warnings.length})`} icon={<AlertTriangle size={14} className="text-warning" />}>
-            <div className="space-y-2">
-              {warnings.map((w, i) => (
-                <div key={i} className="flex items-start gap-2 text-sm text-warning bg-warning-light rounded-xl px-4 py-3 border border-warning/15">
-                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                  <span>{w}</span>
-                </div>
-              ))}
-            </div>
-          </CollapsibleSection>
-        )}
       </div>
 
       {/* Footer */}
@@ -178,21 +163,6 @@ function ConfidenceBadge({ confidence }) {
   return (
     <span className={clsx('text-xs font-mono font-bold px-2.5 py-1 rounded-full', color)}>
       {pct}%
-    </span>
-  );
-}
-
-function ValidationBadge({ badge, validated }) {
-  if (badge === 'VERIFIED' || validated) {
-    return (
-      <span className="flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-success-light text-success">
-        <ShieldCheck size={11} /> Verified
-      </span>
-    );
-  }
-  return (
-    <span className="flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-warning-light text-warning">
-      <ShieldAlert size={11} /> Unverified
     </span>
   );
 }
