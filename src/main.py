@@ -767,8 +767,17 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         g_query_type = "variable"
                         g_search_term = target_var
                     elif obj_name:
+                        # W43: object_name is the enriched semantic-search
+                        # blob, not a function identifier. Prefer the clean
+                        # name the W37 pre-check already extracts from the
+                        # raw query.
+                        candidates = extract_function_candidates(state["raw_query"])
                         g_query_type = "function"
-                        g_search_term = obj_name
+                        g_search_term = candidates[0] if candidates else obj_name
+                        logger.debug(
+                            "[W43] raw_query candidates=%s, identifier=%s",
+                            candidates, g_search_term,
+                        )
                     else:
                         g_query_type = "variable"
                         g_search_term = state["raw_query"]
