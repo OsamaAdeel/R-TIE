@@ -235,6 +235,11 @@ def load_all_functions(
         sql_files: list[str] = []
         manifest_file_keys: set[str] = set()
         for task in manifest.iter_all_tasks():
+            # Inactive tasks may have no source_file (the on-disk SQL was
+            # removed when the task was dropped from the batch). Skip them
+            # here so we don't try to open an empty path.
+            if not task.source_file:
+                continue
             manifest_file_keys.add(
                 os.path.splitext(os.path.basename(task.source_file))[0].upper()
             )

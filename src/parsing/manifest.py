@@ -477,12 +477,6 @@ def _parse_task(
             f"Recognized types: {sorted(RECOGNIZED_TASK_TYPES)}"
         )
 
-    source_file = _require("source_file")
-    if not isinstance(source_file, str):
-        raise ManifestValidationError(
-            f"{manifest_path}: task '{name}' has non-string 'source_file'"
-        )
-
     active = raw.get("active")
     if not isinstance(active, bool):
         raise ManifestValidationError(
@@ -496,6 +490,22 @@ def _parse_task(
                 f"{manifest_path}: task '{name}' has active=false but no "
                 f"non-empty 'inactive_reason'"
             )
+
+    # source_file is required for active tasks (we need to parse the SQL).
+    # For inactive tasks it is optional — the file may have been removed
+    # when the task was dropped from the batch run chart.
+    raw_source_file = raw.get("source_file")
+    if active:
+        if not raw_source_file:
+            raise ManifestValidationError(
+                f"{manifest_path}: task at index {task_index} under sub_process "
+                f"'{sp_label}' is missing required field 'source_file'"
+            )
+    source_file = raw_source_file or ""
+    if source_file and not isinstance(source_file, str):
+        raise ManifestValidationError(
+            f"{manifest_path}: task '{name}' has non-string 'source_file'"
+        )
 
     return TaskEntry(
         order=order,
@@ -544,8 +554,13 @@ def _validate_and_index(
                 )
 
             # --- per-sub-process duplicate-name check -----------------------
+            # Only active tasks must be unique. Inactive entries are audit-only
+            # (e.g. the same logical task retired once as TYPE3 and left as a
+            # record alongside a never-built replacement) and may repeat.
             sp_seen: set[str] = set()
             for t in sp.tasks:
+                if not t.active:
+                    continue
                 name_u = t.name.strip().upper()
                 if name_u in sp_seen:
                     raise ManifestValidationError(
@@ -562,22 +577,28 @@ def _validate_and_index(
             )
 
             name_u = t.name.strip().upper()
-            if name_u in seen_names:
-                raise ManifestValidationError(
-                    f"{manifest_path}: task name '{t.name}' appears in both "
-                    f"sub_process '{seen_names[name_u]}' and '{sp.name}' — "
-                    f"task names must be globally unique"
-                )
-            seen_names[name_u] = sp.name
+            # Global-uniqueness check also applies only to active tasks, for
+            # the same reason as the per-sub_process check above.
+            if t.active:
+                if name_u in seen_names:
+                    raise ManifestValidationError(
+                        f"{manifest_path}: task name '{t.name}' appears in both "
+                        f"sub_process '{seen_names[name_u]}' and '{sp.name}' — "
+                        f"task names must be globally unique"
+                    )
+                seen_names[name_u] = sp.name
             manifest._task_index[name_u] = t
 
-            file_key = os.path.splitext(os.path.basename(t.source_file))[0].upper()
-            if file_key in manifest._file_index:
-                raise ManifestValidationError(
-                    f"{manifest_path}: source_file '{t.source_file}' is "
-                    f"referenced by more than one task"
-                )
-            manifest._file_index[file_key] = t
+            # Inactive tasks may have no source_file (see _parse_task); skip
+            # indexing them by file when absent.
+            if t.source_file:
+                file_key = os.path.splitext(os.path.basename(t.source_file))[0].upper()
+                if file_key in manifest._file_index:
+                    raise ManifestValidationError(
+                        f"{manifest_path}: source_file '{t.source_file}' is "
+                        f"referenced by more than one task"
+                    )
+                manifest._file_index[file_key] = t
 
         for child in sp.sub_processes:
             _visit_sub_process(child)
@@ -596,6 +617,12 @@ def _validate_task(
     """Check that the source file exists and its CREATE OR REPLACE FUNCTION
     identifier matches the manifest task name (case-insensitive).
     """
+    # Inactive tasks are retained in the manifest for audit (via
+    # inactive_reason) but not executed. If the on-disk SQL was removed when
+    # the task was dropped, skip file validation — there is nothing to parse.
+    if not task.active or not task.source_file:
+        return
+
     sql_path = os.path.join(functions_dir, task.source_file)
     if not os.path.isfile(sql_path):
         raise ManifestValidationError(
