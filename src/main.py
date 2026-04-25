@@ -37,6 +37,7 @@ from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
     LogicExplainer,
     detect_ungrounded_identifiers,
+    detect_partial_source_function,
     evaluate_grounding,
 )
 from src.agents.variable_tracer import VariableTracer
@@ -894,12 +895,32 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 multi_source=state.get("multi_source", {}) or {},
             )
 
+            # W49 pre-generation check: the asked-about FUNCTION exists in
+            # graph metadata but its source body was not returned by the
+            # retrieval pipeline (partial-indexed schema, e.g. OFSERM). The
+            # normal path would speculate using related functions; the W49
+            # branch instead emits a structured "source not currently
+            # indexed" response that tells the truth about the gap. W45
+            # takes precedence — if the identifier is fully ungrounded that
+            # framing is more accurate.
+            partial_source_info: Optional[Dict[str, Any]] = None
+            if not ungrounded_ids:
+                partial_source_info = _detect_partial_source_for_query(
+                    raw_query=request.query,
+                    multi_source=state.get("multi_source", {}) or {},
+                    correlation_id=correlation_id,
+                )
+
             # Hierarchy header (W39): emitted once before branching so every
             # normal streaming path — variable tracer, graph-pipeline, and
             # the plain semantic explainer — receives the same context line.
-            # SKIPPED for the ungrounded branch: the top-ranked retrieved
-            # function is not the answer, so its hierarchy is misleading.
-            if not ungrounded_ids:
+            # SKIPPED for the ungrounded branch (W45): the top-ranked
+            # retrieved function is not the answer, so its hierarchy is
+            # misleading.
+            # SKIPPED for the partial-source branch (W49): the body already
+            # includes the hierarchy in its "What I know about it" section,
+            # so emitting a header above it would be redundant.
+            if not ungrounded_ids and not partial_source_info:
                 with stage_timer("hierarchy_header", correlation_id):
                     hierarchy_prefix = _logic_explainer.hierarchy_header(state)
                 if hierarchy_prefix:
@@ -931,6 +952,38 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     ):
                         if _first_token:
                             mark_event("llm_first_token", correlation_id, branch="ungrounded")
+                            _first_token = False
+                        full_markdown += token
+                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+            elif partial_source_info:
+                # W49 partial-source branch: function name and metadata are
+                # known, but its source body was not returned by retrieval.
+                # Skip the normal generation path (which would speculate
+                # using related functions) and stream a structured "source
+                # not currently indexed" response.
+                with stage_timer(
+                    "llm_stream_partial_source",
+                    correlation_id,
+                    function_name=partial_source_info["function_name"],
+                    schema=partial_source_info["schema"],
+                ):
+                    _first_token = True
+                    async for token in _variable_tracer.stream_partial_source(
+                        function_name=partial_source_info["function_name"],
+                        schema=partial_source_info["schema"],
+                        hierarchy=partial_source_info.get("hierarchy"),
+                        manifest_description=partial_source_info.get(
+                            "manifest_description"
+                        ),
+                        provider=provider,
+                        model=model,
+                    ):
+                        if _first_token:
+                            mark_event(
+                                "llm_first_token",
+                                correlation_id,
+                                branch="partial_source",
+                            )
                             _first_token = False
                         full_markdown += token
                         yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
@@ -1019,15 +1072,35 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     query_type=state.get("query_type", ""),
                 )
 
+            # W49: when the partial-source branch ran, surface the
+            # PARTIAL_SOURCE_INDEXED warning so W46's ValidationHeader
+            # renders the same "this is partial" badge users see for W45.
+            # Override the badge/confidence to UNVERIFIED at low confidence
+            # because the body intentionally avoids analysis.
+            if partial_source_info:
+                grounding["warnings"].append(
+                    "PARTIAL_SOURCE_INDEXED: "
+                    f"{partial_source_info['function_name']} has graph "
+                    f"metadata in {partial_source_info['schema']} but its "
+                    f"source body is not currently indexed for analysis"
+                )
+                grounding["badge"] = "UNVERIFIED"
+                grounding["confidence"] = 0.2
+
             # Stream caveat tokens before closing so the user sees them inline.
-            # W45: suppress the Caveats block when the ungrounded branch was
-            # taken — the body already contains the "Not Found in Indexed
-            # Functions" statement, so an appended Caveats block would be
-            # redundant and contradict the clean structure. The warnings
-            # array (including UNGROUNDED_IDENTIFIERS) is still emitted in
-            # the done payload for W46's ValidationHeader to render.
+            # W45/W49: suppress the Caveats block when either structured
+            # branch was taken — the body already explains the situation, so
+            # an appended Caveats block would be redundant and contradict
+            # the clean structure. The warnings array (including
+            # UNGROUNDED_IDENTIFIERS / PARTIAL_SOURCE_INDEXED) is still
+            # emitted in the done payload for W46's ValidationHeader to
+            # render.
             final_markdown = full_markdown
-            if grounding["sanity_messages"] and not ungrounded_ids:
+            if (
+                grounding["sanity_messages"]
+                and not ungrounded_ids
+                and not partial_source_info
+            ):
                 caveat_block = (
                     "\n\n---\n\n"
                     "**Caveats:**\n"
@@ -1399,6 +1472,89 @@ def _run_function_precheck(query: str, correlation_id: str) -> Optional[Dict[str
         similar_functions=similar,
         correlation_id=correlation_id,
     )
+
+
+def _detect_partial_source_for_query(
+    raw_query: str,
+    multi_source: Dict[str, Any],
+    correlation_id: str,
+) -> Optional[Dict[str, Any]]:
+    """W49: detect the partial-source state for the asked-about function.
+
+    Extracts the primary function-name candidate from *raw_query*. If that
+    function exists in any known schema's graph metadata but its source
+    body is not present in *multi_source* (or is below the minimum
+    threshold), returns a dict carrying everything the W49 streaming
+    branch needs:
+
+      - function_name: case-preserved name from the query
+      - schema: schema where parse metadata was found
+      - hierarchy: the function graph's hierarchy block (may be empty)
+      - manifest_description: optional declared description (currently
+        always None — manifest descriptions aren't propagated onto the
+        graph hierarchy block today)
+
+    Returns None when the partial-source state does not apply: no graph
+    Redis client, no function candidates, every candidate has source
+    available in multi_source, or no schema has metadata for the
+    candidate. In those cases the normal generation path is correct.
+    """
+    if _graph_redis is None:
+        return None
+
+    candidates = extract_function_candidates(raw_query)
+    if not candidates:
+        return None
+
+    # Build a case-insensitive lookup from multi_source keys → entries so
+    # we can detect the asked-about function whether or not the casing
+    # matches what semantic search returned.
+    ms_by_upper = {k.upper(): v for k, v in (multi_source or {}).items()}
+
+    from src.parsing.store import get_function_graph
+    from src.agents.orchestrator import _PRECHECK_SCHEMAS
+
+    for candidate in candidates:
+        retrieved = ms_by_upper.get(candidate.upper())
+        retrieved_source = (
+            (retrieved or {}).get("source_code") if retrieved else None
+        )
+        for schema in _PRECHECK_SCHEMAS:
+            if not detect_partial_source_function(
+                function_name=candidate,
+                schema=schema,
+                retrieved_source=retrieved_source,
+                redis_client=_graph_redis,
+            ):
+                continue
+
+            # Found the partial-source case. Pull the function graph for
+            # hierarchy details (best-effort — absence is non-fatal).
+            hierarchy: Dict[str, Any] = {}
+            try:
+                graph = get_function_graph(
+                    _graph_redis, schema, candidate.upper()
+                )
+                if graph:
+                    hierarchy = graph.get("hierarchy") or {}
+            except Exception as exc:
+                logger.debug(
+                    "W49 hierarchy fetch failed for %s.%s: %s | correlation_id=%s",
+                    schema, candidate, exc, correlation_id,
+                )
+
+            logger.info(
+                "W49 partial-source branch: function=%s schema=%s | "
+                "correlation_id=%s",
+                candidate, schema, correlation_id,
+            )
+            return {
+                "function_name": candidate,
+                "schema": schema,
+                "hierarchy": hierarchy,
+                "manifest_description": None,
+            }
+    return None
 
 
 async def _stream_declined_response(payload: Dict[str, Any]):

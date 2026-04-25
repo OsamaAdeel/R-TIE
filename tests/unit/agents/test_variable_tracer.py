@@ -21,6 +21,8 @@ from typing import Any, Dict, Iterable, List
 import pytest
 
 from src.agents.variable_tracer import (
+    PARTIAL_SOURCE_FUNCTION_PROMPT,
+    PARTIAL_SOURCE_NEXT_STEP_TEMPLATE,
     UNGROUNDED_IDENTIFIER_PROMPT,
     UNGROUNDED_NEXT_STEP_TEMPLATE,
     VariableTracer,
@@ -191,3 +193,130 @@ def test_stream_ungrounded_builds_prompt_and_appends_next_step(monkeypatch):
     assert "CAP973" in chunks[-1]
     assert "OFSERM" in chunks[-1]
     assert "FCT_STANDARD_ACCT_HEAD" in chunks[-1]
+
+
+# ---------------------------------------------------------------------
+# W49 — PARTIAL_SOURCE_FUNCTION_PROMPT template substitution
+# ---------------------------------------------------------------------
+
+def test_partial_source_prompt_substitutes_function_name_and_schema():
+    rendered = PARTIAL_SOURCE_FUNCTION_PROMPT.format(
+        FUNCTION_NAME="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        SCHEMA="OFSERM",
+        BATCH_NAME="OFSERM_RUN",
+        HIERARCHY_PATH="Pension → Asset Net DTL",
+        TASK_ORDER="task #7",
+        DESCRIPTION="Computes deferred pension asset/liability split",
+    )
+    # Title and "What I know about it" header must carry the substituted name.
+    assert "## ABL_Def_Pension_Fund_Asset_Net_DTL — Source Not Currently Indexed" in rendered
+    assert "Schema: OFSERM" in rendered
+    assert "Batch: OFSERM_RUN" in rendered
+    assert "Process path: Pension → Asset Net DTL" in rendered
+    assert "Task position: task #7" in rendered
+    assert (
+        "Declared description: Computes deferred pension asset/liability split"
+        in rendered
+    )
+
+
+def test_partial_source_prompt_renders_not_specified_fallback():
+    rendered = PARTIAL_SOURCE_FUNCTION_PROMPT.format(
+        FUNCTION_NAME="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        SCHEMA="OFSERM",
+        BATCH_NAME="Not specified",
+        HIERARCHY_PATH="Not specified",
+        TASK_ORDER="Not specified",
+        DESCRIPTION="Not specified",
+    )
+    # "Not specified" must reach the rendered template unchanged.
+    assert "Batch: Not specified" in rendered
+    assert "Declared description: Not specified" in rendered
+
+
+def test_partial_source_next_step_substitutes_function_name():
+    text = PARTIAL_SOURCE_NEXT_STEP_TEMPLATE.format(
+        FUNCTION_NAME="ABL_Def_Pension_Fund_Asset_Net_DTL"
+    )
+    assert "ABL_Def_Pension_Fund_Asset_Net_DTL" in text
+    # Boilerplate must mention W35 and the suggested file location pattern.
+    assert "W35" in text
+    assert "db/modules" in text
+    # Heading is owned by the template so the LLM cannot inject whitespace
+    # between it and the body.
+    assert "### Suggested next step" in text
+
+
+# ---------------------------------------------------------------------
+# W49 — stream_partial_source assembly + next-step emission
+# ---------------------------------------------------------------------
+
+def test_stream_partial_source_builds_prompt_and_appends_next_step(monkeypatch):
+    stub = _StubLLM(
+        body=(
+            "## ABL_Def_Pension_Fund_Asset_Net_DTL — Source Not Currently Indexed\n\n"
+            "body"
+        )
+    )
+    monkeypatch.setattr(
+        "src.agents.variable_tracer.create_llm", lambda **kw: stub
+    )
+    tracer = VariableTracer()
+
+    chunks = _drain(tracer.stream_partial_source(
+        function_name="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        schema="OFSERM",
+        hierarchy={
+            "batch": "OFSERM_RUN",
+            "process": "Pension",
+            "sub_process": "Asset Net DTL",
+            "task_order": 7,
+        },
+        manifest_description="Computes deferred pension asset/liability split",
+    ))
+
+    # System message must carry the substituted prompt template.
+    system_msg, human_msg = stub.captured_messages
+    assert (
+        "## ABL_Def_Pension_Fund_Asset_Net_DTL — Source Not Currently Indexed"
+        in system_msg.content
+    )
+    assert "Schema: OFSERM" in system_msg.content
+    assert "Batch: OFSERM_RUN" in system_msg.content
+    assert "Process path: Pension → Asset Net DTL" in system_msg.content
+    assert "Task position: task #7" in system_msg.content
+
+    # User message must repeat the metadata and tell the model not to speculate.
+    assert "ABL_Def_Pension_Fund_Asset_Net_DTL" in human_msg.content
+    assert "OFSERM" in human_msg.content
+    assert "source body for this function is NOT available" in human_msg.content
+
+    # Yielded chunks: LLM body, then the deterministic next-step boilerplate
+    # with {FUNCTION_NAME} substituted. Boilerplate is the LAST chunk.
+    assert chunks[0].startswith("## ABL_Def_Pension_Fund_Asset_Net_DTL")
+    assert "ABL_Def_Pension_Fund_Asset_Net_DTL" in chunks[-1]
+    assert "W35" in chunks[-1]
+    assert "db/modules" in chunks[-1]
+
+
+def test_stream_partial_source_renders_not_specified_for_missing_metadata(monkeypatch):
+    """When hierarchy and description are missing, the prompt must still
+    render with 'Not specified' fallbacks rather than raw None values."""
+    stub = _StubLLM(body="body")
+    monkeypatch.setattr(
+        "src.agents.variable_tracer.create_llm", lambda **kw: stub
+    )
+    tracer = VariableTracer()
+
+    _drain(tracer.stream_partial_source(
+        function_name="SOME_FN",
+        schema="OFSERM",
+        hierarchy=None,
+        manifest_description=None,
+    ))
+
+    system_msg, _ = stub.captured_messages
+    assert "Batch: Not specified" in system_msg.content
+    assert "Process path: Not specified" in system_msg.content
+    assert "Task position: Not specified" in system_msg.content
+    assert "Declared description: Not specified" in system_msg.content

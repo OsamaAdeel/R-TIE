@@ -187,6 +187,94 @@ def detect_ungrounded_identifiers(
     )
 
 
+# Minimum source-body length (in characters) below which we consider a
+# function's retrieved source effectively empty. A real PL/SQL function body
+# even for a one-liner has a CREATE/BEGIN/END structure well over 50 chars,
+# so anything shorter is treated as "no real source available".
+_PARTIAL_SOURCE_MIN_CHARS = 50
+
+
+def detect_partial_source_function(
+    function_name: str,
+    schema: str,
+    retrieved_source: Any,
+    redis_client: Any = None,
+) -> bool:
+    """Return True when *function_name* has graph metadata but no usable
+    source body to feed the LLM.
+
+    This is the W49 partial-indexed state: the function name and hierarchy
+    are known (``graph:meta:<schema>:<function_name>`` exists), but
+    semantic search / source retrieval did not return its PL/SQL body. The
+    response generator must NOT speculate using related functions when
+    this is true.
+
+    Args:
+        function_name: The asked-about function (case-insensitive).
+        schema: Schema to check for parse metadata. Pass empty string to
+            skip the metadata check (caller already verified).
+        retrieved_source: The source body returned for *function_name* by
+            the pipeline. Acceptable shapes mirror ``multi_source`` entries:
+            ``None``, an empty string, a list of dicts ``[{"line": N,
+            "text": "..."}]``, or a list of strings. Treated as missing
+            when the joined text is below ``_PARTIAL_SOURCE_MIN_CHARS``.
+        redis_client: Redis client used to verify metadata presence. When
+            ``None``, the check falls open (returns False) to avoid a
+            false positive on a misconfigured environment.
+
+    Returns:
+        True only when both conditions hold:
+          - graph metadata exists for (schema, function_name)
+          - retrieved_source is missing/empty/below threshold
+
+    Pure-ish function: no LLM calls, only a single Redis GET on the
+    parse_metadata key. Reuses the existing client connection.
+    """
+    if not function_name:
+        return False
+    if redis_client is None:
+        return False
+
+    body_len = _retrieved_source_length(retrieved_source)
+    if body_len >= _PARTIAL_SOURCE_MIN_CHARS:
+        return False
+
+    try:
+        from src.parsing.store import get_parse_metadata
+        metadata = get_parse_metadata(
+            redis_client, schema, function_name.upper()
+        )
+    except Exception as exc:
+        logger.debug(
+            "partial-source metadata lookup failed for %s.%s: %s",
+            schema, function_name, exc,
+        )
+        return False
+    return metadata is not None
+
+
+def _retrieved_source_length(retrieved_source: Any) -> int:
+    """Return the joined character length of *retrieved_source*.
+
+    Handles the same shapes as ``_concat_multi_source`` (list of dicts,
+    list of strings, plain string, None). Whitespace-only content
+    collapses to length 0 so it triggers the partial-source path.
+    """
+    if retrieved_source is None:
+        return 0
+    if isinstance(retrieved_source, str):
+        return len(retrieved_source.strip())
+    if isinstance(retrieved_source, list):
+        parts: List[str] = []
+        for item in retrieved_source:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return len(" ".join(parts).strip())
+    return 0
+
+
 def _extract_line_citations(markdown: str) -> List[Dict[str, Any]]:
     """Return citation stubs for every Line-N reference found in *markdown*.
 
