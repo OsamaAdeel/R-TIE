@@ -12,6 +12,7 @@ from src.agents.orchestrator import (
     build_function_not_found_response,
 )
 from src.agents.logic_explainer import (
+    detect_partial_source_function,
     detect_ungrounded_identifiers,
     evaluate_grounding,
 )
@@ -418,3 +419,101 @@ def test_named_function_present_in_functions_analyzed_is_verified():
     assert not any(
         "NAMED_FUNCTION_NOT_RETRIEVED" in w for w in grounding["warnings"]
     )
+
+
+# ---------------------------------------------------------------------------
+# detect_partial_source_function — pre-generation helper (W49)
+# ---------------------------------------------------------------------------
+
+def _stub_redis_with_metadata(metadata_keys: set[tuple[str, str]]):
+    """Build a stub Redis whose .get returns msgpacked bytes only for the
+    parse_metadata keys present in *metadata_keys* (set of (schema, fn)).
+    """
+    from src.parsing.serializer import to_msgpack
+    stored = {
+        f"graph:meta:{schema}:{fn}": to_msgpack(
+            {"parsed_at": "2026-04-25T00:00:00+00:00",
+             "schema": schema, "function_name": fn,
+             "node_count": 1, "edge_count": 0}
+        )
+        for schema, fn in metadata_keys
+    }
+    client = MagicMock()
+    client.get.side_effect = lambda k: stored.get(
+        k if isinstance(k, str) else k.decode()
+    )
+    return client
+
+
+def test_partial_source_true_when_metadata_present_and_source_empty():
+    redis = _stub_redis_with_metadata(
+        {("OFSERM", "ABL_DEF_PENSION_FUND_ASSET_NET_DTL")}
+    )
+    assert detect_partial_source_function(
+        function_name="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        schema="OFSERM",
+        retrieved_source=None,
+        redis_client=redis,
+    ) is True
+
+
+def test_partial_source_false_when_metadata_present_but_source_has_body():
+    redis = _stub_redis_with_metadata({("OFSMDM", "FN_LOAD_OPS_RISK_DATA")})
+    real_source = [
+        {"line": 1, "text": "CREATE OR REPLACE FUNCTION FN_LOAD_OPS_RISK_DATA"},
+        {"line": 2, "text": "AS V_X NUMBER; BEGIN INSERT INTO T VALUES (1); END;"},
+    ]
+    assert detect_partial_source_function(
+        function_name="FN_LOAD_OPS_RISK_DATA",
+        schema="OFSMDM",
+        retrieved_source=real_source,
+        redis_client=redis,
+    ) is False
+
+
+def test_partial_source_false_when_metadata_absent():
+    # No metadata for any (schema, fn) → not a partial-source case.
+    redis = _stub_redis_with_metadata(set())
+    assert detect_partial_source_function(
+        function_name="UNKNOWN_FN",
+        schema="OFSMDM",
+        retrieved_source=None,
+        redis_client=redis,
+    ) is False
+
+
+def test_partial_source_false_when_source_retrieval_threw_exception():
+    # Simulated by handing detect_partial_source_function an empty source
+    # AND a Redis whose .get raises — we must not crash, just fall open.
+    redis = MagicMock()
+    redis.get.side_effect = Exception("redis down")
+    assert detect_partial_source_function(
+        function_name="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        schema="OFSERM",
+        retrieved_source=None,
+        redis_client=redis,
+    ) is False
+
+
+def test_partial_source_true_when_source_is_whitespace_only():
+    # Whitespace-only source bodies should still trigger the partial path.
+    redis = _stub_redis_with_metadata(
+        {("OFSERM", "ABL_DEF_PENSION_FUND_ASSET_NET_DTL")}
+    )
+    assert detect_partial_source_function(
+        function_name="ABL_Def_Pension_Fund_Asset_Net_DTL",
+        schema="OFSERM",
+        retrieved_source=[{"line": 1, "text": "   \n"}],
+        redis_client=redis,
+    ) is True
+
+
+def test_partial_source_false_when_redis_client_is_none():
+    # No Redis → fall open. We never want to false-positive on a
+    # misconfigured environment.
+    assert detect_partial_source_function(
+        function_name="ANY",
+        schema="OFSERM",
+        retrieved_source=None,
+        redis_client=None,
+    ) is False

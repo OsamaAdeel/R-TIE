@@ -190,6 +190,130 @@ UNGROUNDED_NEXT_STEP_TEMPLATE = (
 )
 
 
+# ──────────────────────────────────────────────────────────────
+# W49 PARTIAL-SOURCE PROMPT
+# ──────────────────────────────────────────────────────────────
+#
+# Triggered when a function is known by name and hierarchy
+# (graph:meta:<schema>:<name> exists) but its source body was not
+# returned by the retrieval pipeline. Mirrors the W45 ungrounded
+# prompt but frames the gap honestly: the function exists, we just
+# can't analyze it line-by-line right now.
+
+PARTIAL_SOURCE_FUNCTION_PROMPT = """\
+You are answering a question about an Oracle OFSAA PL/SQL function whose
+NAME and METADATA I know, but whose SOURCE CODE I cannot currently
+retrieve for line-by-line analysis. You MUST NOT speculate about what
+the function does based on related or name-similar functions.
+
+The function the user asked about is: {FUNCTION_NAME}
+Schema: {SCHEMA}
+Batch: {BATCH_NAME}
+Process path: {HIERARCHY_PATH}
+Task position: {TASK_ORDER}
+Declared description: {DESCRIPTION}
+
+HARD CONSTRAINTS — DO NOT VIOLATE:
+
+1. DO NOT say "What this function most likely does" or any phrase that
+   implies a guess about its behavior. You have no source body to
+   support such a claim.
+
+2. DO NOT produce "Step 1 / Step 2 / Step 3" walkthroughs. There is no
+   source to walk through.
+
+3. DO NOT cite line numbers. You have not been given the function's
+   source code, so any "Line N" reference would be fabricated.
+
+4. DO NOT name or describe related functions (e.g. TLX_PROV_AMT_FOR_CAP013,
+   POPULATE_STDACC_FROMGL) as if they explain {FUNCTION_NAME}. They are
+   different functions with different purposes.
+
+5. DO NOT produce a "summary of likely purpose" that mixes the metadata
+   above with inferred behavior. The metadata is all you may use, and it
+   is not a behavior description.
+
+6. DO NOT contradict yourself. Do not state "I don't have the source"
+   and then continue with detailed analysis.
+
+7. DO NOT append a Caveats block or any further commentary after the
+   structured body. The code appends a deterministic next-step section
+   after your output finishes.
+
+WHAT TO DO:
+
+A. State clearly that {FUNCTION_NAME} is known by name and registered
+   in the {SCHEMA} schema's batch hierarchy, but its source body is not
+   currently indexed for analysis.
+
+B. Show the metadata that IS available — schema, batch, process path,
+   task order, declared description — under a "What I know about it"
+   subsection. If a metadata field is "Not specified", render it as
+   "Not specified"; do not invent a value.
+
+C. Briefly explain the partial-indexing situation as a hypothesis (1–2
+   sentences). RTIE currently has partial coverage of the {SCHEMA}
+   schema: the graph metadata is loaded but the source body is not yet
+   available to the analysis pipeline. This is being addressed by the
+   multi-schema support work tracked as W35. Frame this as the reason
+   the source is missing, not as a behavior claim.
+
+D. STOP after the "Why this happens" subsection. Do NOT write a
+   "Suggested next step" heading or any further content — the code
+   appends a deterministic next-step section after your response
+   finishes streaming.
+
+OUTPUT TEMPLATE — COPY THIS STRUCTURE EXACTLY:
+
+## {FUNCTION_NAME} — Source Not Currently Indexed
+
+This function exists in the {SCHEMA} schema and is registered in the
+batch hierarchy below, but its source code is not currently available
+to me for line-by-line analysis.
+
+### What I know about it
+
+- Schema: {SCHEMA}
+- Batch: {BATCH_NAME}
+- Process path: {HIERARCHY_PATH}
+- Task position: {TASK_ORDER}
+- Declared description: {DESCRIPTION}
+
+### Why this happens
+
+RTIE currently has partial coverage of the {SCHEMA} schema. The
+function metadata is loaded, but the function's source body is not yet
+indexed for the analysis pipeline. This is being addressed by the
+multi-schema support work (tracked as W35).
+
+(END OF YOUR OUTPUT — stop here.)
+
+CONCRETE EXAMPLE OF WRONG OUTPUT (DO NOT PRODUCE):
+
+  ## How {FUNCTION_NAME} Works
+  ### Step 1: Initial Function Call
+  The function begins by calling TLX_PROV_AMT_FOR_CAP013 at Line 42 ...
+  ### What this function most likely does
+  Based on related functions, {FUNCTION_NAME} probably ...
+
+That output is FORBIDDEN. It cites line numbers from a function the
+user did not ask about, and it speculates about behavior with no source
+to ground the claim.
+"""
+
+
+# Deterministic next-step section appended after the LLM finishes streaming.
+# Owns the full heading + body so the LLM has no opportunity to render
+# whitespace between them. {FUNCTION_NAME} is substituted at emission.
+PARTIAL_SOURCE_NEXT_STEP_TEMPLATE = (
+    "\n\n### Suggested next step\n\n"
+    "If you need {FUNCTION_NAME}'s logic now, check the source file "
+    "directly under `db/modules/<batch>/functions/{FUNCTION_NAME}.sql`, "
+    "or wait for the W35 multi-schema fix which will make this function "
+    "fully analyzable through RTIE."
+)
+
+
 VARIABLE_TRACE_PROMPT = """\
 You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
 
@@ -889,6 +1013,111 @@ class VariableTracer:
 
         # Deterministic next-step boilerplate — substituted, not LLM-generated.
         yield UNGROUNDED_NEXT_STEP_TEMPLATE.format(IDENTIFIER=identifier)
+
+    # ──────────────────────────────────────────────────────────
+    # 4c. PARTIAL-SOURCE STREAMING (W49) — function known but
+    #     source body not retrievable for line-by-line analysis
+    # ──────────────────────────────────────────────────────────
+
+    async def stream_partial_source(
+        self,
+        function_name: str,
+        schema: str,
+        hierarchy: Optional[Dict[str, Any]] = None,
+        manifest_description: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        """Stream a structured "source not currently indexed" response for
+        a function whose name and metadata are known but whose body was
+        not returned by the retrieval pipeline.
+
+        Bypasses resolve_variable_names, build_alias_map,
+        extract_relevant_lines, and build_transformation_chain — all of
+        which produce empty results when no source body is available.
+
+        After the LLM finishes streaming, a deterministic "Suggested next
+        step" line is emitted with {function_name} substituted, so the
+        user always sees an actionable next step.
+
+        Args:
+            function_name: Asked-about function (case preserved for display).
+            schema: Schema where the metadata is registered (e.g. OFSERM).
+            hierarchy: Optional hierarchy block from the function's graph
+                (keys: batch, process, sub_process, task_order). Missing
+                fields render as "Not specified".
+            manifest_description: Optional declared description from the
+                batch manifest. Renders as "Not specified" when absent.
+            provider: LLM provider. None uses default.
+            model: Model name. None uses default.
+
+        Yields:
+            Markdown token strings for SSE streaming.
+        """
+        correlation_id = get_correlation_id()
+        hierarchy = hierarchy or {}
+        batch = (hierarchy.get("batch") or "").strip() or "Not specified"
+        process = (hierarchy.get("process") or "").strip()
+        sub_process = (hierarchy.get("sub_process") or "").strip()
+        path_parts = [p for p in (process, sub_process) if p]
+        hierarchy_path = " → ".join(path_parts) if path_parts else "Not specified"
+        order = hierarchy.get("task_order")
+        task_order = f"task #{order}" if isinstance(order, int) else "Not specified"
+        description = (manifest_description or "").strip() or "Not specified"
+
+        system_prompt = PARTIAL_SOURCE_FUNCTION_PROMPT.format(
+            FUNCTION_NAME=function_name,
+            SCHEMA=schema or "Not specified",
+            BATCH_NAME=batch,
+            HIERARCHY_PATH=hierarchy_path,
+            TASK_ORDER=task_order,
+            DESCRIPTION=description,
+        )
+
+        user_prompt = (
+            f"Function the user asked about: {function_name}\n"
+            f"Schema: {schema or 'Not specified'}\n"
+            f"Batch: {batch}\n"
+            f"Process path: {hierarchy_path}\n"
+            f"Task position: {task_order}\n"
+            f"Declared description: {description}\n\n"
+            "The source body for this function is NOT available to you. "
+            "Produce the structured response described in the system "
+            "prompt's OUTPUT TEMPLATE. Do not speculate about behavior."
+        )
+
+        logger.info(
+            f"Streaming partial-source response for function={function_name!r} "
+            f"schema={schema!r} | correlation_id={correlation_id}"
+        )
+
+        llm = create_llm(
+            provider=provider or "openai",
+            model=model or "gpt-4o-mini",
+            temperature=self._temperature,
+            max_tokens=2048,
+            json_mode=False,
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        try:
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="stream_partial_source",
+                correlation_id=correlation_id,
+            ) from exc
+
+        # Deterministic next-step boilerplate — substituted, not LLM-generated.
+        yield PARTIAL_SOURCE_NEXT_STEP_TEMPLATE.format(
+            FUNCTION_NAME=function_name
+        )
 
     def _format_source_excerpt(
         self,

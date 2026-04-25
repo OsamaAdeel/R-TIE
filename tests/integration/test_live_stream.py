@@ -310,6 +310,115 @@ def t13_n_eop_bal_data_query():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W49 — structured partial-source response
+# ---------------------------------------------------------------------------
+
+@test("TEST 14 — W49 ABL_Def_Pension produces partial-source structure")
+def t14_partial_source_pension():
+    """ABL_Def_Pension_Fund_Asset_Net_DTL has graph metadata in OFSERM but
+    no source body in the OFSMDM-only vector store. The W49 branch must
+    trigger and produce a structured 'Source Not Currently Indexed'
+    response. This is the primary fix target for W49."""
+    r = run_query("How does ABL_Def_Pension_Fund_Asset_Net_DTL work?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "badge_unverified": d.get("badge") == "UNVERIFIED",
+        "has_partial_source_warning": any(
+            "PARTIAL_SOURCE" in w for w in warnings
+        ),
+        "title_is_source_not_indexed": (
+            "## ABL_Def_Pension_Fund_Asset_Net_DTL — Source Not Currently Indexed"
+            in markdown
+        ),
+        "has_what_i_know_section": "What I know about it" in markdown,
+        "no_likely_does_phrase": (
+            "What this function most likely does" not in markdown
+            and "what this function most likely does" not in markdown
+        ),
+        "no_step_walkthrough": (
+            "Step 1" not in markdown and "Step 2" not in markdown
+        ),
+        "no_hierarchy_header": "This function runs in" not in markdown,
+        "no_speculative_neighbors": (
+            "TLX_PROV_AMT_FOR_CAP013" not in markdown
+            and "POPULATE_STDACC_FROMGL" not in markdown
+        ),
+        "no_post_hoc_caveats_block": "**Caveats:**" not in markdown,
+        "has_next_step_boilerplate": (
+            "W35" in markdown and "db/modules" in markdown
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("TEST 15 — W49 regression: FN_LOAD_OPS_RISK_DATA stays VERIFIED")
+def t15_fully_indexed_ofsmdm_unaffected():
+    """FN_LOAD_OPS_RISK_DATA is fully indexed in OFSMDM. The W49 branch
+    must NOT activate — normal step-by-step explanation with hierarchy
+    header and VERIFIED badge must remain intact."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "badge_verified": d.get("badge") == "VERIFIED",
+        "no_partial_source_warning": not any(
+            "PARTIAL_SOURCE" in w for w in warnings
+        ),
+        "no_partial_source_title": (
+            "Source Not Currently Indexed" not in markdown
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("TEST 16 — W49 regression: CAP973 W45 branch still wins")
+def t16_cap973_w45_takes_precedence():
+    """CAP973 is the W45 case (ungrounded business identifier). The W45
+    branch must take precedence over W49 — the response must still be the
+    'Not Found in Indexed Functions' structure, not a 'Source Not
+    Currently Indexed' structure."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "badge_unverified": d.get("badge") == "UNVERIFIED",
+        "has_ungrounded_warning": any(
+            "UNGROUNDED_IDENTIFIERS" in w and "CAP973" in w for w in warnings
+        ),
+        "no_partial_source_warning": not any(
+            "PARTIAL_SOURCE" in w for w in warnings
+        ),
+        "title_is_w45_not_w49": (
+            "CAP973 — Not Found in Indexed Functions" in markdown
+            and "Source Not Currently Indexed" not in markdown
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
