@@ -19,6 +19,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.tools.vector_store import VectorStore
 from src.llm_factory import create_llm
+from src.llm_errors import categorize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
@@ -269,7 +270,24 @@ class IndexerAgent:
             ),
         ]
 
-        response = await llm.ainvoke(messages)
+        # Indexer is an offline batch job, not user-facing — categorize +
+        # log the LLM exception, fall back to an empty description so
+        # indexing can continue with the next function rather than aborting
+        # the whole batch. Mirrors the existing JSONDecodeError fallback below.
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            category, _ = categorize_llm_exception(exc)
+            logger.exception(
+                "Indexer LLM call failed for %s | category=%s",
+                function_name, category,
+            )
+            return {
+                "description": f"(indexing failed: {category})",
+                "tables_read": [],
+                "tables_written": [],
+                "key_columns": [],
+            }
         raw = response.content.strip()
 
         # Strip markdown fences if present

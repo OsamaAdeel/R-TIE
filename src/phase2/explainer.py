@@ -17,6 +17,7 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.llm_factory import create_llm
+from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 
 logger = get_logger(__name__, concern="app")
@@ -416,7 +417,12 @@ class Phase2Explainer:
             SystemMessage(content=system),
             HumanMessage(content=prompt),
         ]
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="phase2_invoke_llm"
+            ) from exc
         return (response.content or "").strip()
 
 

@@ -22,6 +22,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
+from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
@@ -346,7 +347,13 @@ class VariableTracer:
             f"correlation_id={correlation_id}"
         )
 
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="resolve_variable_names",
+                correlation_id=correlation_id,
+            ) from exc
         raw = response.content.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -712,7 +719,12 @@ class VariableTracer:
             f"correlation_id={correlation_id}"
         )
 
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="explain_chain", correlation_id=correlation_id
+            ) from exc
         markdown_content = response.content.strip()
 
         logger.info(
@@ -760,9 +772,14 @@ class VariableTracer:
             HumanMessage(content=user_prompt),
         ]
 
-        async for chunk in llm.astream(messages):
-            if chunk.content:
-                yield chunk.content
+        try:
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="stream_chain"
+            ) from exc
 
     # ──────────────────────────────────────────────────────────
     # 4b. UNGROUNDED STREAMING — identifier absent from all retrieved sources
@@ -860,9 +877,15 @@ class VariableTracer:
             HumanMessage(content=user_prompt),
         ]
 
-        async for chunk in llm.astream(messages):
-            if chunk.content:
-                yield chunk.content
+        try:
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="stream_ungrounded",
+                correlation_id=correlation_id,
+            ) from exc
 
         # Deterministic next-step boilerplate — substituted, not LLM-generated.
         yield UNGROUNDED_NEXT_STEP_TEMPLATE.format(IDENTIFIER=identifier)
