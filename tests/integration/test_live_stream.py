@@ -223,6 +223,93 @@ def t10():
     return passed, f"type={d.get('type')} message_preview={(d.get('message') or '')[:80]}"
 
 
+# ---------------------------------------------------------------------------
+# W45 — structured ungrounded-identifier response
+# ---------------------------------------------------------------------------
+
+@test("TEST 11 — W45 CAP973 produces structured 'not the answer' response")
+def t11_cap973_ungrounded():
+    """CAP973 is absent from every loaded function's source. The W45
+    branch should trigger and produce a structured 'Not Found in Indexed
+    Functions' response. This is the primary fix target."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "badge_unverified": d.get("badge") == "UNVERIFIED",
+        "has_ungrounded_warning": any(
+            "UNGROUNDED_IDENTIFIERS" in w and "CAP973" in w for w in warnings
+        ),
+        "title_is_not_found": "CAP973 — Not Found in Indexed Functions" in markdown,
+        "no_hierarchy_header": "This function runs in" not in markdown,
+        "no_step_walkthrough": "Step 1" not in markdown and "Step 2" not in markdown,
+        "has_searched_section": "Related functions I searched" in markdown,
+        "labels_similarity_only": "retrieved by name-similarity only" in markdown.lower()
+            or "name-similarity only" in markdown,
+        "no_post_hoc_caveats_block": "**Caveats:**" not in markdown,
+        "has_next_step_boilerplate": "FCT_STANDARD_ACCT_HEAD" in markdown,
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("TEST 12 — W45 regression: grounded VARIABLE_TRACE unchanged")
+def t12_n_annual_gross_income_grounded():
+    """N_ANNUAL_GROSS_INCOME is a column present in loaded OFSMDM
+    functions. The normal VARIABLE_TRACE path must still run — no
+    'Not Found' title, hierarchy header allowed, normal step-by-step
+    structure. This is the non-negotiable regression check."""
+    r = run_query("How is N_ANNUAL_GROSS_INCOME calculated?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    checks = {
+        "badge_verified": d.get("badge") == "VERIFIED",
+        "no_ungrounded_title": "Not Found in Indexed Functions" not in markdown,
+        "no_ungrounded_warning": not any(
+            "UNGROUNDED_IDENTIFIERS" in w for w in (d.get("warnings") or [])
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("TEST 13 — W45 regression: DATA_QUERY unaffected")
+def t13_n_eop_bal_data_query():
+    """DATA_QUERY responses must not accidentally hit the ungrounded
+    branch. Ensures the W45 fix didn't leak across response types."""
+    r = run_query(
+        "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
+    )
+    d = r["done"] or {}
+    checks = {
+        "type_is_data_query": d.get("type") == "data_query",
+        "badge_verified": d.get("badge") == "VERIFIED",
+        "status_answered": d.get("status") == "answered",
+        "no_ungrounded_warning": not any(
+            "UNGROUNDED_IDENTIFIERS" in w for w in (d.get("warnings") or [])
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = (
+        f"type={d.get('type')} badge={d.get('badge')} "
+        f"status={d.get('status')}"
+    )
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
