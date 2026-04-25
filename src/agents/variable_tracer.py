@@ -70,6 +70,125 @@ Respond with ONLY a valid JSON object — no markdown, no extra text:
 """
 
 
+UNGROUNDED_IDENTIFIER_PROMPT = """\
+You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
+You are answering a question about a business identifier that was NOT found
+in any function that has been indexed. You MUST NOT pretend otherwise.
+
+The identifier the user asked about is: {IDENTIFIER}
+Semantic search returned these functions by name-similarity ONLY — none of
+them compute {IDENTIFIER}:
+
+{CANDIDATE_LIST}
+
+HARD CONSTRAINTS — DO NOT VIOLATE:
+
+1. DO NOT write a header of the form "## {IDENTIFIER} in `FUNCTION_NAME`".
+   No retrieved function IS the answer, so no function name belongs in the
+   title. Use the exact header in the OUTPUT TEMPLATE below.
+
+2. DO NOT use the phrase "This function runs in ..." or any sentence that
+   implies one of the retrieved functions is the source of {IDENTIFIER}.
+
+3. DO NOT describe a retrieved function as if it computed {IDENTIFIER}.
+   If TLX_PROV_AMT_FOR_CAP013 is retrieved, describe it as computing CAP013
+   (not {IDENTIFIER}). Never substitute the asked-about identifier for the
+   one the function actually targets.
+
+4. DO NOT generate a "Step 1 / Step 2 / Step 3" walkthrough. There is no
+   calculation to walk through because no function computing {IDENTIFIER}
+   was found.
+
+5. DO NOT append a caveat at the end contradicting the body. The body itself
+   must already state "not found".
+
+WHAT TO DO:
+
+A. State up front that {IDENTIFIER} was not found in any indexed function.
+
+B. Briefly explain why it may not have been found (1–3 sentences).
+   Hypotheses to consider include:
+   - it may live in a schema that is only partially indexed (e.g. OFSERM
+     is known to be half-open in the current corpus)
+   - it may be aggregated into a table like FCT_STANDARD_ACCT_HEAD but the
+     specific computation function is not indexed
+   - for CAP-code-style identifiers (e.g. CAP973): it may be a WHERE-clause
+     literal in a function that loads FCT_STANDARD_ACCT_HEAD rather than a
+     named computed variable; check OFSERM schema functions if your
+     deployment includes Basel capital calculations there
+   - it may be a valid identifier in production but outside the loaded
+     corpus
+   Frame this as hypotheses, not confident claims.
+
+C. List each retrieved candidate function. For EACH candidate:
+   - State the function's actual purpose (what identifier/value it actually
+     computes — read from its source code)
+   - State explicitly "does NOT compute {IDENTIFIER}"
+   - One sentence per candidate. No code blocks. No line citations.
+
+D. STOP after the "Related functions I searched" bullet list. Do NOT
+   write a "Suggested next step" heading or any further content — the
+   code appends a deterministic next-step section after your response
+   finishes streaming.
+
+OUTPUT TEMPLATE — COPY THIS STRUCTURE EXACTLY:
+
+## {IDENTIFIER} — Not Found in Indexed Functions
+
+{IDENTIFIER} was not found as a computed value in any function I have
+indexed. {{one-sentence hypothesis about why, drawn from B above}}.
+
+### Related functions I searched (none compute {IDENTIFIER}):
+
+- **{{CANDIDATE_NAME_1}}** — {{one-sentence honest description of what this
+  function actually does}}. Does NOT compute {IDENTIFIER}; retrieved by
+  name-similarity only.
+- **{{CANDIDATE_NAME_2}}** — {{honest description}}. Does NOT compute
+  {IDENTIFIER}; retrieved by name-similarity only.
+- **{{CANDIDATE_NAME_3}}** — {{honest description}}. Does NOT compute
+  {IDENTIFIER}; retrieved by name-similarity only.
+
+(END OF YOUR OUTPUT — stop here.)
+
+CONCRETE EXAMPLE OF WRONG OUTPUT (DO NOT PRODUCE):
+
+  ## {IDENTIFIER} in `TLX_PROV_AMT_FOR_CAP013` (OFSMDM)
+  ### Step 1: Initial Function Call
+  The calculation of {IDENTIFIER} begins with the invocation of ...
+
+That output is FORBIDDEN. It substitutes {IDENTIFIER} for the identifier
+the function actually targets (CAP013) and falsely presents the function
+as the answer.
+
+CONCRETE EXAMPLE OF CORRECT OUTPUT:
+
+  ## {IDENTIFIER} — Not Found in Indexed Functions
+
+  {IDENTIFIER} was not found in any indexed function. It may belong to a
+  schema that is not yet fully indexed.
+
+  ### Related functions I searched (none compute {IDENTIFIER}):
+
+  - **TLX_PROV_AMT_FOR_CAP013** — Computes the provision amount for
+    capital head CAP013 by summing N_PROVISION_SHORTFALL from
+    STG_PRODUCT_PROCESSOR. Does NOT compute {IDENTIFIER}; retrieved by
+    name-similarity only.
+"""
+
+
+# Deterministic next-step section appended after the LLM finishes streaming.
+# Owns the full heading as well as the boilerplate so the LLM has no
+# opportunity to render whitespace between them. {IDENTIFIER} is substituted
+# at emission time.
+UNGROUNDED_NEXT_STEP_TEMPLATE = (
+    "\n\n### Suggested next step\n\n"
+    "If {IDENTIFIER} should exist, check whether your deployment indexes "
+    "OFSERM schema functions (currently partial), or search for {IDENTIFIER} "
+    "as a WHERE-clause literal in functions that populate "
+    "FCT_STANDARD_ACCT_HEAD."
+)
+
+
 VARIABLE_TRACE_PROMPT = """\
 You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
 
@@ -644,6 +763,134 @@ class VariableTracer:
         async for chunk in llm.astream(messages):
             if chunk.content:
                 yield chunk.content
+
+    # ──────────────────────────────────────────────────────────
+    # 4b. UNGROUNDED STREAMING — identifier absent from all retrieved sources
+    # ──────────────────────────────────────────────────────────
+
+    async def stream_ungrounded(
+        self,
+        identifier: str,
+        candidates: Dict[str, Dict[str, Any]],
+        raw_query: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        """Stream a structured "not the answer" response for an ungrounded
+        identifier.
+
+        Bypasses resolve_variable_names, build_alias_map,
+        extract_relevant_lines, and build_transformation_chain — all of
+        which produce empty or irrelevant results for an identifier that
+        isn't in any retrieved function's source.
+
+        After the LLM finishes streaming, a deterministic "Suggested next
+        step" line is emitted with {identifier} substituted, so the user
+        sees an actionable next step without relying on the LLM to
+        generate one.
+
+        Args:
+            identifier: The ungrounded business identifier (e.g. "CAP973").
+            candidates: The multi_source dict of retrieved-but-wrong functions
+                (same shape as state["multi_source"]).
+            raw_query: The user's original question.
+            provider: LLM provider. None uses default.
+            model: Model name. None uses default.
+
+        Yields:
+            Markdown token strings for SSE streaming.
+        """
+        correlation_id = get_correlation_id()
+
+        # Build the candidate list block for the system prompt.
+        candidate_lines = [
+            f"- {name} (similarity score {(data.get('score') or 0.0):.2f})"
+            for name, data in candidates.items()
+        ]
+        candidate_list_block = "\n".join(candidate_lines) or "- (no candidates)"
+
+        system_prompt = UNGROUNDED_IDENTIFIER_PROMPT.format(
+            IDENTIFIER=identifier,
+            CANDIDATE_LIST=candidate_list_block,
+        )
+
+        # Build the user message with abbreviated source excerpts (first
+        # ~40 lines of each candidate, matching the experiment fixture).
+        function_sections = []
+        for fn_name, fn_data in candidates.items():
+            source_text = self._format_source_excerpt(
+                fn_data.get("source_code", []), max_lines=40
+            )
+            section = (
+                f"=== FUNCTION: {fn_name} "
+                f"(relevance: {(fn_data.get('score') or 0.0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code (abbreviated):\n{source_text}"
+            )
+            function_sections.append(section)
+
+        user_prompt = (
+            f"User Question: {raw_query}\n\n"
+            f"Unresolved identifier: {identifier}\n\n"
+            f"The following functions were retrieved by semantic search as "
+            f"closest name matches. None were confirmed to compute "
+            f"{identifier}. Describe each one honestly — what it actually "
+            f"does — and make clear it is not the answer.\n\n"
+            + "\n".join(function_sections)
+        )
+
+        logger.info(
+            f"Streaming ungrounded response for identifier={identifier!r} "
+            f"candidates={list(candidates.keys())} | "
+            f"correlation_id={correlation_id}"
+        )
+
+        llm = create_llm(
+            provider=provider or "openai",
+            model=model or "gpt-4o-mini",
+            temperature=self._temperature,
+            max_tokens=4096,
+            json_mode=False,
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
+        # Deterministic next-step boilerplate — substituted, not LLM-generated.
+        yield UNGROUNDED_NEXT_STEP_TEMPLATE.format(IDENTIFIER=identifier)
+
+    def _format_source_excerpt(
+        self,
+        source_lines: List[Dict[str, Any]],
+        max_lines: int = 40,
+    ) -> str:
+        """Format the first ``max_lines`` lines of a source body for the LLM.
+
+        Used by stream_ungrounded to keep candidate source excerpts short —
+        the model only needs enough code to state what each function
+        actually computes, not a full trace.
+        """
+        formatted: List[str] = []
+        for item in source_lines[:max_lines]:
+            if isinstance(item, dict):
+                line_num = item.get("line", "?")
+                text = str(item.get("text", "")).rstrip("\n")
+                formatted.append(f"L{line_num}: {text}")
+            else:
+                formatted.append(str(item))
+        if len(source_lines) > max_lines:
+            formatted.append(
+                f"... ({len(source_lines) - max_lines} more lines omitted)"
+            )
+        return "\n".join(formatted)
 
     # ──────────────────────────────────────────────────────────
     # 5. FULL PIPELINE — called from the graph node

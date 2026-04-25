@@ -11,7 +11,10 @@ from src.agents.orchestrator import (
     find_similar_function_names,
     build_function_not_found_response,
 )
-from src.agents.logic_explainer import evaluate_grounding
+from src.agents.logic_explainer import (
+    detect_ungrounded_identifiers,
+    evaluate_grounding,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +299,79 @@ def test_cap_code_present_in_source_is_verified():
     )
     assert grounding["badge"] == "VERIFIED"
     assert not any("UNGROUNDED_IDENTIFIERS" in w for w in grounding["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# detect_ungrounded_identifiers — pre-generation helper (W45)
+# ---------------------------------------------------------------------------
+
+def test_detect_ungrounded_identifiers_flags_cap_code():
+    # CAP973 absent from all source bodies → returned.
+    ungrounded = detect_ungrounded_identifiers(
+        raw_query="How is CAP973 calculated?",
+        multi_source={
+            "TLX_PROV_AMT_FOR_CAP013": {"source_code": [
+                {"line": 1, "text": "V_CAP_HEAD_CD = 'ABL_CAP013'"},
+            ]},
+        },
+    )
+    assert ungrounded == ["CAP973"]
+
+
+def test_detect_ungrounded_identifiers_allows_grounded():
+    # CAP013 is present in a source body → empty list.
+    ungrounded = detect_ungrounded_identifiers(
+        raw_query="How is CAP013 calculated?",
+        multi_source={
+            "FN_FOO": {"source_code": [
+                {"line": 10, "text": "V_CAP_HEAD_CD = 'ABL_CAP013';"},
+            ]},
+        },
+    )
+    assert ungrounded == []
+
+
+def test_detect_ungrounded_identifiers_ignores_column_prefixes():
+    # OFSAA column names like N_EOP_BAL and V_PROD_CODE don't match the
+    # identifier regex (single-letter prefix before the underscore), so they
+    # must not be flagged as ungrounded even when absent from sources.
+    ungrounded = detect_ungrounded_identifiers(
+        raw_query="How is N_EOP_BAL computed and what is V_PROD_CODE?",
+        multi_source={
+            "FN_EMPTY": {"source_code": [{"line": 1, "text": "BEGIN"}]},
+        },
+    )
+    assert ungrounded == []
+
+
+def test_detect_ungrounded_identifiers_splits_grounded_from_ungrounded():
+    # Query names two identifiers; only one is in the source. The other
+    # comes back in the returned list; the grounded one does not.
+    ungrounded = detect_ungrounded_identifiers(
+        raw_query="Compare CAP013 and CAP973 calculations.",
+        multi_source={
+            "FN_FOO": {"source_code": [
+                {"line": 1, "text": "V_CAP_HEAD_CD = 'ABL_CAP013';"},
+            ]},
+        },
+    )
+    assert ungrounded == ["CAP973"]
+
+
+def test_detect_ungrounded_identifiers_empty_query_returns_empty():
+    # No identifiers → empty list, no source scan performed.
+    assert detect_ungrounded_identifiers("", {}) == []
+    assert detect_ungrounded_identifiers("how does this work", {"FN": {}}) == []
+
+
+def test_detect_ungrounded_identifiers_empty_multi_source_returns_all():
+    # No source at all → every identifier in the query is ungrounded.
+    # Regex wants >=2 letters + >=2 digits, so CAP973 and IRB25 qualify.
+    ungrounded = detect_ungrounded_identifiers(
+        raw_query="Explain CAP973 and IRB25 together",
+        multi_source={},
+    )
+    assert ungrounded == sorted(["CAP973", "IRB25"])
 
 
 # ---------------------------------------------------------------------------

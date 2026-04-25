@@ -34,7 +34,11 @@ from src.agents.orchestrator import (
     build_function_not_found_response,
 )
 from src.agents.metadata_interpreter import MetadataInterpreter
-from src.agents.logic_explainer import LogicExplainer, evaluate_grounding
+from src.agents.logic_explainer import (
+    LogicExplainer,
+    detect_ungrounded_identifiers,
+    evaluate_grounding,
+)
 from src.agents.variable_tracer import VariableTracer
 from src.agents.value_tracer import ValueTracerAgent
 from src.agents.data_query import DataQueryAgent
@@ -862,17 +866,59 @@ async def stream_endpoint(request: QueryRequest, req: Request):
 
             full_markdown = ""
 
-            # Hierarchy header (W39): emitted once before branching so every
-            # streaming path — variable tracer, graph-pipeline, and the
-            # plain semantic explainer — receives the same context line.
-            with stage_timer("hierarchy_header", correlation_id):
-                hierarchy_prefix = _logic_explainer.hierarchy_header(state)
-            if hierarchy_prefix:
-                full_markdown += hierarchy_prefix
-                mark_event("first_sse_token_emit", correlation_id, source="hierarchy_header")
-                yield f"event: token\ndata: {json_mod.dumps(hierarchy_prefix)}\n\n"
+            # W45 pre-generation check: if the user asked about a business
+            # identifier (e.g. CAP973) that is absent from every retrieved
+            # function's source body, route to a structured "not the answer"
+            # response instead of the normal explainer. Semantic search
+            # still returns name-similar neighbors, but none of them compute
+            # the asked identifier — the normal path would describe a
+            # neighbor as if it were the answer.
+            ungrounded_ids = detect_ungrounded_identifiers(
+                raw_query=request.query,
+                multi_source=state.get("multi_source", {}) or {},
+            )
 
-            if state.get("llm_payload"):
+            # Hierarchy header (W39): emitted once before branching so every
+            # normal streaming path — variable tracer, graph-pipeline, and
+            # the plain semantic explainer — receives the same context line.
+            # SKIPPED for the ungrounded branch: the top-ranked retrieved
+            # function is not the answer, so its hierarchy is misleading.
+            if not ungrounded_ids:
+                with stage_timer("hierarchy_header", correlation_id):
+                    hierarchy_prefix = _logic_explainer.hierarchy_header(state)
+                if hierarchy_prefix:
+                    full_markdown += hierarchy_prefix
+                    mark_event("first_sse_token_emit", correlation_id, source="hierarchy_header")
+                    yield f"event: token\ndata: {json_mod.dumps(hierarchy_prefix)}\n\n"
+
+            if ungrounded_ids:
+                # W45 ungrounded branch: bypass resolve/alias/extract/build
+                # (all produce empty results for an identifier that isn't in
+                # any retrieved source), and stream a structured "not found"
+                # response. The warnings array will still carry
+                # UNGROUNDED_IDENTIFIERS via evaluate_grounding() below, so
+                # W46 metadata rendering is unaffected.
+                primary_identifier = ungrounded_ids[0]
+                with stage_timer(
+                    "llm_stream_ungrounded",
+                    correlation_id,
+                    identifier=primary_identifier,
+                    candidate_count=len(state.get("multi_source", {}) or {}),
+                ):
+                    _first_token = True
+                    async for token in _variable_tracer.stream_ungrounded(
+                        identifier=primary_identifier,
+                        candidates=state.get("multi_source", {}) or {},
+                        raw_query=request.query,
+                        provider=provider,
+                        model=model,
+                    ):
+                        if _first_token:
+                            mark_event("llm_first_token", correlation_id, branch="ungrounded")
+                            _first_token = False
+                        full_markdown += token
+                        yield f"event: token\ndata: {json_mod.dumps(token)}\n\n"
+            elif state.get("llm_payload"):
                 # Graph pipeline produced a structured payload — use it
                 with stage_timer("llm_stream_semantic_graph", correlation_id):
                     _first_token = True
@@ -958,8 +1004,14 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 )
 
             # Stream caveat tokens before closing so the user sees them inline.
+            # W45: suppress the Caveats block when the ungrounded branch was
+            # taken — the body already contains the "Not Found in Indexed
+            # Functions" statement, so an appended Caveats block would be
+            # redundant and contradict the clean structure. The warnings
+            # array (including UNGROUNDED_IDENTIFIERS) is still emitted in
+            # the done payload for W46's ValidationHeader to render.
             final_markdown = full_markdown
-            if grounding["sanity_messages"]:
+            if grounding["sanity_messages"] and not ungrounded_ids:
                 caveat_block = (
                     "\n\n---\n\n"
                     "**Caveats:**\n"

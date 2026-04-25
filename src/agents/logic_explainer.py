@@ -160,6 +160,32 @@ def evaluate_grounding(
     }
 
 
+def detect_ungrounded_identifiers(
+    raw_query: str,
+    multi_source: Dict[str, Any],
+) -> List[str]:
+    """Return business identifiers named in the query but absent from every
+    retrieved function's source_code body.
+
+    Pure function — no side effects, no LLM calls, no Redis reads. Uses the
+    same identifier regex and matching logic as evaluate_grounding so the
+    pre-generation branch and the post-hoc backstop always agree on which
+    identifiers are ungrounded. Call this BEFORE the LLM generation step to
+    decide whether to route to the ungrounded branch.
+
+    An empty list means either (a) the query contains no business identifiers,
+    or (b) every identifier is present in at least one retrieved function.
+    In either case the normal generation path should run.
+    """
+    query_identifiers = set(_IDENTIFIER_CODE_RE.findall(raw_query.upper()))
+    if not query_identifiers:
+        return []
+    source_text = _concat_multi_source(multi_source).upper()
+    return sorted(
+        ident for ident in query_identifiers if ident not in source_text
+    )
+
+
 def _extract_line_citations(markdown: str) -> List[Dict[str, Any]]:
     """Return citation stubs for every Line-N reference found in *markdown*.
 
