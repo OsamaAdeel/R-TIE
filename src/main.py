@@ -61,6 +61,11 @@ from src.tools.vector_store import VectorStore
 from src.monitoring.health import HealthChecker
 from src.middleware.correlation_id import CorrelationIdMiddleware, get_correlation_id
 from src.llm_factory import list_available_models, get_default_provider, get_default_model
+from src.llm_errors import (
+    LLMSanitizedError,
+    build_declined_response,
+    GENERIC_LLM_ERROR_MESSAGE,
+)
 from src.logger import get_logger
 from src.telemetry import stage_timer, mark_event
 import yaml
@@ -572,13 +577,24 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
 
         return final_state.get("output", {})
 
+    except LLMSanitizedError as exc:
+        logger.warning(
+            "Query sanitized LLM failure | category=%s context=%s correlation_id=%s",
+            exc.category, exc.context, exc.correlation_id or correlation_id,
+        )
+        declined = build_declined_response(
+            exc.category, exc.user_message,
+            correlation_id=exc.correlation_id or correlation_id,
+            context=exc.context,
+        )
+        return JSONResponse(status_code=200, content=declined)
     except Exception as exc:
         tb = traceback.format_exc()
         logger.error(f"Query failed: {exc}\n{tb} | correlation_id={correlation_id}")
         return JSONResponse(
             status_code=500,
             content={
-                "error": str(exc),
+                "error": GENERIC_LLM_ERROR_MESSAGE,
                 "correlation_id": correlation_id,
             },
         )
@@ -1038,9 +1054,23 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             with stage_timer("done_emit", correlation_id):
                 yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
 
+        except LLMSanitizedError as exc:
+            logger.warning(
+                "Stream sanitized LLM failure | category=%s context=%s correlation_id=%s",
+                exc.category, exc.context, exc.correlation_id or correlation_id,
+            )
+            declined = build_declined_response(
+                exc.category, exc.user_message,
+                correlation_id=exc.correlation_id or correlation_id,
+                context=exc.context,
+            )
+            yield f"event: done\ndata: {json_mod.dumps(declined)}\n\n"
         except Exception as exc:
+            # Sanitize the unexpected-error path so str(exc) cannot leak Python
+            # internals (e.g. CompletionUsage(...) repr) to the frontend. The
+            # raw exception is captured in the server logs only.
             logger.error(f"Stream failed: {exc}\n{traceback.format_exc()}")
-            yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+            yield f"event: error\ndata: {json_mod.dumps({'error': GENERIC_LLM_ERROR_MESSAGE, 'correlation_id': correlation_id})}\n\n"
 
     async def _timed_event_stream():
         with stage_timer("total_request", correlation_id):
@@ -1119,9 +1149,22 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
                     provider=provider,
                     model=model,
                 )
+    except LLMSanitizedError as exc:
+        logger.warning(
+            "Phase 2 trace sanitized LLM failure | category=%s context=%s "
+            "correlation_id=%s",
+            exc.category, exc.context, exc.correlation_id or correlation_id,
+        )
+        declined = build_declined_response(
+            exc.category, exc.user_message,
+            correlation_id=exc.correlation_id or correlation_id,
+            context=exc.context,
+        )
+        yield f"event: done\ndata: {json_mod.dumps(declined)}\n\n"
+        return
     except Exception as exc:
         logger.error(f"Phase 2 trace failed: {exc}\n{traceback.format_exc()}")
-        yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        yield f"event: error\ndata: {json_mod.dumps({'error': GENERIC_LLM_ERROR_MESSAGE, 'correlation_id': correlation_id})}\n\n"
         return
 
     # Identifier-ambiguity short-circuit — the trace never ran because the
@@ -1233,9 +1276,22 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
                 model=model,
                 target_variable=(state.get("target_variable") or None),
             )
+    except LLMSanitizedError as exc:
+        logger.warning(
+            "DATA_QUERY sanitized LLM failure | category=%s context=%s "
+            "correlation_id=%s",
+            exc.category, exc.context, exc.correlation_id or correlation_id,
+        )
+        declined = build_declined_response(
+            exc.category, exc.user_message,
+            correlation_id=exc.correlation_id or correlation_id,
+            context=exc.context,
+        )
+        yield f"event: done\ndata: {json_mod.dumps(declined)}\n\n"
+        return
     except Exception as exc:
         logger.error(f"DATA_QUERY failed: {exc}\n{traceback.format_exc()}")
-        yield f"event: error\ndata: {json_mod.dumps({'error': str(exc)})}\n\n"
+        yield f"event: error\ndata: {json_mod.dumps({'error': GENERIC_LLM_ERROR_MESSAGE, 'correlation_id': correlation_id})}\n\n"
         return
 
     # Identifier-ambiguity short-circuit — no SQL was generated because

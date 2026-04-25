@@ -20,6 +20,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
+from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_function_graph
@@ -361,8 +362,13 @@ class Orchestrator:
             HumanMessage(content=query),
         ]
 
-        with stage_timer("llm_api_classify", correlation_id, provider=(provider or "default")):
-            response = await llm.ainvoke(messages)
+        try:
+            with stage_timer("llm_api_classify", correlation_id, provider=(provider or "default")):
+                response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="classify_query", correlation_id=correlation_id
+            ) from exc
         raw_content = response.content.strip()
 
         # Strip markdown fences if present

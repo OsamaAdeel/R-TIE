@@ -17,6 +17,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
+from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
@@ -554,7 +555,12 @@ class LogicExplainer:
             HumanMessage(content=user_prompt),
         ]
 
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="explain_logic", correlation_id=correlation_id
+            ) from exc
 
         raw_content = response.content.strip()
 
@@ -660,7 +666,12 @@ class LogicExplainer:
             HumanMessage(content=user_prompt),
         ]
 
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="explain_semantic", correlation_id=correlation_id
+            ) from exc
         markdown_content = response.content.strip()
 
         # Prepend hierarchy context header when available
@@ -754,9 +765,14 @@ class LogicExplainer:
         # queries that bypass this method still get a header. We
         # deliberately do NOT emit it here to avoid duplication.
 
-        async for chunk in llm.astream(messages):
-            if chunk.content:
-                yield chunk.content
+        try:
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="stream_semantic"
+            ) from exc
 
     def _format_source_code(self, source_lines: list) -> str:
         """Format source code lines for LLM consumption.

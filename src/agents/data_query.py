@@ -28,6 +28,7 @@ from src.agents.ambiguity import (
     detect_identifier_ambiguity,
 )
 from src.llm_factory import create_llm
+from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_column_index
@@ -578,7 +579,12 @@ class DataQueryAgent:
             HumanMessage(content=prompt),
         ]
 
-        response = await llm.ainvoke(messages)
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as exc:
+            raise sanitize_llm_exception(
+                exc, context="data_query_generate_sql"
+            ) from exc
         raw = (response.content or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
