@@ -357,3 +357,14 @@ The fix being implemented (per Phase B):
 - Synthetic fixtures inline in test files (no permanent .sql fixture files needed — fabricated PL/SQL is small enough to live in test docstrings)
 
 Two commits per Section 9.
+
+---
+
+## Section 10 — Followup investigation: loader gap (231 OFSERM files not in Redis)
+
+After the Phase 0.5 backend restart, post-rebuild Redis contained 141 `graph:OFSERM:*` keys vs 372 .sql files on disk — a 62% gap. **This is not a Phase 0.5 regression.** It is W39 manifest strict mode operating as designed: 231 disk files are not referenced in `db/modules/ABL_CAR_CSTM_V4/manifest.yaml` and are correctly skipped, while 24 inactive manifest tombstones point at non-existent .sql files (the "FAILED to parse" entries).
+
+Full investigation: [`scratch/w35p05_loader_gap.md`](../scratch/w35p05_loader_gap.md). Key takeaways:
+- 5/5 sampled missing files parse cleanly in-process via `build_function_graph` — no parser issue.
+- The drop point is [src/parsing/loader.py:248-257](src/parsing/loader.py#L248-L257) — strict-mode skip when a disk file is not in `manifest_file_keys`.
+- Phase 0.5 should still ship; the manifest-curation gap is a separate stakeholder decision (Phase 1 territory or a small follow-up PR adding a `loader.strict_mode` config flag).
