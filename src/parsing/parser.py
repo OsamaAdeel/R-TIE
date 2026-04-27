@@ -205,27 +205,51 @@ def _strip_block_and_inline(line: str) -> str | None:
 def _build_comment_map(lines: list[str]) -> list[bool]:
     """Build a per-line boolean list: True if the line is inside a block comment.
 
-    Handles nested ``/* */`` only at a single level (Oracle does not support
-    nested block comments).  A line that contains ``/*`` but not ``*/`` starts
-    a comment region; the region continues until a line containing ``*/``.
+    A line is flagged True only when it sits *inside* a multi-line ``/* */``
+    region — i.e. the line that opens the region (and every line until the
+    closer) is True. Lines that contain only inline self-closing block
+    comments (e.g. ``MERGE /*+ PARALLEL(4) */ INTO …``) are False, because
+    ``clean_source_lines`` strips the comment text and the rest of the line
+    is real code. Multiple inline comments on one line are also handled —
+    we walk the line and only enter "in_comment" mode when an opener has no
+    matching closer to its right.
+
+    Oracle does not support nested block comments, so the walk is at a
+    single nesting level.
     """
     in_comment = False
     comment_map: list[bool] = []
     for line in lines:
         if in_comment:
             comment_map.append(True)
-            if PATTERNS["BLOCK_COMMENT_END"].search(line):
+            # Look for the closer; if found, we leave comment mode but the
+            # current line still counts as inside the multi-line region.
+            if "*/" in line:
                 in_comment = False
+            continue
+
+        # Walk the line consuming any number of fully-closed inline /* */
+        # comments. If we encounter an opener with no matching closer to
+        # its right, we've started a multi-line region — flag this line
+        # and switch to in_comment mode.
+        i = 0
+        starts_multiline_block = False
+        while True:
+            open_pos = line.find("/*", i)
+            if open_pos == -1:
+                break
+            close_pos = line.find("*/", open_pos + 2)
+            if close_pos == -1:
+                # Opener without closer on this line — multi-line block opens
+                starts_multiline_block = True
+                break
+            i = close_pos + 2
+
+        if starts_multiline_block:
+            in_comment = True
+            comment_map.append(True)
         else:
-            if PATTERNS["BLOCK_COMMENT_START"].search(line):
-                # Check whether the comment closes on the same line
-                if not PATTERNS["BLOCK_COMMENT_END"].search(line):
-                    in_comment = True
-                # The line itself is (at least partly) a comment line, but we
-                # only mark *fully-enclosed* lines.  For safety, mark it.
-                comment_map.append(True)
-            else:
-                comment_map.append(False)
+            comment_map.append(False)
     return comment_map
 
 
