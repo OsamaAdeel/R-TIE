@@ -1,5 +1,6 @@
 """
-W35 Phase 0.5 — Tests for the comment-classification fix (Bug B1).
+W35 Phase 0.5 — Tests for the comment-classification fix (Bug B1) and
+the committed_after wiring fix (Bug B2).
 
 The OFSAA execution-log extraction collapses each DML to a single megaline
 that embeds an Oracle optimizer hint (``/*+ PARALLEL(4) */`` or similar).
@@ -7,17 +8,23 @@ Pre-fix, the parser's ``_build_comment_map`` flagged any line containing
 ``/*`` as commented — even when ``*/`` closed on the same line — which
 routed every OFSAA-wrapped MERGE/INSERT to ``commented_out_nodes``.
 
+Pre-fix, the builder also read ``raw_block.get("committed_after", False)``
+for every node, but the parser writes the field under the name
+``followed_by_commit`` — so ``committed_after`` was silently False on
+every node ever produced.
+
 These tests pin down:
 
-  - ``_build_comment_map`` correctly distinguishes inline self-closing
-    comments from multi-line block-comment regions (single inline hint,
-    two inline hints on one line, multi-line block comment, mixed).
-  - End-to-end via ``build_function_graph`` — OFSAA megaline DMLs land
-    in ``nodes``, OFSMDM patterns are preserved, multi-line commented
-    DMLs stay out of ``nodes``.
-
-The companion fix for Bug B2 (committed_after wiring) is covered by
-tests added in the B2 commit.
+  - B1 edge cases: ``_build_comment_map`` correctly distinguishes
+    inline self-closing comments from multi-line block-comment regions
+    (single inline hint, two inline hints on one line, multi-line block
+    comment, mixed).
+  - B1 end-to-end via ``build_function_graph`` — OFSAA megaline DMLs
+    land in ``nodes``, OFSMDM patterns are preserved, multi-line
+    commented DMLs stay out of ``nodes``.
+  - B2: ``committed_after`` is populated from the parser's
+    ``followed_by_commit`` field — True when COMMIT follows the DML,
+    False when no COMMIT exists.
 """
 
 from src.parsing.parser import (
@@ -218,6 +225,96 @@ def test_ofsmdm_multiline_pattern_preserved():
 
 # ---------------------------------------------------------------------
 # B2 — committed_after wiring
-# (added in the B2 commit; tests will fail against the parser-only B1
-#  state because the builder field-name mismatch hasn't been fixed yet)
 # ---------------------------------------------------------------------
+
+def test_committed_after_true_when_commit_follows_merge():
+    """COMMIT immediately after MERGE → node.committed_after=True.
+
+    Pre-fix every node had committed_after=False because the builder
+    read raw_block.get("committed_after", ...) and the parser wrote
+    the value under "followed_by_commit". The fix aligns the names.
+    """
+    lines = [
+        "CREATE OR REPLACE FUNCTION OFSERM.FN_TEST_B2 RETURN VARCHAR2 AS\n",
+        "BEGIN\n",
+        "    MERGE INTO FCT_X TT USING (SELECT a FROM b) SS ON (TT.A=SS.a) WHEN MATCHED THEN UPDATE SET TT.B = SS.a;\n",
+        "    COMMIT;\n",
+        "    RETURN 'OK';\n",
+        "END;\n",
+    ]
+    graph = build_function_graph(lines, "FN_TEST_B2", "test.sql", "OFSERM")
+    assert len(graph["nodes"]) == 1
+    assert graph["nodes"][0]["committed_after"] is True, (
+        "B2: node.committed_after must be True when COMMIT follows the MERGE"
+    )
+
+
+def test_committed_after_true_for_insert_and_update_when_commit_follows():
+    """B2 across multiple node types: INSERT and UPDATE both must
+    inherit committed_after=True from the parser's followed_by_commit
+    field, not just MERGE."""
+    lines = [
+        "CREATE OR REPLACE FUNCTION OFSERM.FN_TEST_B2_MULTI RETURN VARCHAR2 AS\n",
+        "BEGIN\n",
+        "    INSERT INTO FSI_X VALUES (1);\n",
+        "    COMMIT;\n",
+        "    UPDATE FSI_Y SET v = 2 WHERE x = 1;\n",
+        "    COMMIT;\n",
+        "    RETURN 'OK';\n",
+        "END;\n",
+    ]
+    graph = build_function_graph(lines, "FN_TEST_B2_MULTI", "test.sql", "OFSERM")
+    assert len(graph["nodes"]) == 2
+    for n in graph["nodes"]:
+        assert n["committed_after"] is True, (
+            f"B2: node {n['id']} type={n['type']} should be committed_after=True"
+        )
+
+
+def test_committed_after_false_when_no_commit():
+    """Sanity: if no COMMIT exists, committed_after stays False. The fix
+    must NOT flip the default — it only propagates the parser's signal."""
+    lines = [
+        "CREATE OR REPLACE FUNCTION OFSERM.FN_TEST_NOCOMMIT RETURN VARCHAR2 AS\n",
+        "BEGIN\n",
+        "    INSERT INTO FCT_X VALUES (1);\n",
+        "    RETURN 'OK';\n",
+        "END;\n",
+    ]
+    graph = build_function_graph(lines, "FN_TEST_NOCOMMIT", "test.sql", "OFSERM")
+    assert len(graph["nodes"]) == 1
+    assert graph["nodes"][0]["committed_after"] is False, (
+        "committed_after must be False when no COMMIT follows the DML"
+    )
+
+
+def test_committed_after_false_when_commit_too_far_after():
+    """Parser only looks ±3 non-blank/non-comment lines for COMMIT
+    adjacency. A COMMIT that's separated from the DML by other code
+    must NOT count. Locks down the existing parser semantics.
+    """
+    lines = [
+        "CREATE OR REPLACE FUNCTION OFSERM.FN_TEST_FAR RETURN VARCHAR2 AS\n",
+        "BEGIN\n",
+        "    INSERT INTO FCT_X VALUES (1);\n",
+        "    INSERT INTO FCT_Y VALUES (2);\n",
+        "    INSERT INTO FCT_Z VALUES (3);\n",
+        "    INSERT INTO FCT_W VALUES (4);\n",
+        "    COMMIT;\n",
+        "    RETURN 'OK';\n",
+        "END;\n",
+    ]
+    graph = build_function_graph(lines, "FN_TEST_FAR", "test.sql", "OFSERM")
+    assert len(graph["nodes"]) == 4
+    # The first INSERT is 4 lines before COMMIT — outside the 3-line window.
+    # The last INSERT is adjacent — should be True.
+    first_insert_target = graph["nodes"][0]["target_table"]
+    last_insert_target = graph["nodes"][-1]["target_table"]
+    assert first_insert_target == "FCT_X"
+    assert last_insert_target == "FCT_W"
+    assert graph["nodes"][0]["committed_after"] is False, (
+        "INSERT 4 lines before COMMIT should NOT have committed_after=True"
+    )
+    assert graph["nodes"][-1]["committed_after"] is True, (
+        "INSERT 1 line before COMMIT must have committed_after=True"
+    )

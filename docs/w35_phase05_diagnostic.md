@@ -300,9 +300,38 @@ Three OFSAA-megaline samples flipped from `(0 nodes, 1 commented)` to `(1 node, 
 
 **B1 verdict:** OFSERM trace coverage went from ~1% functional (5 of 380, by node_count > 0) to **100% functional** (372/372). B2 still required for `committed_after` to populate.
 
-### 8.3 Post-B2 delta + corpus-wide aggregate (filled in after B2 commit)
+### 8.3 Post-B2 delta + corpus-wide aggregate
 
-_To be filled in._
+After applying B2 (six identical edits in `src/parsing/builder.py`, replacing `raw_block.get("committed_after", False)` with `raw_block.get("followed_by_commit", False)`).
+
+**Per-function (5-sample trace, post-both-fixes):**
+
+| Function | nodes (was → B1 → B2) | commented (was → B1 → B2) | committed_after_true (was → B1 → B2) |
+|---|---|---|---|
+| CS_Deferred_Tax_Asset_Net_of_DTL_Calculation | 1 → 1 → 1 | 0 → 0 → 0 | 0 → 0 → **1** |
+| FN_LOAD_OPS_RISK_DATA (OFSMDM regression baseline) | 14 → 14 → 14 | 0 → 0 → 0 | 0 → 0 → **6** |
+| CS_Goodwill_Calculation | 0 → 1 → 1 | 1 → 0 → 0 | 0 → 0 → **1** |
+| ACCOUNT_RATINGS_POPULATION | 0 → 1 → 1 | 1 → 0 → 0 | 0 → 0 → **1** |
+| CS_Required_Capital_Ratio_Assignment | 0 → 1 → 1 | 1 → 0 → 0 | 0 → 0 → **1** |
+
+The OFSMDM regression baseline (`FN_LOAD_OPS_RISK_DATA`) gains 6 `committed_after_true` nodes — the DELETE, INSERT, two UPDATEs, and the trailing INSERT-after-COMMIT (per Section 3 trace). All match the source's actual COMMIT placement.
+
+**Corpus-wide aggregate (post-both-fixes):**
+
+| Schema | Functions | nodes_total | commented_total | committed_after_true | zero_node_fns |
+|---|---:|---:|---:|---:|---:|
+| OFSERM | 372 | 372 | 0 | **371** | 0 |
+| OFSMDM | 12 | 59 | 0 | **27** | 0 |
+
+OFSERM has 371/372 nodes with `committed_after=True` — the OFSAA-wrapper template puts a single MERGE/INSERT followed immediately by COMMIT, so virtually every node qualifies. The single outlier (verified via the JSON summary) is [`THIRD_PARTY_MINORITY_HOLDING_INDICATOR_ASSIGNMENT_UNDER_CAPITAL_CONSOLIDATION.sql`](db/modules/ABL_CAR_CSTM_V4/functions/THIRD_PARTY_MINORITY_HOLDING_INDICATOR_ASSIGNMENT_UNDER_CAPITAL_CONSOLIDATION.sql), whose MERGE megaline ends with a malformed `... AND;` — unbalanced parens and a stray semicolon mid-WHERE. The parser's paren-depth-aware MERGE-end detection extends the block all the way to the end of the file (line 34), swallowing the COMMIT on line 26 *into* the MERGE block. Result: `followed_by_commit=False` because no COMMIT exists *after* the block ends. This is correct parser behavior for malformed input — and is a separate data-hygiene issue (`AND;` mid-statement is not valid PL/SQL), not a fix concern.
+
+OFSMDM has 27/59 = ~46% with `committed_after=True`. The lower fraction reflects that OFSMDM functions contain many SCALAR_COMPUTE assignments and SELECT-INTOs that never need a following COMMIT — only the three actual DML blocks do, and `FN_LOAD_OPS_RISK_DATA` alone contributes 6 to the total. This matches expectations.
+
+**Combined-fix verdict:**
+
+- OFSERM trace coverage: 5/380 functions (1.3%) → **372/372 (100%)**, with 371/372 also having a populated `committed_after`.
+- OFSMDM behavior: preserved exactly. Same node counts, plus the (previously always-false) `committed_after` field is now populated correctly per the parser's `followed_by_commit` signal.
+- `commented_out_nodes` total across both schemas: 0. The bucket is no longer being misused; it remains available for genuine multi-line commented-out DML if any future function ships one.
 
 ---
 
