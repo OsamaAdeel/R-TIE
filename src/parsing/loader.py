@@ -67,8 +67,23 @@ def _resolve_functions_dir(functions_dir: str) -> str | None:
 
 
 def _function_name_from_file(file_path: str) -> str:
-    """Derive a function name from the SQL file's basename (without extension)."""
-    return os.path.splitext(os.path.basename(file_path))[0].upper()
+    """Derive the canonical function name from an SQL file's basename.
+
+    Strips the directory and .sql extension, then applies the project-wide
+    Redis-key normalization (whitespace runs collapsed to a single
+    underscore, uppercased). This canonical form is what gets written as
+    the Redis key segment in ``graph:<schema>:<FN>`` AND used as the
+    manifest-vs-disk reconciliation key in strict mode — both paths must
+    use the same normalization or the strict-mode skip warning fires
+    spuriously when manifest/disk disagree on the space-vs-underscore
+    surface form.
+
+    Phase 0 finding (w35_diagnostic.md Section 2.5 issue #2): without
+    normalization, ``BASEL III CAPITAL.sql`` and ``BASEL_III_CAPITAL.sql``
+    produced two distinct Redis keys for the same logical function.
+    """
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    return SchemaAwareKeyspace.normalize_function_name(base)
 
 
 def _extract_schema_from_source(source_lines: list[str]) -> str | None:
@@ -241,9 +256,9 @@ def load_all_functions(
             # here so we don't try to open an empty path.
             if not task.source_file:
                 continue
-            manifest_file_keys.add(
-                os.path.splitext(os.path.basename(task.source_file))[0].upper()
-            )
+            # Use the same normalization as _function_name_from_file so the
+            # strict-mode reconciliation below compares like-for-like.
+            manifest_file_keys.add(_function_name_from_file(task.source_file))
             sql_files.append(os.path.join(resolved_dir, task.source_file))
 
         fs_keys = {

@@ -56,6 +56,10 @@ from src.parsing.query_engine import (
     determine_execution_order,
     assemble_llm_payload,
 )
+from src.parsing.schema_discovery import (
+    fallback_to_default_schema,
+    schema_for_function,
+)
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
@@ -686,6 +690,23 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
                 return
 
+            # --- Phase 1 schema-from-graph hook: when the classifier did
+            # not stamp a schema (LLM error / minimal output) and the user
+            # named a PL/SQL function, recover the owning schema from the
+            # parsed graph rather than falling back to OFSMDM downstream.
+            # Conservative: never overrides a schema the classifier set.
+            # Phase 4 broadens this to override mis-classified schemas.
+            if not state.get("schema") and _graph_redis is not None:
+                candidates = extract_function_candidates(request.query)
+                if candidates:
+                    owner = schema_for_function(candidates[0], _graph_redis)
+                    if owner:
+                        state["schema"] = owner
+                        logger.info(
+                            "Schema resolved from graph: schema_for_function(%s) -> %r",
+                            candidates[0], owner,
+                        )
+
             # --- Date-range override: any query with BOTH start_date and
             # end_date is a time-series question, which DataQueryAgent must
             # handle via a two-date SQL comparison. Force DATA_QUERY even if
@@ -759,7 +780,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             with stage_timer("vector_search", correlation_id):
                 results = await _vector_store.search(query_embedding=query_embedding, top_k=5)
             state["search_results"] = results
-            state["schema"] = state.get("schema") or "OFSMDM"
+            state["schema"] = state.get("schema") or fallback_to_default_schema(
+                "main.semantic_search", correlation_id,
+            )
 
             # Stage 3: Fetch source code
             fn_names = list(dict.fromkeys(r["function_name"] for r in results)) if results else []
@@ -782,7 +805,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 try:
                     target_var = state.get("target_variable", "").strip()
                     obj_name = state.get("object_name", "").strip()
-                    g_schema = state.get("schema", "OFSMDM")
+                    g_schema = state.get("schema") or fallback_to_default_schema(
+                        "main.graph_pipeline", correlation_id,
+                    )
 
                     if target_var:
                         g_query_type = "variable"
@@ -1171,7 +1196,9 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
     query_type = state["query_type"]
     filters = dict(state.get("phase2_filters") or {})
     target = (state.get("target_variable") or "").strip()
-    schema = state.get("schema") or "OFSMDM"
+    schema = state.get("schema") or fallback_to_default_schema(
+        "main._phase2_stream", correlation_id,
+    )
 
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as ' + query_type})}\n\n"
 
@@ -1312,7 +1339,9 @@ def _chunk_text(text: str, chunk_size: int = 4):
 
 async def _data_query_stream(state, user_query, correlation_id, provider, model):
     """Stream a DATA_QUERY response: LLM-generated SQL + safeguarded execution."""
-    schema = state.get("schema") or "OFSMDM"
+    schema = state.get("schema") or fallback_to_default_schema(
+        "main._data_query_stream", correlation_id,
+    )
     filters = dict(state.get("phase2_filters") or {})
 
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Classified as DATA_QUERY'})}\n\n"
@@ -1512,14 +1541,15 @@ def _detect_partial_source_for_query(
     ms_by_upper = {k.upper(): v for k, v in (multi_source or {}).items()}
 
     from src.parsing.store import get_function_graph
-    from src.agents.orchestrator import _PRECHECK_SCHEMAS
+    from src.parsing.schema_discovery import discovered_schemas
 
+    schemas_to_check = discovered_schemas(_graph_redis)
     for candidate in candidates:
         retrieved = ms_by_upper.get(candidate.upper())
         retrieved_source = (
             (retrieved or {}).get("source_code") if retrieved else None
         )
-        for schema in _PRECHECK_SCHEMAS:
+        for schema in schemas_to_check:
             if not detect_partial_source_function(
                 function_name=candidate,
                 schema=schema,

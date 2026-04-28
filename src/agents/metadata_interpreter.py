@@ -19,6 +19,10 @@ from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.schema_discovery import (
+    DEFAULT_FALLBACK_SCHEMA,
+    fallback_to_default_schema,
+)
 
 logger = get_logger(__name__, concern="oracle")
 
@@ -121,18 +125,38 @@ class MetadataInterpreter:
         self,
         schema_tools: SchemaTools,
         cache_client: CacheClient,
-        default_schema: str = "OFSMDM",
+        default_schema: str = DEFAULT_FALLBACK_SCHEMA,
     ) -> None:
         """Initialize the MetadataInterpreter.
 
         Args:
             schema_tools: Oracle query execution tools.
             cache_client: Redis cache client for source code caching.
-            default_schema: Default Oracle schema. Defaults to 'OFSMDM'.
+            default_schema: Schema used when ``state["schema"]`` is empty.
+                Defaults to :data:`DEFAULT_FALLBACK_SCHEMA` (currently
+                ``"OFSMDM"``). Phase 4 will replace this default with
+                proper resolution via
+                :func:`src.parsing.schema_discovery.schema_for_function`.
         """
         self._schema_tools = schema_tools
         self._cache = cache_client
         self._default_schema = default_schema
+
+    def _fallback_schema(self, callsite: str, correlation_id: str = "") -> str:
+        """Phase 1 explicit-fallback for the constructor-provided default.
+
+        Mirrors :func:`src.parsing.schema_discovery.fallback_to_default_schema`
+        but uses the per-instance ``_default_schema`` rather than the
+        module-global ``DEFAULT_FALLBACK_SCHEMA`` so tests/wiring that
+        override the default keep working.
+        """
+        logger.warning(
+            "schema not resolved upstream; falling back to %s at %s "
+            "(correlation_id=%s). Phase 4 will replace this with "
+            "schema_for_function() resolution.",
+            self._default_schema, callsite, correlation_id or "?",
+        )
+        return self._default_schema
 
     async def resolve_object(self, state: LogicState) -> LogicState:
         """Resolve a PL/SQL object in Oracle metadata or local files.
@@ -150,7 +174,9 @@ class MetadataInterpreter:
             ObjectNotFoundError: If the object is not found anywhere.
         """
         correlation_id = get_correlation_id()
-        schema = state.get("schema") or self._default_schema
+        schema = state.get("schema") or self._fallback_schema(
+            "metadata_interpreter.resolve_object", correlation_id
+        )
         object_name = state["object_name"]
 
         logger.info(
@@ -343,7 +369,9 @@ class MetadataInterpreter:
         """
         correlation_id = get_correlation_id()
         search_results = state.get("search_results", [])
-        schema = state.get("schema") or self._default_schema
+        schema = state.get("schema") or self._fallback_schema(
+            "metadata_interpreter.fetch_multi_logic", correlation_id
+        )
         multi_source: Dict[str, Any] = {}
 
         for result in search_results:

@@ -940,13 +940,20 @@ def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
         get_raw_source,
     )
 
-    reserved = {"full", "index", "aliases", "source", "meta"}
+    # SchemaAwareKeyspace.parse_graph_key rejects family keys
+    # (graph:meta:*, graph:full:*, graph:source:*, ...) so we don't need
+    # a local reserved-subkey set; mismatched-schema keys are also
+    # filtered out by the parsed_schema != schema check.
     for raw_key in keys:
-        key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
-        parts = key.split(":")
-        if len(parts) < 3 or parts[1] in reserved:
+        key = (
+            raw_key.decode("utf-8", errors="ignore")
+            if isinstance(raw_key, (bytes, bytearray))
+            else str(raw_key)
+        )
+        parsed = SchemaAwareKeyspace.parse_graph_key(key)
+        if parsed is None or parsed[0] != schema:
             continue
-        function_name = parts[2]
+        function_name = parsed[1]
         graph = get_function_graph(redis_client, schema, function_name)
         if not graph:
             continue
