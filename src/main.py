@@ -57,6 +57,7 @@ from src.parsing.query_engine import (
     assemble_llm_payload,
 )
 from src.parsing.schema_discovery import (
+    discovered_schemas,
     fallback_to_default_schema,
     schema_for_function,
 )
@@ -346,14 +347,23 @@ async def lifespan(app: FastAPI):
 
         if _graph_available:
             from src.phase2.origins_catalog import build_catalog
-            catalog = build_catalog(_graph_redis, schema=oracle_cfg["schema"])
-            logger.info(
-                f"Origins catalog built: "
-                f"{len(catalog.plsql_origins)} PLSQL origins, "
-                f"{len(catalog.etl_origins)} ETL origins, "
-                f"{len(catalog.gl_block_list)} blocked GL codes, "
-                f"{len(catalog.gl_eop_overrides)} EOP overrides"
-            )
+            # Phase 2: build per-schema catalogs for every schema the loader
+            # populated. build_catalog(redis) without schema iterates
+            # discovered_schemas() and returns a {schema: OriginsCatalog}
+            # dict; per-schema build failures are logged but do not abort
+            # the iteration.
+            catalogs = build_catalog(_graph_redis)
+            for sch, cat in catalogs.items():
+                logger.info(
+                    "Origins catalog built for %s: "
+                    "%d PLSQL origins, %d ETL origins, "
+                    "%d blocked GL codes, %d EOP overrides",
+                    sch,
+                    len(cat.plsql_origins),
+                    len(cat.etl_origins),
+                    len(cat.gl_block_list),
+                    len(cat.gl_eop_overrides),
+                )
     except ManifestValidationError as exc:
         # A malformed manifest is a developer error: refuse to start so the
         # broken module is fixed rather than silently loaded from cache.
@@ -405,20 +415,28 @@ async def lifespan(app: FastAPI):
     # render column data types in its LLM catalog and SQLGuardian can
     # reject CHAR bind comparisons. Non-fatal: on failure the catalog
     # falls back to name-only columns, matching pre-W33 behavior.
-    try:
-        if _cache_manager is not None:
-            snap = await _cache_manager.refresh_schema_snapshot(
-                oracle_cfg["schema"]
-            )
-            logger.info(
-                "Schema-type snapshot primed for %s (%s)",
-                oracle_cfg["schema"],
-                snap.get("summary") if isinstance(snap, dict) else snap,
-            )
-    except Exception as exc:
-        logger.warning(
-            f"Schema snapshot refresh failed at startup (non-fatal): {exc}"
-        )
+    # Phase 2: prime the schema-type snapshot for every discovered schema.
+    # Pre-Phase-2 this only ran for `oracle_cfg["schema"]` (OFSMDM) so
+    # DataQueryAgent's catalog had no OFSERM column types. Per-schema
+    # failures are logged but never abort the loop — a transient OFSERM
+    # outage must not prevent OFSMDM from priming.
+    if _cache_manager is not None:
+        snapshot_schemas = discovered_schemas(_graph_redis)
+        for sch in snapshot_schemas:
+            try:
+                snap = await _cache_manager.refresh_schema_snapshot(sch)
+                logger.info(
+                    "Schema-type snapshot primed for %s (%s)",
+                    sch,
+                    snap.get("summary") if isinstance(snap, dict) else snap,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Schema snapshot refresh failed for %s at startup "
+                    "(non-fatal): %s",
+                    sch,
+                    exc,
+                )
 
     # Auto-index configured modules on startup
     auto_index_modules = embedding_cfg.get("auto_index_modules", [])
@@ -1671,7 +1689,32 @@ async def _handle_command(
     elif command == "cache-clear" and args:
         return await _cache_manager.clear_cache_entry(args[0], schema)
     elif command == "refresh-schema":
-        return await _cache_manager.refresh_schema_snapshot(schema)
+        # Phase 2: refresh every discovered schema unless the user names
+        # one explicitly via `/refresh-schema OFSERM`. Single-arg form
+        # remains for parity with the per-schema admin workflow.
+        target_schemas = (
+            [args[0]] if args else discovered_schemas(_graph_redis)
+        )
+        results = {}
+        for sch in target_schemas:
+            try:
+                results[sch] = await _cache_manager.refresh_schema_snapshot(sch)
+            except Exception as exc:
+                results[sch] = {
+                    "status": "error",
+                    "schema": sch,
+                    "message": str(exc),
+                }
+        if len(results) == 1:
+            # Preserve the historical single-schema response shape so
+            # existing tooling that pipes /refresh-schema's output keeps
+            # working when only one schema is targeted.
+            return next(iter(results.values()))
+        return {
+            "status": "completed",
+            "schemas": list(results.keys()),
+            "results": results,
+        }
     elif command == "index-module" and args:
         force = "--force" in args
         module_name = [a for a in args if a != "--force"][0]
