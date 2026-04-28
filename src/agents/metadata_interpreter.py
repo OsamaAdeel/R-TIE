@@ -21,8 +21,11 @@ from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.schema_discovery import (
     DEFAULT_FALLBACK_SCHEMA,
+    discovered_schemas,
     fallback_to_default_schema,
+    schema_for_function,
 )
+from src.parsing.store import get_raw_source
 
 logger = get_logger(__name__, concern="oracle")
 
@@ -54,6 +57,30 @@ _RTIE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 MODULES_DIRS = [
     os.path.join(_RTIE_ROOT, "db", "modules"),
 ]
+
+
+def _to_source_dicts(lines: List[Any]) -> List[Dict[str, Any]]:
+    """Coerce a loader-cached line list into the ``[{"line": N, "text": ...}]``
+    shape that ``state["source_code"]`` carries.
+
+    The loader writes a list of raw strings (one per source line) under
+    ``graph:source:<schema>:<fn>``. The rtie:logic / Oracle / disk paths
+    return a list of dicts. Downstream consumers (logic_explainer,
+    grounding evaluator, partial-source detector) accept either shape but
+    settle on the dict shape — match it here so the loader-cache short-
+    circuit produces the same payload the rest of the pipeline expects.
+    """
+    out: List[Dict[str, Any]] = []
+    for i, raw in enumerate(lines):
+        if isinstance(raw, dict):
+            # Already in the right shape (defensive — current loader never
+            # writes dicts under graph:source, but a future change might).
+            out.append(raw)
+            continue
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        out.append({"line": i + 1, "text": str(raw)})
+    return out
 
 
 def _scan_modules_for_file(object_name: str) -> Optional[str]:
@@ -137,10 +164,55 @@ class MetadataInterpreter:
                 ``"OFSMDM"``). Phase 4 will replace this default with
                 proper resolution via
                 :func:`src.parsing.schema_discovery.schema_for_function`.
+
+        The graph Redis client (sync) used for ``graph:source:*`` and
+        function-schema discovery is wired in separately via
+        :meth:`set_graph_redis_client`. It is optional — when absent, the
+        Phase-1 lookup chain (rtie:logic → Oracle → disk) runs unchanged
+        and Phase 3's loader-cache short-circuit is skipped.
         """
         self._schema_tools = schema_tools
         self._cache = cache_client
         self._default_schema = default_schema
+        self._graph_redis = None
+
+    def set_graph_redis_client(self, graph_redis_client) -> None:
+        """Wire the graph Redis client (sync) used for ``graph:source:*``.
+
+        Phase 3 makes source retrieval read-through from the loader-managed
+        ``graph:source:<schema>:<fn>`` cache before falling back to
+        ``rtie:logic`` → Oracle → disk. The graph Redis client is the only
+        client that holds those keys (the ``cache_client`` is async and
+        owns the ``rtie:logic`` cache; the loader writes to a separate
+        sync client). This setter mirrors
+        ``LogicExplainer.set_redis_client`` — the constructor cannot take
+        the client directly because ``_graph_redis`` is created later in
+        the lifespan than ``_metadata_interpreter``.
+        """
+        self._graph_redis = graph_redis_client
+
+    def _fetch_loader_source(
+        self, schema: str, object_name: str
+    ) -> Optional[List[str]]:
+        """Read the loader-managed source cache.
+
+        Returns the raw line list from ``graph:source:<schema>:<fn>`` or
+        None when the graph Redis client isn't wired, the key is absent,
+        or the read raises. Never raises — a Redis hiccup falls through
+        to the rtie:logic / Oracle / disk pipeline.
+        """
+        if self._graph_redis is None:
+            return None
+        try:
+            return get_raw_source(
+                self._graph_redis, schema, object_name.upper()
+            )
+        except Exception as exc:
+            logger.debug(
+                "graph:source lookup failed for %s.%s: %s",
+                schema, object_name, exc,
+            )
+            return None
 
     def _fallback_schema(self, callsite: str, correlation_id: str = "") -> str:
         """Phase 1 explicit-fallback for the constructor-provided default.
@@ -232,7 +304,8 @@ class MetadataInterpreter:
     async def fetch_logic(self, state: LogicState) -> LogicState:
         """Fetch PL/SQL source code from cache, Oracle, or disk.
 
-        Priority: Redis cache -> Oracle ALL_SOURCE -> db/modules/ .sql files.
+        Priority: loader-managed ``graph:source:<schema>:<fn>`` (Phase 3)
+        → ``rtie:logic`` cache → Oracle ALL_SOURCE → ``db/modules/`` .sql.
         If Redis is unavailable, falls back gracefully.
 
         Args:
@@ -251,7 +324,24 @@ class MetadataInterpreter:
             f"correlation_id={correlation_id}"
         )
 
-        # 1. Try Redis cache first
+        # 0. Phase 3: try the loader-owned source cache first. This is
+        # the canonical source-of-truth for every loaded function and is
+        # populated for both OFSMDM and OFSERM. Pre-Phase-3 this lookup
+        # was skipped, which is why W49 fired for OFSERM functions even
+        # though their bodies were retrievable.
+        loader_lines = self._fetch_loader_source(schema, object_name)
+        if loader_lines is not None:
+            source_lines = _to_source_dicts(loader_lines)
+            state["source_code"] = source_lines
+            state["cache_hit"] = True
+            state["cache_stale"] = False
+            logger.info(
+                "Loader-cache HIT for %s.%s (%d lines) | correlation_id=%s",
+                schema, object_name, len(source_lines), correlation_id,
+            )
+            return state
+
+        # 1. Try Redis cache (rtie:logic: — Oracle/disk fallbacks)
         cached = await self._cache.get_json(*cache_key_parts)
         if cached:
             state["source_code"] = cached["source_code"]
@@ -357,32 +447,65 @@ class MetadataInterpreter:
     async def fetch_multi_logic(self, state: LogicState) -> LogicState:
         """Fetch source code for multiple functions from semantic search results.
 
-        Iterates over search_results in state, fetches each function's source
-        via the existing pipeline (Redis -> Oracle -> disk), and stores all
-        sources in state['multi_source'].
+        Iterates over search_results in state. For each function, resolves
+        the schema that actually owns it (Phase 3) so OFSERM functions
+        read from ``graph:source:OFSERM:*`` even when the request was
+        routed to OFSMDM. Stores results in ``state['multi_source']``.
 
         Args:
             state: Pipeline state with search_results containing function names.
 
         Returns:
-            Updated state with multi_source dict mapping function_name to source info.
+            Updated state with multi_source dict mapping function_name to
+            source info. Each entry now also carries a ``schema`` field
+            recording which schema served the body — useful for downstream
+            hierarchy/LLM-context callers that need to know whether the
+            function is OFSMDM-side or OFSERM-side.
         """
         correlation_id = get_correlation_id()
         search_results = state.get("search_results", [])
-        schema = state.get("schema") or self._fallback_schema(
+        request_schema = state.get("schema") or self._fallback_schema(
             "metadata_interpreter.fetch_multi_logic", correlation_id
+        )
+        # Snapshot the discovered-schema list once so per-function
+        # resolution doesn't issue a fresh SCAN for every result.
+        known_schemas = (
+            discovered_schemas(self._graph_redis)
+            if self._graph_redis is not None
+            else [request_schema]
         )
         multi_source: Dict[str, Any] = {}
 
         for result in search_results:
             fn_name = result["function_name"]
+
+            # Phase 3: resolve the actual owning schema from Redis. The
+            # request-level `state["schema"]` is what the orchestrator
+            # routed to (OFSMDM by default today); the function may
+            # actually live in OFSERM. Try probing first.
+            resolved_schema = request_schema
+            if self._graph_redis is not None:
+                try:
+                    found = schema_for_function(
+                        fn_name, self._graph_redis, schemas=known_schemas
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "schema_for_function failed for %s: %s | correlation_id=%s",
+                        fn_name, exc, correlation_id,
+                    )
+                    found = None
+                if found:
+                    resolved_schema = found
+
             logger.info(
-                f"Fetching source for {fn_name} | correlation_id={correlation_id}"
+                "Fetching source for %s (schema=%s) | correlation_id=%s",
+                fn_name, resolved_schema, correlation_id,
             )
 
             # Build a mini-state for existing fetch_logic
             mini_state: Dict[str, Any] = {
-                "schema": schema,
+                "schema": resolved_schema,
                 "object_name": fn_name,
                 "source_code": [],
                 "cache_hit": False,
@@ -392,6 +515,7 @@ class MetadataInterpreter:
                 fetched = await self.fetch_logic(mini_state)
                 multi_source[fn_name] = {
                     "source_code": fetched["source_code"],
+                    "schema": resolved_schema,
                     "description": result.get("description", ""),
                     "tables_read": result.get("tables_read", ""),
                     "tables_written": result.get("tables_written", ""),
@@ -404,6 +528,7 @@ class MetadataInterpreter:
                 )
                 multi_source[fn_name] = {
                     "source_code": [],
+                    "schema": resolved_schema,
                     "description": result.get("description", ""),
                     "tables_read": result.get("tables_read", ""),
                     "tables_written": result.get("tables_written", ""),

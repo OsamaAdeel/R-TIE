@@ -26,11 +26,29 @@ class VectorStore:
 
     Manages a RediSearch index over PL/SQL function description embeddings.
     All operations degrade gracefully when Redis is unavailable.
+
+    Phase 3 layout:
+      - Doc keys: ``rtie:vec:<schema>:<fn>`` (was ``rtie:vec:<module>:<fn>``).
+        The schema segment makes function names unambiguous across the
+        OFSMDM/OFSERM corpora.
+      - Schema is a ``TAG`` field, queryable as ``@schema:{OFSERM}`` and
+        combinable with the KNN clause (e.g. ``(@schema:{OFSERM})=>[KNN ...]``).
+      - Module remains a ``TAG`` for module-scoped legacy queries.
+
+    The prefix and TAG addition are not backward-compatible with the
+    Phase-2 index — :meth:`ensure_index` detects an old-shape index at
+    startup and drops + recreates it. The indexer reindexes from scratch
+    after that, taking the one-time embedding-call cost.
     """
 
     EMBEDDING_DIM = 1536
     INDEX_NAME = "idx:rtie_vectors"
+    # Phase 3: prefix changed to include schema. Anything keyed under
+    # the old `rtie:vec:<module>:<fn>` shape is purged on FLUSHDB +
+    # restart; the index is dropped and recreated on first
+    # ensure_index() call after the upgrade.
     KEY_PREFIX = "rtie:vec:"
+    SCHEMA_FIELD = "schema"
 
     def __init__(self, host: str, port: int) -> None:
         """Initialize the vector store client.
@@ -69,23 +87,53 @@ class VectorStore:
     async def ensure_index(self) -> bool:
         """Create the RediSearch vector index if it does not exist.
 
+        Phase 3: detect an existing index that pre-dates the schema TAG
+        addition (i.e. its FT.INFO does NOT report a ``schema`` attribute)
+        and drop + recreate it so the new field can be added. RediSearch
+        does not support adding fields to an existing index. The drop
+        also clears any stale documents under the old
+        ``rtie:vec:<module>:<fn>`` key shape; the indexer rebuilds them
+        on the next startup pass.
+
         Returns:
-            True if the index exists or was created, False on error.
+            True if the index exists with the Phase-3 shape (or was
+            created), False on error.
         """
         if not self._client:
             logger.warning("VectorStore unavailable — cannot create index")
             return False
 
-        try:
-            await self._client.ft(self.INDEX_NAME).info()
-            logger.info(f"Index {self.INDEX_NAME} already exists")
-            return True
-        except Exception:
-            pass
+        existing_attrs = await self._index_attribute_names()
+        if existing_attrs is not None:
+            if self.SCHEMA_FIELD in existing_attrs:
+                logger.info(
+                    f"Index {self.INDEX_NAME} already exists with Phase-3 "
+                    f"schema field"
+                )
+                return True
+            # Pre-Phase-3 index — drop it and any documents indexed under
+            # the old key shape, then recreate.
+            logger.info(
+                "Index %s missing '%s' attribute (pre-Phase-3 shape); "
+                "dropping and recreating",
+                self.INDEX_NAME, self.SCHEMA_FIELD,
+            )
+            try:
+                # delete_documents=True purges the underlying HASH keys so
+                # the next indexer pass writes fresh under the new prefix.
+                await self._client.ft(self.INDEX_NAME).dropindex(
+                    delete_documents=True
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Drop of pre-Phase-3 index failed (continuing anyway): %s",
+                    exc,
+                )
 
         try:
             schema = (
                 TextField("function_name"),
+                TagField(self.SCHEMA_FIELD),
                 TagField("module"),
                 TextField("description"),
                 TextField("tables_read"),
@@ -117,6 +165,46 @@ class VectorStore:
             logger.error(f"Failed to create vector index: {exc}")
             return False
 
+    async def _index_attribute_names(self) -> Optional[set[str]]:
+        """Return the set of attribute names declared on the existing index.
+
+        Returns ``None`` when no index exists. RediSearch's INFO response
+        nests attributes under the ``attributes`` key as a list of
+        ``[identifier, name, ...]`` pairs (binary on this client) — pull
+        the human-readable names out so the caller can probe for the
+        ``schema`` field without re-running create_index.
+        """
+        try:
+            info = await self._client.ft(self.INDEX_NAME).info()
+        except Exception:
+            return None
+        attrs_raw = info.get("attributes") or info.get(b"attributes") or []
+        names: set[str] = set()
+        for attr in attrs_raw:
+            # attr is a flat list like
+            # [b'identifier', b'schema', b'attribute', b'schema',
+            #  b'type', b'TAG', ...]. Walk it as key/value pairs and pull
+            # the value of either 'identifier' or 'attribute'.
+            if isinstance(attr, (list, tuple)):
+                pairs = list(attr)
+                for i in range(0, len(pairs) - 1, 2):
+                    key = pairs[i]
+                    value = pairs[i + 1]
+                    if isinstance(key, (bytes, bytearray)):
+                        key = key.decode("utf-8", errors="replace")
+                    if isinstance(value, (bytes, bytearray)):
+                        value = value.decode("utf-8", errors="replace")
+                    if key in ("identifier", "attribute"):
+                        names.add(str(value))
+            elif isinstance(attr, dict):
+                for k in ("identifier", "attribute"):
+                    val = attr.get(k) or attr.get(k.encode())
+                    if isinstance(val, (bytes, bytearray)):
+                        val = val.decode("utf-8", errors="replace")
+                    if val:
+                        names.add(str(val))
+        return names
+
     async def upsert_function(
         self,
         module: str,
@@ -128,11 +216,13 @@ class VectorStore:
         key_columns: List[str],
         source_hash: str,
         status: str = "approved",
+        schema: Optional[str] = None,
     ) -> bool:
         """Store or update a function's description and embedding.
 
         Args:
-            module: Module/batch name.
+            module: Module/batch name (legacy TAG, retained for module-
+                scoped searches).
             function_name: PL/SQL function name.
             description: LLM-generated rich description.
             embedding: Float vector from embedding model.
@@ -141,6 +231,11 @@ class VectorStore:
             key_columns: List of key columns referenced.
             source_hash: SHA256 of the source code.
             status: 'approved' or 'pending'. Defaults to 'approved'.
+            schema: Phase 3 — Oracle owner the function belongs to (e.g.
+                ``OFSMDM`` or ``OFSERM``). Stored as the new ``schema``
+                TAG and used to namespace the doc key under
+                ``rtie:vec:<schema>:<fn>``. ``None`` is accepted for
+                back-compat but logged as a warning so the gap is visible.
 
         Returns:
             True if stored successfully, False on error.
@@ -149,11 +244,23 @@ class VectorStore:
             logger.warning("VectorStore unavailable — skipping upsert")
             return False
 
+        if not schema:
+            logger.warning(
+                "upsert_function: schema not provided for %s:%s; the doc "
+                "will land under the empty-schema key. Phase 3 callers "
+                "must pass schema.",
+                module, function_name,
+            )
+            schema_str = ""
+        else:
+            schema_str = schema
+
         try:
-            key = self._doc_key(module, function_name)
+            key = self._doc_key(schema_str, function_name)
             description_hash = hashlib.sha256(description.encode()).hexdigest()[:16]
             mapping = {
                 b"function_name": function_name.encode(),
+                self.SCHEMA_FIELD.encode(): schema_str.encode(),
                 b"module": module.encode(),
                 b"description": description.encode(),
                 b"tables_read": ",".join(tables_read).encode(),
@@ -166,7 +273,10 @@ class VectorStore:
                 b"embedding": self._float_list_to_bytes(embedding),
             }
             await self._client.hset(key, mapping=mapping)
-            logger.info(f"Indexed function: {module}:{function_name}")
+            logger.info(
+                "Indexed function: %s:%s:%s",
+                schema_str or "?", module, function_name,
+            )
             return True
         except Exception as exc:
             logger.error(f"Failed to upsert {module}:{function_name}: {exc}")
@@ -177,6 +287,7 @@ class VectorStore:
         query_embedding: List[float],
         top_k: int = 3,
         module_filter: Optional[str] = None,
+        schema_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """KNN vector similarity search for functions.
 
@@ -184,10 +295,14 @@ class VectorStore:
             query_embedding: Query vector from embedding model.
             top_k: Number of results to return. Defaults to 3.
             module_filter: Optional module name to scope search.
+            schema_filter: Phase 3 — optional Oracle owner to scope search
+                (e.g. ``OFSERM``). Combined with ``module_filter`` as an
+                AND clause. ``None`` (default) searches every schema —
+                preserves the pre-Phase-3 multi-schema-blind behaviour.
 
         Returns:
             List of result dicts with function_name, module, description,
-            tables_read, tables_written, key_columns, and score.
+            tables_read, tables_written, key_columns, schema, and score.
         """
         if not self._client:
             logger.warning("VectorStore unavailable — returning empty results")
@@ -195,13 +310,15 @@ class VectorStore:
 
         try:
             blob = self._float_list_to_bytes(query_embedding)
-
-            filter_clause = f"@module:{{{module_filter}}}" if module_filter else "*"
+            filter_clause = self._build_filter_clause(
+                module_filter=module_filter,
+                schema_filter=schema_filter,
+            )
             q = (
                 Query(f"({filter_clause})=>[KNN {top_k} @embedding $vec AS score]")
                 .sort_by("score")
                 .return_fields(
-                    "function_name", "module", "description",
+                    "function_name", self.SCHEMA_FIELD, "module", "description",
                     "tables_read", "tables_written", "key_columns", "score",
                 )
                 .dialect(2)
@@ -214,6 +331,7 @@ class VectorStore:
             for doc in results.docs:
                 hits.append({
                     "function_name": self._decode(doc.function_name),
+                    "schema": self._decode(getattr(doc, self.SCHEMA_FIELD, "")),
                     "module": self._decode(doc.module),
                     "description": self._decode(doc.description),
                     "tables_read": self._decode(doc.tables_read),
@@ -227,13 +345,34 @@ class VectorStore:
             logger.error(f"Vector search failed: {exc}")
             return []
 
+    @staticmethod
+    def _build_filter_clause(
+        module_filter: Optional[str],
+        schema_filter: Optional[str],
+    ) -> str:
+        """Build the RediSearch pre-filter clause for KNN.
+
+        Empty filter is ``*`` (match-all). Single TAG filter is the
+        ``@field:{value}`` form. Two TAG filters combine via space (AND).
+        """
+        clauses = []
+        if schema_filter:
+            clauses.append(f"@schema:{{{schema_filter}}}")
+        if module_filter:
+            clauses.append(f"@module:{{{module_filter}}}")
+        if not clauses:
+            return "*"
+        return " ".join(clauses)
+
     async def get_function_doc(
-        self, module: str, function_name: str
+        self, schema: str, function_name: str
     ) -> Optional[Dict[str, Any]]:
         """Retrieve a function's indexed document.
 
         Args:
-            module: Module/batch name.
+            schema: Oracle owner the function belongs to (Phase 3:
+                replaces the pre-Phase-3 ``module`` argument that named
+                a doc-key segment).
             function_name: PL/SQL function name.
 
         Returns:
@@ -242,20 +381,20 @@ class VectorStore:
         if not self._client:
             return None
         try:
-            key = self._doc_key(module, function_name)
+            key = self._doc_key(schema, function_name)
             data = await self._client.hgetall(key)
             if not data:
                 return None
             return {k.decode(): v.decode() for k, v in data.items() if k != b"embedding"}
         except Exception as exc:
-            logger.warning(f"Failed to get doc {module}:{function_name}: {exc}")
+            logger.warning(f"Failed to get doc {schema}:{function_name}: {exc}")
             return None
 
-    async def delete_function(self, module: str, function_name: str) -> bool:
+    async def delete_function(self, schema: str, function_name: str) -> bool:
         """Delete a function from the vector index.
 
         Args:
-            module: Module/batch name.
+            schema: Oracle owner (Phase 3: doc-key segment).
             function_name: PL/SQL function name.
 
         Returns:
@@ -264,21 +403,22 @@ class VectorStore:
         if not self._client:
             return False
         try:
-            key = self._doc_key(module, function_name)
+            key = self._doc_key(schema, function_name)
             await self._client.delete(key)
-            logger.info(f"Deleted vector doc: {module}:{function_name}")
+            logger.info(f"Deleted vector doc: {schema}:{function_name}")
             return True
         except Exception as exc:
-            logger.warning(f"Failed to delete {module}:{function_name}: {exc}")
+            logger.warning(f"Failed to delete {schema}:{function_name}: {exc}")
             return False
 
     async def list_indexed_functions(
-        self, module: Optional[str] = None
+        self, schema: Optional[str] = None
     ) -> List[str]:
         """List all indexed function names.
 
         Args:
-            module: Optional module filter.
+            schema: Optional Oracle-owner filter (Phase 3: replaces
+                ``module``).
 
         Returns:
             List of function names.
@@ -286,7 +426,7 @@ class VectorStore:
         if not self._client:
             return []
         try:
-            pattern = f"{self.KEY_PREFIX}{module}:*" if module else f"{self.KEY_PREFIX}*"
+            pattern = f"{self.KEY_PREFIX}{schema}:*" if schema else f"{self.KEY_PREFIX}*"
             keys = []
             async for key in self._client.scan_iter(match=pattern.encode()):
                 name = key.decode().split(":")[-1]
@@ -315,17 +455,20 @@ class VectorStore:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    def _doc_key(self, module: str, function_name: str) -> str:
+    def _doc_key(self, schema: str, function_name: str) -> str:
         """Build a Redis key for a function document.
 
+        Phase 3: the second segment is the Oracle owner (``OFSMDM``,
+        ``OFSERM``, …). Pre-Phase-3 it was the module name.
+
         Args:
-            module: Module/batch name.
+            schema: Oracle owner (e.g. ``OFSMDM``).
             function_name: PL/SQL function name.
 
         Returns:
             Redis key string.
         """
-        return f"{self.KEY_PREFIX}{module}:{function_name}"
+        return f"{self.KEY_PREFIX}{schema}:{function_name}"
 
     @staticmethod
     def _float_list_to_bytes(floats: List[float]) -> bytes:

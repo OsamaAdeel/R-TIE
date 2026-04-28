@@ -296,6 +296,14 @@ async def lifespan(app: FastAPI):
         # header on streamed explanations.
         _logic_explainer.set_redis_client(_graph_redis)
 
+        # Phase 3: same client into MetadataInterpreter so source
+        # retrieval can read graph:source:<schema>:<fn> (the loader's
+        # canonical source cache) before falling through to rtie:logic /
+        # Oracle / disk. Without this wiring the Phase 1 chain runs
+        # unchanged — fine for OFSMDM but it's why W49 fired for OFSERM.
+        if _metadata_interpreter is not None:
+            _metadata_interpreter.set_graph_redis_client(_graph_redis)
+
         # W38: auto-discover every module folder under db/modules/ that has a
         # functions/ subdirectory. Union with any explicit functions_dirs from
         # config so existing deployments keep working.
@@ -438,20 +446,35 @@ async def lifespan(app: FastAPI):
                     exc,
                 )
 
-    # Auto-index configured modules on startup
-    auto_index_modules = embedding_cfg.get("auto_index_modules", [])
-    for module_name in auto_index_modules:
+    # Phase 3: auto-index every function the loader populated, across
+    # every discovered schema. Reads from graph:<schema>:<fn> +
+    # graph:source:<schema>:<fn> (Redis is the source of truth) rather
+    # than re-walking disk — naturally honours the manifest's
+    # active/inactive filter and so produces ~141 OFSERM embeddings
+    # rather than 554. Per-schema failures are logged but never abort
+    # the run.
+    if _graph_redis is not None:
         try:
-            logger.info(f"Auto-indexing module: {module_name}")
-            result = await _indexer.index_module(module_name, force=False)
-            logger.info(
-                f"Auto-index {module_name}: "
-                f"{result.get('indexed', 0)} indexed, "
-                f"{result.get('skipped', 0)} skipped, "
-                f"{result.get('errors', 0)} errors"
+            result = await _indexer.index_all_loaded(
+                _graph_redis, force=False
             )
+            for sch, sch_result in (result.get("results") or {}).items():
+                logger.info(
+                    "Auto-index %s: %d indexed, %d skipped, %d errors",
+                    sch,
+                    sch_result.get("indexed", 0),
+                    sch_result.get("skipped", 0),
+                    sch_result.get("errors", 0),
+                )
         except Exception as exc:
-            logger.warning(f"Auto-indexing failed for {module_name} (non-fatal): {exc}")
+            logger.warning(
+                f"Auto-indexing failed (non-fatal): {exc}"
+            )
+    else:
+        logger.info(
+            "Auto-indexing skipped — graph Redis client not available "
+            "(loader did not run)."
+        )
 
     logger.info(
         "LangSmith tracing: %s (project=%s)",
