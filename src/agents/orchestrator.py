@@ -24,6 +24,7 @@ from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_function_graph
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.telemetry import stage_timer
 
 logger = get_logger(__name__, concern="app")
@@ -493,7 +494,7 @@ def find_similar_function_names(
     for schema in schemas:
         try:
             cursor = 0
-            pattern = f"graph:{schema}:*"
+            pattern = SchemaAwareKeyspace.graph_scan_pattern(schema)
             while True:
                 cursor, keys = redis_client.scan(
                     cursor=cursor, match=pattern, count=200

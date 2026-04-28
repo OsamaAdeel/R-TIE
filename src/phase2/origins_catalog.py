@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.store import get_function_graph
 from src.logger import get_logger
 
@@ -70,7 +71,7 @@ class OriginsCatalog:
         ``CatalogBuildError`` (or lets a lower-level exception propagate) so
         the caller can refuse to swap the module global.
         """
-        pattern = f"graph:{self.schema}:*"
+        pattern = SchemaAwareKeyspace.graph_scan_pattern(self.schema)
         raw_keys = self.redis.keys(pattern) or []
 
         # Enumerate the expected function names from Redis keys first, so

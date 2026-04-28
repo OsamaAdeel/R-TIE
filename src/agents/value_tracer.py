@@ -25,6 +25,7 @@ from src.agents.ambiguity import (
 from src.agents.data_query import build_tables_to_columns
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.query_engine import (
     determine_execution_order,
     fetch_nodes_by_ids,
@@ -390,19 +391,19 @@ class ValueTracerAgent:
         function names before they reach the user.
         """
         try:
-            keys = self._redis.keys(f"graph:{schema}:*")
+            keys = self._redis.keys(SchemaAwareKeyspace.graph_scan_pattern(schema))
         except Exception as exc:
             logger.warning("Could not enumerate graph keys for sanity check: %s", exc)
             return set()
         names: set[str] = set()
-        prefix = f"graph:{schema}:".encode()
+        marker = SchemaAwareKeyspace.graph_prefix(schema)
+        prefix = marker.encode()
         for k in keys:
             if isinstance(k, bytes):
                 if k.startswith(prefix):
                     names.add(k[len(prefix):].decode("utf-8", errors="ignore"))
             else:
                 s = str(k)
-                marker = f"graph:{schema}:"
                 if marker in s:
                     names.add(s.split(marker, 1)[1])
         return {n for n in names if n and "meta" not in n and "source" not in n}

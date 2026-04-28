@@ -26,6 +26,7 @@ from src.parsing.store import (
     store_batch_hierarchy,
     is_graph_stale,
 )
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.manifest import (
     BatchManifest,
     ManifestValidationError,
@@ -408,7 +409,7 @@ def load_all_functions(
             alias_map = build_alias_map()
             # Store alias map in Redis using the standard key pattern
             from src.parsing.serializer import to_msgpack
-            alias_key = f"graph:aliases:{primary_schema}"
+            alias_key = SchemaAwareKeyspace.graph_aliases_key(primary_schema)
             redis_client.set(alias_key, to_msgpack(alias_map))
         except Exception:
             tb = traceback.format_exc()

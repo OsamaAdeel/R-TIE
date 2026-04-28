@@ -31,6 +31,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.store import get_column_index
 from src.telemetry import stage_timer
 from src.tools.sql_guardian import (
@@ -929,7 +930,7 @@ def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
         return tables_to_columns
 
     try:
-        keys = redis_client.keys(f"graph:{schema}:*") or []
+        keys = redis_client.keys(SchemaAwareKeyspace.graph_scan_pattern(schema)) or []
     except Exception as exc:
         logger.warning("Redis keys() failed during catalog build: %s", exc)
         return tables_to_columns
