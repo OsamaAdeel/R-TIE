@@ -817,7 +817,7 @@ class DataQueryAgent:
 
 def load_column_types(
     redis_client,
-    schema: str,
+    schema: Optional[str] = None,
     key_prefix: str = "rtie",
 ) -> dict[str, dict[str, dict]]:
     """Load per-column Oracle data types from the cached schema snapshot.
@@ -828,13 +828,52 @@ def load_column_types(
     client so DataQueryAgent can render types in the LLM catalog and the
     SQLGuardian can validate CHAR comparisons.
 
+    *schema* scopes the lookup to a single Oracle owner. ``None`` (the
+    Phase 2 default) iterates every schema discovered in Redis and
+    merges the per-schema snapshots into a single map, so a caller that
+    doesn't know the schema (or wants visibility across schemas) gets
+    the union. When two schemas share a table name, the snapshot read
+    later wins — a documented but rare collision in the OFSAA corpora.
+
     Returns ``{TABLE_UPPER: {COL_UPPER: {data_type, data_length,
-    data_precision, data_scale}}}`` or ``{}`` when the snapshot is
-    absent, Redis is unavailable, or the payload is malformed. Never
-    raises — a missing snapshot degrades gracefully to an untyped catalog.
+    data_precision, data_scale}}}`` or ``{}`` when no snapshot is
+    available, Redis is unreachable, or every payload is malformed.
+    Never raises — a missing snapshot degrades gracefully to an
+    untyped catalog.
     """
     if redis_client is None:
         return {}
+
+    if schema is None:
+        from src.parsing.schema_discovery import discovered_schemas
+        schemas = discovered_schemas(redis_client)
+    else:
+        schemas = [schema]
+
+    out: dict[str, dict[str, dict]] = {}
+    for sch in schemas:
+        per_schema = _load_column_types_one_schema(
+            redis_client, sch, key_prefix
+        )
+        for table_upper, table_out in per_schema.items():
+            # Same table in two schemas: later schema wins. OFSAA's
+            # canonical naming makes this a non-issue in practice.
+            existing = out.get(table_upper)
+            if existing:
+                merged = dict(existing)
+                merged.update(table_out)
+                out[table_upper] = merged
+            else:
+                out[table_upper] = table_out
+    return out
+
+
+def _load_column_types_one_schema(
+    redis_client,
+    schema: str,
+    key_prefix: str,
+) -> dict[str, dict[str, dict]]:
+    """Single-schema implementation of :func:`load_column_types`."""
     key = f"{key_prefix}:schema:snapshot:{schema}"
     try:
         raw = redis_client.get(key)
@@ -918,21 +957,54 @@ def format_column_type(type_info: Optional[dict]) -> str:
     return dtype
 
 
-def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
+def build_tables_to_columns(
+    redis_client,
+    schema: Optional[str] = None,
+) -> dict[str, set[str]]:
     """Build per-table `{table: {columns}}` mapping from the graph in Redis.
 
     Shared by `DataQueryAgent` (for SQL generation + residency checks) and
-    `ValueTracerAgent` (for identifier-ambiguity detection). Returns an
-    empty dict when Redis is unavailable or no graphs are stored.
+    `ValueTracerAgent` (for identifier-ambiguity detection).
+
+    *schema* scopes the scan to a single Oracle owner. ``None`` (the
+    Phase 2 default) iterates every schema discovered in Redis and
+    aggregates the table → column mapping across all of them. Tables
+    shared between schemas (none today, but defensively handled) merge
+    column sets via union. Returns an empty dict when Redis is
+    unavailable or no graphs are stored.
     """
     tables_to_columns: dict[str, set[str]] = {}
     if redis_client is None:
         return tables_to_columns
 
+    if schema is None:
+        from src.parsing.schema_discovery import discovered_schemas
+        schemas = discovered_schemas(redis_client)
+    else:
+        schemas = [schema]
+
+    for sch in schemas:
+        for table, cols in _build_tables_to_columns_one_schema(
+            redis_client, sch
+        ).items():
+            tables_to_columns.setdefault(table, set()).update(cols)
+
+    return tables_to_columns
+
+
+def _build_tables_to_columns_one_schema(
+    redis_client,
+    schema: str,
+) -> dict[str, set[str]]:
+    """Single-schema implementation of :func:`build_tables_to_columns`."""
+    tables_to_columns: dict[str, set[str]] = {}
+
     try:
         keys = redis_client.keys(SchemaAwareKeyspace.graph_scan_pattern(schema)) or []
     except Exception as exc:
-        logger.warning("Redis keys() failed during catalog build: %s", exc)
+        logger.warning(
+            "Redis keys() failed during catalog build for %s: %s", schema, exc
+        )
         return tables_to_columns
 
     from src.parsing.store import (

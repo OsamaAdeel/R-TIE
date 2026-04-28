@@ -1,15 +1,25 @@
 """Unit tests for src.phase2.origins_catalog.
 
-Focus: the module-global ``_catalog`` MUST NOT be left in a half-initialised
-state when a build fails. These tests lock in that guarantee — they are the
-reason the zombie-worker bug surfaced as UNKNOWN classifications, and they
-prevent it from silently returning.
+Two distinct contracts are exercised:
+
+1. The atomic-swap invariant for the Phase-1 single-schema API. The
+   per-schema entry in ``_catalogs`` must NOT be left in a half-initialised
+   state when a build fails. These tests lock in that guarantee — they are
+   the reason the zombie-worker bug surfaced as UNKNOWN classifications,
+   and they prevent it from silently returning.
+
+2. The Phase-2 multi-schema contract: ``build_catalog(redis)`` (no schema
+   arg) iterates every discovered schema, ``to_redis`` persists a per-schema
+   snapshot under ``graph:origins:<schema>:*`` keys, and reader functions
+   accept an optional ``schema`` argument that scopes lookups.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from src.parsing.keyspace import SchemaAwareKeyspace
+from src.parsing.serializer import from_msgpack
 from src.phase2 import origins_catalog as oc
 from src.phase2.origins_catalog import (
     BOOTSTRAP_ETL_ORIGINS,
@@ -18,6 +28,8 @@ from src.phase2.origins_catalog import (
     build_catalog,
     classify_origin,
     get_catalog,
+    get_eop_override,
+    get_known_schemas,
     is_gl_blocked,
 )
 
@@ -29,10 +41,12 @@ from src.phase2.origins_catalog import (
 class _FakeRedis:
     """Minimal stand-in for a redis.Redis client.
 
-    ``keys()`` returns the provided list of function-graph keys.
-    ``get()`` returns msgpack-encoded graph payloads. ``fail_after`` trips
-    an exception when the Nth ``get()`` call is made — used to simulate a
-    Redis outage mid-scan.
+    ``keys(pattern)`` filters the provided graph keys against the schema
+    embedded in the pattern (so a multi-schema fake can serve different
+    keys for OFSMDM vs OFSERM scans). ``get()`` returns msgpack-encoded
+    graph payloads. ``set()`` records writes so ``to_redis`` can be
+    asserted. ``fail_after`` trips an exception when the Nth ``get()``
+    call is made — used to simulate a Redis outage mid-scan.
     """
 
     def __init__(
@@ -45,9 +59,16 @@ class _FakeRedis:
         self._graphs = graphs_by_function
         self._fail_after = fail_after
         self._get_count = 0
+        self.writes: dict[str, bytes] = {}
 
     def keys(self, pattern: str):
-        return list(self._graph_keys)
+        # The catalog scans with patterns like "graph:OFSMDM:*"; honour
+        # the pattern so a fake holding a mix of schemas serves only the
+        # requested slice.
+        if isinstance(pattern, bytes):
+            pattern = pattern.decode()
+        prefix = pattern.rstrip("*")
+        return [k for k in self._graph_keys if k.decode().startswith(prefix)]
 
     def get(self, key):
         self._get_count += 1
@@ -62,12 +83,28 @@ class _FakeRedis:
         parts = key.split(":")
         if len(parts) < 3:
             return None
+        # parts = ["graph", "<schema>", "<function>"] — function name in [2]
         function_name = parts[2]
         graph = self._graphs.get(function_name)
         if graph is None:
             return None
         from src.parsing.serializer import to_msgpack
         return to_msgpack(graph)
+
+    def set(self, key, value):
+        if isinstance(key, bytes):
+            key = key.decode()
+        self.writes[key] = value
+        return True
+
+    def scan(self, cursor: int = 0, match: str | None = None, count: int = 500):
+        # Used by schema_discovery.discovered_schemas. Honour the pattern
+        # like keys() does, returning every match in a single page.
+        if match is None:
+            return (0, list(self._graph_keys))
+        prefix = match.rstrip("*")
+        matches = [k for k in self._graph_keys if k.decode().startswith(prefix)]
+        return (0, matches)
 
 
 def _graph_with_v_data_origin(function_name: str, origin_literal: str) -> dict:
@@ -102,8 +139,8 @@ def _empty_graph(function_name: str) -> dict:
 
 
 def _reset_module_catalog():
-    """Drop any _catalog state left over from a prior test."""
-    oc._catalog = None
+    """Drop any registry state left over from a prior test."""
+    oc._catalogs.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -134,12 +171,15 @@ def test_build_populates_catalog_and_lookups_work():
     assert set(catalog.etl_origins.keys()) >= set(BOOTSTRAP_ETL_ORIGINS.keys())
     assert catalog.known_functions == {"FN_ONE", "FN_TWO"}
 
-    # Module global points at this instance
+    # Module registry points at this instance
     assert get_catalog() is catalog
+    assert get_catalog("OFSMDM") is catalog
+    assert get_known_schemas() == ["OFSMDM"]
 
-    # Public lookups work
+    # Public lookups work — both schema-scoped and unscoped
     assert classify_origin("T24")["category"] == "ETL"
     assert classify_origin("MANUAL-ADVANCES")["category"] == "PLSQL"
+    assert classify_origin("MANUAL-ADVANCES", schema="OFSMDM")["category"] == "PLSQL"
     assert classify_origin("SOMETHING_NEW")["category"] == "UNKNOWN"
 
 
@@ -164,8 +204,8 @@ def test_build_failure_leaves_catalog_unset():
     with pytest.raises(CatalogBuildError, match="function graph"):
         build_catalog(fake, schema="OFSMDM")
 
-    # Critical invariant: module global is still None, not a broken instance.
-    assert oc._catalog is None
+    # Critical invariant: registry is still empty, not holding a broken instance.
+    assert oc._catalogs == {}
 
     # get_catalog() fails loudly — better than returning a half-catalog.
     with pytest.raises(RuntimeError, match="not built"):
@@ -198,8 +238,9 @@ def test_failed_rebuild_preserves_previous_working_catalog():
     with pytest.raises(CatalogBuildError):
         build_catalog(broken, schema="OFSMDM")
 
-    # The module global still points at the original working catalog.
+    # The OFSMDM entry still points at the original working catalog.
     assert get_catalog() is good_catalog
+    assert get_catalog("OFSMDM") is good_catalog
     assert "MANUAL-ADVANCES" in get_catalog().plsql_origins
 
 
@@ -233,8 +274,8 @@ def test_missing_bootstrap_seeding_fails_validation(monkeypatch):
     with pytest.raises(CatalogBuildError, match="bootstrap ETL"):
         build_catalog(fake, schema="OFSMDM")
 
-    # Module global stayed None — a broken catalog never got swapped in.
-    assert oc._catalog is None
+    # Registry stayed empty — a broken catalog never got swapped in.
+    assert oc._catalogs == {}
 
 
 # ---------------------------------------------------------------------
@@ -286,12 +327,144 @@ def test_log_emits_only_after_successful_swap(monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# Ancillary: is_gl_blocked falls through cleanly when catalog not built
+# Ancillary: lookups raise cleanly when no catalog exists
 # ---------------------------------------------------------------------
 
 def test_lookups_raise_runtime_error_when_no_catalog():
-    assert oc._catalog is None
+    assert oc._catalogs == {}
     with pytest.raises(RuntimeError, match="not built"):
         is_gl_blocked("401020114-0000")
     with pytest.raises(RuntimeError, match="not built"):
         classify_origin("T24")
+
+
+# ---------------------------------------------------------------------
+# Phase 2 — multi-schema build
+# ---------------------------------------------------------------------
+
+def test_build_iterates_all_discovered_schemas():
+    """Calling build_catalog without a schema arg builds OFSMDM AND OFSERM.
+
+    The OFSMDM corpus carries V_DATA_ORIGIN literals (so plsql_origins is
+    populated). The OFSERM corpus has no V_DATA_ORIGIN literals, only
+    functions — its plsql_origins stays empty, which is fine because the
+    completeness check is OFSMDM-scoped.
+    """
+    fake = _FakeRedis(
+        graph_keys=[
+            "graph:OFSMDM:FN_OFSMDM_ONE",
+            "graph:OFSERM:FN_OFSERM_ONE",
+        ],
+        graphs_by_function={
+            "FN_OFSMDM_ONE": _graph_with_v_data_origin(
+                "FN_OFSMDM_ONE", "MANUAL-ADVANCES"
+            ),
+            # OFSERM function exists but has no V_DATA_ORIGIN literal.
+            "FN_OFSERM_ONE": _empty_graph("FN_OFSERM_ONE"),
+        },
+    )
+
+    result = build_catalog(fake)
+
+    # Both schemas built into a dict
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {"OFSMDM", "OFSERM"}
+    assert get_known_schemas() == ["OFSERM", "OFSMDM"]
+
+    # OFSMDM has the V_DATA_ORIGIN literal
+    assert "MANUAL-ADVANCES" in result["OFSMDM"].plsql_origins
+    # OFSERM has no V_DATA_ORIGIN literals but the catalog still built;
+    # bootstrap ETL origins are present on every schema.
+    assert result["OFSERM"].plsql_origins == {}
+    assert "T24" in result["OFSERM"].etl_origins
+
+    # Schema-scoped lookups isolate per-schema state
+    assert classify_origin("MANUAL-ADVANCES", schema="OFSMDM")["category"] == "PLSQL"
+    assert classify_origin("MANUAL-ADVANCES", schema="OFSERM")["category"] == "UNKNOWN"
+    # Unscoped lookup still finds the literal in OFSMDM
+    assert classify_origin("MANUAL-ADVANCES")["category"] == "PLSQL"
+
+
+def test_build_writes_per_schema_redis_snapshot():
+    """to_redis() writes graph:origins:<schema>:* keys for inspectability."""
+    fake = _FakeRedis(
+        graph_keys=["graph:OFSMDM:FN_ONE"],
+        graphs_by_function={
+            "FN_ONE": _graph_with_v_data_origin("FN_ONE", "MANUAL-ADVANCES"),
+        },
+    )
+
+    build_catalog(fake, schema="OFSMDM")
+
+    expected_facets = {"plsql", "etl", "gl_blocked", "eop_overrides", "meta"}
+    written_keys = set(fake.writes.keys())
+    expected_keys = {
+        SchemaAwareKeyspace.origins_key("OFSMDM", facet)
+        for facet in expected_facets
+    }
+    assert expected_keys.issubset(written_keys)
+
+    # Round-trip the meta snapshot — confirms the payload encoding works
+    # and the counts match the in-memory catalog.
+    meta_payload = from_msgpack(
+        fake.writes[SchemaAwareKeyspace.origins_key("OFSMDM", "meta")]
+    )
+    assert meta_payload["schema"] == "OFSMDM"
+    assert meta_payload["function_count"] == 1
+    assert meta_payload["plsql_origin_count"] == 1
+
+
+def test_per_schema_build_failure_does_not_block_other_schemas():
+    """When one schema fails to build, other schemas still get a catalog."""
+    # OFSMDM succeeds; OFSERM has a key in Redis but its graph payload is
+    # missing, which will produce a completeness mismatch. Build should
+    # raise per-schema but NOT roll back OFSMDM's good catalog.
+    fake = _FakeRedis(
+        graph_keys=[
+            "graph:OFSMDM:FN_GOOD",
+            "graph:OFSERM:FN_DOOMED",
+        ],
+        graphs_by_function={
+            "FN_GOOD": _graph_with_v_data_origin("FN_GOOD", "MANUAL-ADVANCES"),
+            # No FN_DOOMED entry → get_function_graph returns None →
+            # known_functions stays empty → completeness check fires
+            # because expected_functions has FN_DOOMED.
+        },
+    )
+
+    result = build_catalog(fake)
+
+    assert "OFSMDM" in result
+    assert "OFSERM" not in result
+    assert get_known_schemas() == ["OFSMDM"]
+    assert classify_origin("MANUAL-ADVANCES")["category"] == "PLSQL"
+
+
+def test_eop_override_lookup_iterates_schemas():
+    """Schema-less get_eop_override scans every built catalog."""
+    # Build two schemas; manually inject an override into the OFSERM
+    # catalog after build to simulate the OFSERM-side override pattern.
+    fake = _FakeRedis(
+        graph_keys=[
+            "graph:OFSMDM:FN_OFSMDM",
+            "graph:OFSERM:FN_OFSERM",
+        ],
+        graphs_by_function={
+            "FN_OFSMDM": _graph_with_v_data_origin("FN_OFSMDM", "MANUAL-ADVANCES"),
+            "FN_OFSERM": _empty_graph("FN_OFSERM"),
+        },
+    )
+    build_catalog(fake)
+
+    oc._catalogs["OFSERM"].gl_eop_overrides["CAP943"] = {
+        "function": "CS_DEFERRED_TAX",
+        "node_id": "CS_DEFERRED_TAX:N1",
+        "line": 42,
+        "reason": "CAP-merged override",
+    }
+
+    # Unscoped lookup falls through to OFSERM
+    assert get_eop_override("CAP943") is not None
+    # Schema-scoped lookup respects the boundary
+    assert get_eop_override("CAP943", schema="OFSMDM") is None
+    assert get_eop_override("CAP943", schema="OFSERM") is not None
