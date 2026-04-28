@@ -24,6 +24,8 @@ from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.store import get_function_graph
+from src.parsing.keyspace import SchemaAwareKeyspace
+from src.parsing.schema_discovery import discovered_schemas
 from src.telemetry import stage_timer
 
 logger = get_logger(__name__, concern="app")
@@ -48,10 +50,11 @@ _NAME_STOPWORDS = frozenset({
     "STG_GL_DATA", "V_GL_CODE", "V_PROD_CODE", "V_LOB_CODE", "V_LV_CODE",
 })
 
-# Schemas to check when resolving a function name. Kept in sync with the
-# schemas discovered by the loader. Extending this list is the minimal
-# cross-schema support required for W37 pre-check.
-_PRECHECK_SCHEMAS = ("OFSMDM", "OFSERM")
+# Schemas to check when resolving a function name are now discovered at
+# runtime via src.parsing.schema_discovery.discovered_schemas(redis_client),
+# which scans graph:* keys and falls back to manifest.RECOGNIZED_SCHEMAS
+# only when Redis is empty / unavailable. Adding a new schema is now a
+# loader/manifest concern, not a code change here.
 
 
 class ClassificationResult(BaseModel):
@@ -464,7 +467,7 @@ def function_exists_in_graph(
     """
     if redis_client is None:
         return False
-    schemas = list(schemas) if schemas else list(_PRECHECK_SCHEMAS)
+    schemas = list(schemas) if schemas else discovered_schemas(redis_client)
     func_upper = function_name.upper()
     for schema in schemas:
         try:
@@ -488,12 +491,12 @@ def find_similar_function_names(
     """
     if redis_client is None:
         return []
-    schemas = list(schemas) if schemas else list(_PRECHECK_SCHEMAS)
+    schemas = list(schemas) if schemas else discovered_schemas(redis_client)
     all_names: set[str] = set()
     for schema in schemas:
         try:
             cursor = 0
-            pattern = f"graph:{schema}:*"
+            pattern = SchemaAwareKeyspace.graph_scan_pattern(schema)
             while True:
                 cursor, keys = redis_client.scan(
                     cursor=cursor, match=pattern, count=200

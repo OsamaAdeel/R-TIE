@@ -12,6 +12,7 @@ from src.parsing.store import (
     get_full_graph,
     get_raw_source,
 )
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.serializer import from_json
 from src.logger import get_logger
 
@@ -97,7 +98,7 @@ def resolve_aliases(term: str, schema: str, redis_client: Any) -> list[str]:
     if no alias entry exists.
     """
     try:
-        key = f"graph:aliases:{schema}"
+        key = SchemaAwareKeyspace.graph_aliases_key(schema)
         raw = redis_client.get(key)
         if raw is None:
             return [term.upper()]
@@ -303,8 +304,7 @@ def resolve_function_nodes(
 
     Node IDs are returned as ``"FUNCTION_NAME:node_id"``.
     """
-    from src.parsing.store import REDIS_KEYS
-    candidate_key = REDIS_KEYS["function_graph"].format(schema=schema, function_name=function_name)
+    candidate_key = SchemaAwareKeyspace.graph_key(schema, function_name)
     _w43_diag.info(
         "[W43_DIAG] stage=resolve_function_nodes_entry"
         " function_name=%r schema=%r redis_key_attempted=%r"

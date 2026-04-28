@@ -9,13 +9,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.store import get_function_graph
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-_FUNCTION_GRAPH_SUBKEYS = frozenset({"full", "index", "aliases", "source", "meta"})
 _QUOTED_LITERAL_RE = re.compile(r"'([^']*)'")
 _IN_LIST_RE = re.compile(
     r"\bV_GL_CODE\s+IN\s*\((.*?)\)",
@@ -70,18 +70,25 @@ class OriginsCatalog:
         ``CatalogBuildError`` (or lets a lower-level exception propagate) so
         the caller can refuse to swap the module global.
         """
-        pattern = f"graph:{self.schema}:*"
+        pattern = SchemaAwareKeyspace.graph_scan_pattern(self.schema)
         raw_keys = self.redis.keys(pattern) or []
 
         # Enumerate the expected function names from Redis keys first, so
         # we can validate afterwards that every function got processed.
+        # SchemaAwareKeyspace.parse_graph_key returns None for family keys
+        # (graph:meta:*, graph:full:*, graph:source:*, ...) — they are
+        # filtered out automatically.
         expected_functions: set[str] = set()
         for raw_key in raw_keys:
-            key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
-            parts = key.split(":")
-            if len(parts) < 3 or parts[1] in _FUNCTION_GRAPH_SUBKEYS:
+            key = (
+                raw_key.decode("utf-8", errors="ignore")
+                if isinstance(raw_key, (bytes, bytearray))
+                else str(raw_key)
+            )
+            parsed = SchemaAwareKeyspace.parse_graph_key(key)
+            if parsed is None or parsed[0] != self.schema:
                 continue
-            expected_functions.add(parts[2])
+            expected_functions.add(parsed[1])
 
         for function_name in expected_functions:
             graph = get_function_graph(self.redis, self.schema, function_name)

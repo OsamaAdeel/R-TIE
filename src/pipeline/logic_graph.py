@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from src.pipeline.state import LogicState
+from src.parsing.schema_discovery import fallback_to_default_schema
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
@@ -136,7 +137,10 @@ def build_logic_graph(
         )
 
         state["search_results"] = results
-        state["schema"] = state.get("schema") or "OFSMDM"
+        state["schema"] = state.get("schema") or fallback_to_default_schema(
+            "logic_graph.semantic_search",
+            state.get("correlation_id", ""),
+        )
 
         logger.info(
             f"[semantic_search] Found {len(results)} results: "

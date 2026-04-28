@@ -31,6 +31,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.store import get_column_index
 from src.telemetry import stage_timer
 from src.tools.sql_guardian import (
@@ -929,7 +930,7 @@ def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
         return tables_to_columns
 
     try:
-        keys = redis_client.keys(f"graph:{schema}:*") or []
+        keys = redis_client.keys(SchemaAwareKeyspace.graph_scan_pattern(schema)) or []
     except Exception as exc:
         logger.warning("Redis keys() failed during catalog build: %s", exc)
         return tables_to_columns
@@ -939,13 +940,20 @@ def build_tables_to_columns(redis_client, schema: str) -> dict[str, set[str]]:
         get_raw_source,
     )
 
-    reserved = {"full", "index", "aliases", "source", "meta"}
+    # SchemaAwareKeyspace.parse_graph_key rejects family keys
+    # (graph:meta:*, graph:full:*, graph:source:*, ...) so we don't need
+    # a local reserved-subkey set; mismatched-schema keys are also
+    # filtered out by the parsed_schema != schema check.
     for raw_key in keys:
-        key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
-        parts = key.split(":")
-        if len(parts) < 3 or parts[1] in reserved:
+        key = (
+            raw_key.decode("utf-8", errors="ignore")
+            if isinstance(raw_key, (bytes, bytearray))
+            else str(raw_key)
+        )
+        parsed = SchemaAwareKeyspace.parse_graph_key(key)
+        if parsed is None or parsed[0] != schema:
             continue
-        function_name = parts[2]
+        function_name = parsed[1]
         graph = get_function_graph(redis_client, schema, function_name)
         if not graph:
             continue

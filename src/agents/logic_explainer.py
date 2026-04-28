@@ -20,6 +20,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.schema_discovery import fallback_to_default_schema
 
 logger = get_logger(__name__, concern="app")
 
@@ -527,7 +528,10 @@ class LogicExplainer:
         if not primary_fn:
             return ""
 
-        schema = (state.get("schema") or "").strip() or "OFSMDM"
+        schema = (state.get("schema") or "").strip() or fallback_to_default_schema(
+            "logic_explainer._render_hierarchy_header",
+            state.get("correlation_id", ""),
+        )
 
         try:
             from src.parsing.store import get_function_graph
