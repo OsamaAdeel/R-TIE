@@ -37,7 +37,14 @@ embedding:
   description_model: "gpt-4o"
   search_top_k: 3
   auto_index_modules:
+    # Phase 3: extend coverage to OFSERM. Pre-Phase-3 only the OFSMDM
+    # module was indexed, so semantic search never surfaced OFSERM
+    # candidates. The startup indexer now also iterates every schema in
+    # graph:<schema>:* keys (see IndexerAgent.index_all_loaded), so this
+    # list is informational once the keys are populated; entries here
+    # remain authoritative for the legacy /index-module admin path.
     - "OFSDMINFO_ABL_DATA_PREPARATION"
+    - "ABL_CAR_CSTM_V4"
 
 langsmith:
   project: RTIE

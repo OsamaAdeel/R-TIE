@@ -510,27 +510,45 @@ class LogicExplainer:
         prefix string that can be prepended to the explanation; otherwise
         returns an empty string. Also prefixes the inactive-task notice
         when the primary function is marked inactive.
+
+        Phase 3 fix: previously the ranking used ``reverse=True`` over the
+        cosine-distance score, which picks the WORST match. That was
+        invisible pre-Phase-3 because the index held only OFSMDM; once
+        OFSERM joined, the worst match was reliably an OFSERM function
+        whose hierarchy was looked up under OFSMDM and missed. The fix
+        ranks ASC (lowest score = closest match) and prefers the
+        per-result ``schema`` field that Phase 3's
+        ``MetadataInterpreter.fetch_multi_logic`` now stamps onto each
+        ``multi_source`` entry, falling through to ``state["schema"]``
+        only when the entry doesn't carry one.
         """
         if self._redis_client is None:
             return ""
 
         multi_source = state.get("multi_source") or {}
         primary_fn: str = ""
+        primary_schema: str = ""
         if multi_source:
+            # COSINE distance: lower is better. Sort ASC so the closest
+            # match wins.
             ranked = sorted(
                 multi_source.items(),
                 key=lambda kv: (kv[1] or {}).get("score", 0) or 0,
-                reverse=True,
             )
             primary_fn = ranked[0][0]
+            primary_schema = ((ranked[0][1] or {}).get("schema") or "").strip()
         if not primary_fn:
             primary_fn = (state.get("object_name") or "").strip()
         if not primary_fn:
             return ""
 
-        schema = (state.get("schema") or "").strip() or fallback_to_default_schema(
-            "logic_explainer._render_hierarchy_header",
-            state.get("correlation_id", ""),
+        schema = (
+            primary_schema
+            or (state.get("schema") or "").strip()
+            or fallback_to_default_schema(
+                "logic_explainer.hierarchy_header",
+                state.get("correlation_id", ""),
+            )
         )
 
         try:

@@ -12,7 +12,7 @@ import glob
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -22,6 +22,11 @@ from src.llm_factory import create_llm
 from src.llm_errors import categorize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
+from src.parsing.loader import _extract_schema_from_source
+from src.parsing.manifest import load_manifest
+from src.parsing.schema_discovery import discovered_schemas
+from src.parsing.store import get_raw_source
 
 logger = get_logger(__name__, concern="app")
 
@@ -141,11 +146,21 @@ class IndexerAgent:
             fn_name = fn_info["name"]
             source_code = fn_info["source"]
             source_hash = self._compute_source_hash(source_code)
+            # Phase 3: derive each function's owning Oracle schema so the
+            # vector doc can be tagged correctly. The module folder might
+            # mix schemas in theory; in practice every OFSAA module folder
+            # is single-schema, but reading the CREATE OR REPLACE prefix
+            # is just as cheap and keeps the wiring honest.
+            fn_schema = _extract_schema_from_source(
+                source_code.splitlines(keepends=True)
+            ) or ""
 
-            # Check if already indexed with same source
-            if not force:
+            # Check if already indexed with same source. Pre-Phase-3 the
+            # lookup keyed off (module, fn_name); Phase 3 keys off
+            # (schema, fn_name) since the doc-key prefix moved.
+            if not force and fn_schema:
                 existing = await self._vector_store.get_function_doc(
-                    module_name, fn_name
+                    fn_schema, fn_name
                 )
                 if existing and existing.get("source_hash") == source_hash:
                     skipped.append(fn_name)
@@ -188,6 +203,7 @@ class IndexerAgent:
                     key_columns=desc_result.get("key_columns", []),
                     source_hash=source_hash,
                     status="approved",
+                    schema=fn_schema,
                 )
                 indexed.append(fn_name)
                 logger.info(
@@ -218,6 +234,217 @@ class IndexerAgent:
             f"{len(errors)} errors | correlation_id={correlation_id}"
         )
         return result
+
+    async def index_all_loaded(
+        self,
+        graph_redis_client,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Index every function the loader populated, across every schema.
+
+        Phase 3 startup path. Replaces the pre-Phase-3 ``auto_index_modules``
+        loop, which read .sql files off disk and missed the manifest's
+        active/inactive distinction (so it would have tried to embed the
+        413 OFSERM .sql files that the loader rejected). This method
+        iterates ``graph:<schema>:<fn>`` keys directly — exactly matches
+        the corpus the rest of RTIE already serves answers from.
+
+        For each function it:
+          1. Reads source from ``graph:source:<schema>:<fn>`` (the
+             loader's canonical source cache).
+          2. Resolves the legacy ``module`` tag from the relevant
+             manifest's batch field, so module-scoped admin queries
+             keep working.
+          3. Generates a description via :meth:`_generate_description`,
+             embeds, and upserts with the schema TAG populated.
+
+        Functions whose ``source_hash`` matches the existing indexed doc
+        are skipped unless ``force=True``.
+
+        Returns a per-schema results dict (counts indexed/skipped/errors)
+        suitable for an info-level startup log line.
+        """
+        correlation_id = get_correlation_id()
+        if graph_redis_client is None:
+            logger.warning(
+                "index_all_loaded: graph_redis_client is None; skipping "
+                "(no schemas to iterate). | correlation_id=%s",
+                correlation_id,
+            )
+            return {"status": "skipped", "reason": "no graph redis client"}
+
+        await self._vector_store.ensure_index()
+        function_to_module = self._build_function_to_module_map()
+        schemas = discovered_schemas(graph_redis_client)
+        per_schema_results: Dict[str, Dict[str, Any]] = {}
+
+        for schema in schemas:
+            indexed: List[str] = []
+            skipped: List[str] = []
+            errors: List[Dict[str, str]] = []
+
+            try:
+                pattern = SchemaAwareKeyspace.graph_scan_pattern(schema)
+                raw_keys = graph_redis_client.keys(pattern) or []
+            except Exception as exc:
+                logger.warning(
+                    "index_all_loaded: SCAN failed for %s: %s | correlation_id=%s",
+                    schema, exc, correlation_id,
+                )
+                per_schema_results[schema] = {
+                    "status": "error",
+                    "error": f"scan failed: {exc}",
+                    "indexed": 0, "skipped": 0, "errors": 0,
+                }
+                continue
+
+            function_names: List[str] = []
+            for raw in raw_keys:
+                key = (
+                    raw.decode("utf-8", errors="ignore")
+                    if isinstance(raw, (bytes, bytearray))
+                    else str(raw)
+                )
+                parsed = SchemaAwareKeyspace.parse_graph_key(key)
+                if parsed is None or parsed[0] != schema:
+                    continue
+                function_names.append(parsed[1])
+
+            logger.info(
+                "index_all_loaded: %d function(s) to consider for %s",
+                len(function_names), schema,
+            )
+
+            for fn_name in function_names:
+                try:
+                    raw_lines = get_raw_source(
+                        graph_redis_client, schema, fn_name
+                    )
+                except Exception as exc:
+                    errors.append({"name": fn_name, "error": f"read failed: {exc}"})
+                    continue
+
+                if not raw_lines:
+                    # Loader recorded a graph but no source body — usually
+                    # a manifest-listed inactive task. Skip rather than
+                    # embed an empty description.
+                    errors.append({"name": fn_name, "error": "no source body"})
+                    continue
+
+                source_code = "".join(
+                    s.decode("utf-8", errors="replace")
+                    if isinstance(s, (bytes, bytearray))
+                    else str(s)
+                    for s in raw_lines
+                )
+                source_hash = self._compute_source_hash(source_code)
+
+                if not force:
+                    existing = await self._vector_store.get_function_doc(
+                        schema, fn_name
+                    )
+                    if existing and existing.get("source_hash") == source_hash:
+                        skipped.append(fn_name)
+                        continue
+
+                module_tag = function_to_module.get(
+                    (schema, fn_name.upper()), schema
+                )
+
+                try:
+                    if indexed or errors:
+                        await asyncio.sleep(2)
+
+                    max_chars = 3000
+                    truncated_source = source_code[:max_chars]
+                    if len(source_code) > max_chars:
+                        truncated_source += (
+                            f"\n\n-- [TRUNCATED: "
+                            f"{len(source_code) - max_chars} more characters]"
+                        )
+
+                    print(
+                        f"    Generating description for {fn_name} "
+                        f"({len(source_code)} chars, sending "
+                        f"{len(truncated_source)})..."
+                    )
+
+                    desc_result = await self._generate_description(
+                        fn_name, truncated_source
+                    )
+                    await asyncio.sleep(1)
+                    embedding = await self._get_embedding(
+                        desc_result["description"]
+                    )
+                    await self._vector_store.upsert_function(
+                        module=module_tag,
+                        function_name=fn_name,
+                        description=desc_result["description"],
+                        embedding=embedding,
+                        tables_read=desc_result.get("tables_read", []),
+                        tables_written=desc_result.get("tables_written", []),
+                        key_columns=desc_result.get("key_columns", []),
+                        source_hash=source_hash,
+                        status="approved",
+                        schema=schema,
+                    )
+                    indexed.append(fn_name)
+                except Exception as exc:
+                    errors.append({"name": fn_name, "error": str(exc)})
+                    logger.error(
+                        "Failed to index %s.%s: %s | correlation_id=%s",
+                        schema, fn_name, exc, correlation_id,
+                    )
+
+            per_schema_results[schema] = {
+                "status": "completed",
+                "indexed": len(indexed),
+                "skipped": len(skipped),
+                "errors": len(errors),
+                "error_details": errors,
+            }
+            logger.info(
+                "index_all_loaded: %s — %d indexed, %d skipped, %d errors | "
+                "correlation_id=%s",
+                schema, len(indexed), len(skipped), len(errors), correlation_id,
+            )
+
+        return {
+            "status": "completed",
+            "schemas_processed": len(schemas),
+            "results": per_schema_results,
+        }
+
+    def _build_function_to_module_map(self) -> Dict[Tuple[str, str], str]:
+        """Return ``(schema, FN_UPPER) -> module_batch`` from every manifest.
+
+        Used by :meth:`index_all_loaded` to populate the legacy ``module``
+        TAG on each vector doc. Modules without a manifest contribute
+        nothing — those functions get ``module=schema`` as a sensible
+        fallback at the call site.
+        """
+        mapping: Dict[Tuple[str, str], str] = {}
+        for modules_dir in MODULES_DIRS:
+            if not os.path.isdir(modules_dir):
+                continue
+            for entry in sorted(os.listdir(modules_dir)):
+                module_path = os.path.join(modules_dir, entry)
+                if not os.path.isdir(module_path):
+                    continue
+                try:
+                    manifest = load_manifest(module_path)
+                except Exception as exc:
+                    logger.debug(
+                        "manifest load failed for %s: %s", module_path, exc
+                    )
+                    continue
+                if manifest is None:
+                    continue
+                schema = (manifest.schema or "").upper()
+                for task in manifest.iter_all_tasks():
+                    fn_upper = task.name.strip().upper()
+                    mapping[(schema, fn_upper)] = manifest.batch
+        return mapping
 
     async def index_all_modules(self, force: bool = False) -> Dict[str, Any]:
         """Index all discovered modules.
