@@ -8,13 +8,19 @@ import os
 import traceback
 from typing import Any
 
-from src.parsing.parser import parse_function, PATTERNS
+from src.parsing.parser import parse_function, PATTERNS, clean_source_lines
 from src.parsing.builder import build_function_graph
 from src.parsing.indexer import (
     build_cross_function_graph,
     build_global_column_index,
     resolve_execution_order,
     build_alias_map,
+)
+from src.parsing.literals import (
+    CompiledPattern,
+    compile_patterns,
+    extract_literals,
+    merge_into_index,
 )
 from src.parsing.serializer import calculate_compression_ratio, to_json
 from src.parsing.store import (
@@ -24,6 +30,7 @@ from src.parsing.store import (
     store_column_index,
     store_raw_source,
     store_batch_hierarchy,
+    store_literal_index,
     is_graph_stale,
 )
 from src.parsing.keyspace import SchemaAwareKeyspace
@@ -152,6 +159,7 @@ def load_all_functions(
     schema: str,
     redis_client,
     force_reparse: bool = False,
+    business_identifier_patterns: dict | None = None,
 ) -> dict:
     """Scan *functions_dir* for ``*.sql`` files, parse each one, and build
     cross-function indices.
@@ -167,6 +175,14 @@ def load_all_functions(
         Active Redis client instance.
     force_reparse:
         When ``True``, ignore cached graphs and re-parse every file.
+    business_identifier_patterns:
+        Optional ``business_identifier_patterns`` config block (see
+        ``config/settings.yaml``). When ``None`` the default
+        ``CAP\\d{3}`` pattern is used. Pass an empty dict ``{}`` to
+        disable literal indexing entirely. The persisted index lives at
+        ``graph:literal:<schema>:<identifier>`` and is rebuilt every
+        time this function runs against a non-skipped file (cached
+        functions do NOT contribute to the rebuild — see comment below).
 
     Returns
     -------
@@ -174,7 +190,8 @@ def load_all_functions(
         Summary with keys: ``status``, ``functions_parsed``,
         ``functions_skipped``, ``functions_failed``, ``total_nodes``,
         ``total_edges``, ``compression_stats``, ``execution_order``,
-        ``errors``.
+        ``errors``, ``literals_indexed`` (Phase 5 — count of distinct
+        ``(schema, identifier)`` keys written).
     """
     resolved_dir = _resolve_functions_dir(functions_dir)
 
@@ -290,6 +307,16 @@ def load_all_functions(
     # end groups graphs by their actual stored schema, not the directory default.
     graph_schemas: dict[str, str] = {}
 
+    # W35 Phase 5: per-schema accumulator for business-identifier literal
+    # extraction. Keyed by schema -> {identifier -> [{function, line, role}]}.
+    # We build the index in memory across the parse loop and write to
+    # Redis once after the loop, so a function that contributes to two
+    # schemas (rare today, but possible) ends up in both partitions.
+    compiled_literal_patterns: list[CompiledPattern] = compile_patterns(
+        business_identifier_patterns
+    )
+    literal_index_by_schema: dict[str, dict[str, list[dict]]] = {}
+
     for sql_file in sql_files:
         func_name = _function_name_from_file(sql_file)
         try:
@@ -314,6 +341,25 @@ def load_all_functions(
                 task = manifest.get_task_by_file(sql_file)
                 if task is not None:
                     hierarchy = task.to_node_hierarchy()
+
+            # W35 Phase 5: extract business identifier literals before the
+            # cache short-circuit. Comments are stripped first so we don't
+            # match e.g. `'CAP973'` inside a `-- ... 'CAP973' ...` comment.
+            # Literals are accumulated per-schema in memory and flushed to
+            # Redis once after the loop. Done unconditionally (cached or
+            # parsed) so the persisted index is complete after every load.
+            if compiled_literal_patterns:
+                cleaned_lines, _ = clean_source_lines(source_lines)
+                lit_records = extract_literals(
+                    source_lines=cleaned_lines,
+                    function_name=func_name,
+                    patterns=compiled_literal_patterns,
+                )
+                if lit_records:
+                    schema_bucket = literal_index_by_schema.setdefault(
+                        effective_schema, {}
+                    )
+                    merge_into_index(schema_bucket, lit_records)
 
             # Staleness check (keyed by effective schema, not the directory
             # default). Cached graphs are only trusted when the hierarchy
@@ -443,6 +489,25 @@ def load_all_functions(
             logger.error("Error storing batch hierarchy:\n%s", tb)
 
     # ------------------------------------------------------------------
+    # W35 Phase 5: persist business identifier literal index
+    # ------------------------------------------------------------------
+    # Single fan-out write per (schema, identifier) — failures on one key
+    # are logged inside store_literal_index and don't abort the rest.
+    literals_indexed = 0
+    for sch, schema_index in literal_index_by_schema.items():
+        try:
+            written = store_literal_index(redis_client, sch, schema_index)
+            literals_indexed += written
+            logger.info(
+                "Stored %d business-identifier literal keys for schema %s",
+                written, sch,
+            )
+        except Exception:
+            tb = traceback.format_exc()
+            errors.append(f"Failed to store literal index for {sch}: {tb}")
+            logger.error("Error storing literal index for %s:\n%s", sch, tb)
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     total_usable = parsed_count + skipped_count
@@ -458,6 +523,7 @@ def load_all_functions(
         "compression_stats": compression_stats,
         "execution_order": execution_order,
         "errors": errors,
+        "literals_indexed": literals_indexed,
     }
 
     logger.info(

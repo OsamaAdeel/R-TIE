@@ -62,3 +62,16 @@ data_query:
   hard_row_limit: 10000    # reject row-list queries above this count
   warn_row_limit: 100      # ask for confirmation between warn and hard
   display_row_limit: 100   # FETCH FIRST N ROWS ONLY applied at execute time
+
+# W35 Phase 5: business identifier literal index. Each entry compiles to a
+# regex applied to function source bodies during graph build. Matches are
+# persisted at graph:literal:<schema>:<identifier> so Phase 7 routing can
+# resolve a query naming a domain identifier (e.g. "How is CAP973
+# calculated?") directly to every function that mentions it. The default
+# `cap_codes` pattern matches Basel capital standard account head IDs
+# (CAP\d{3}). Add new entries here to index additional families
+# (GL account codes, risk type codes, etc.) without code changes.
+business_identifier_patterns:
+  cap_codes:
+    regex: 'CAP\d{3}'
+    description: 'Basel capital standard account head IDs'

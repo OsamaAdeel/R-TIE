@@ -136,6 +136,23 @@ class SchemaAwareKeyspace:
         return base
 
     @staticmethod
+    def literal_key(schema: str, identifier: str) -> str:
+        """Per-schema, per-identifier business identifier index key.
+
+        e.g. ``graph:literal:OFSERM:CAP943``. Phase 5 of W35 introduces
+        this namespace: every string literal in a function body that
+        matches a configured business-identifier pattern (default
+        ``CAP\\d{3}``) is recorded under this key as a list of
+        ``{function, line, role}`` records. Phase 7 will rank those
+        records by ``role`` to route CAP-code queries to the function
+        that COMPUTES the identifier rather than the function that
+        loads it.
+        """
+        _require_nonempty(schema, "schema")
+        _require_nonempty(identifier, "identifier")
+        return f"graph:literal:{schema}:{identifier}"
+
+    @staticmethod
     def logic_cache_key(schema: str, function_name: str) -> str:
         """Source-cache key written by `MetadataInterpreter.fetch_logic`.
 

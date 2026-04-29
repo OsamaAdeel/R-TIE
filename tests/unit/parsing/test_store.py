@@ -12,6 +12,8 @@ from src.parsing.store import (
     get_column_index,
     store_raw_source,
     get_raw_source,
+    store_literal_index,
+    get_literal_index,
 )
 from src.parsing.serializer import to_msgpack, from_msgpack
 
@@ -84,3 +86,88 @@ def test_store_and_get_raw_source():
     assert retrieved is not None
     assert len(retrieved) == 3
     assert "BEGIN" in retrieved[0]
+
+
+# ---------------------------------------------------------------------------
+# W35 Phase 5 — business identifier literal index
+# ---------------------------------------------------------------------------
+
+def test_store_literal_index_writes_one_key_per_identifier():
+    """store_literal_index issues one Redis SET per identifier in the
+    given index, returning the count of keys written."""
+    storage = {}
+    mock_redis = MagicMock()
+    mock_redis.set.side_effect = lambda k, v: storage.update({k: v})
+    mock_redis.get.side_effect = lambda k: storage.get(k)
+
+    index = {
+        "CAP943": [
+            {"function": "CS_DEFERRED_TAX", "line": 4, "role": "case_when_target"},
+            {"function": "REGULATORY_ADJUSTMENT_DATA_POP", "line": 24,
+             "role": "in_list_member"},
+        ],
+        "CAP309": [
+            {"function": "CS_DEFERRED_TAX", "line": 5, "role": "case_when_source"},
+        ],
+    }
+
+    written = store_literal_index(mock_redis, "OFSERM", index)
+    assert written == 2
+    assert "graph:literal:OFSERM:CAP943" in storage
+    assert "graph:literal:OFSERM:CAP309" in storage
+
+
+def test_store_literal_index_skips_empty_buckets():
+    """An identifier with an empty record list is not written."""
+    storage = {}
+    mock_redis = MagicMock()
+    mock_redis.set.side_effect = lambda k, v: storage.update({k: v})
+
+    index = {"CAP943": [], "CAP309": [
+        {"function": "FN", "line": 1, "role": "filter"},
+    ]}
+
+    written = store_literal_index(mock_redis, "OFSERM", index)
+    assert written == 1
+    assert "graph:literal:OFSERM:CAP943" not in storage
+    assert "graph:literal:OFSERM:CAP309" in storage
+
+
+def test_round_trip_literal_index():
+    """store_literal_index then get_literal_index returns the same
+    records (msgpack round-trip)."""
+    storage = {}
+    mock_redis = MagicMock()
+    mock_redis.set.side_effect = lambda k, v: storage.update({k: v})
+    mock_redis.get.side_effect = lambda k: storage.get(k)
+
+    records = [
+        {"function": "CS_DEFERRED_TAX", "line": 4, "role": "case_when_target"},
+        {"function": "REGULATORY_ADJUSTMENT_DATA_POP", "line": 24,
+         "role": "in_list_member"},
+    ]
+    store_literal_index(mock_redis, "OFSERM", {"CAP943": records})
+
+    got = get_literal_index(mock_redis, "OFSERM", "CAP943")
+    assert got == records
+
+
+def test_get_literal_index_missing_returns_none():
+    mock_redis = MagicMock()
+    mock_redis.get.return_value = None
+
+    assert get_literal_index(mock_redis, "OFSERM", "CAP000") is None
+
+
+def test_cross_schema_literal_keys_distinct():
+    """Same identifier in two schemas → two separate Redis keys."""
+    storage = {}
+    mock_redis = MagicMock()
+    mock_redis.set.side_effect = lambda k, v: storage.update({k: v})
+
+    index = {"CAP943": [{"function": "FN", "line": 1, "role": "filter"}]}
+    store_literal_index(mock_redis, "OFSERM", index)
+    store_literal_index(mock_redis, "OFSMDM", index)
+
+    assert "graph:literal:OFSERM:CAP943" in storage
+    assert "graph:literal:OFSMDM:CAP943" in storage

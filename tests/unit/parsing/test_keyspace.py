@@ -184,6 +184,39 @@ class TestGraphScanPattern:
 
 
 # ---------------------------------------------------------------------------
+# literal_key (Phase 5)
+# ---------------------------------------------------------------------------
+
+class TestLiteralKey:
+    def test_format(self):
+        assert K.literal_key("OFSERM", "CAP943") == "graph:literal:OFSERM:CAP943"
+        assert K.literal_key("OFSMDM", "CAP973") == "graph:literal:OFSMDM:CAP973"
+
+    def test_distinct_per_schema(self):
+        # Cross-schema literals (same identifier in two schemas) get two
+        # separate keys, matching the Phase 5 prompt requirement.
+        a = K.literal_key("OFSERM", "CAP943")
+        b = K.literal_key("OFSMDM", "CAP943")
+        assert a != b
+
+    def test_empty_schema_raises(self):
+        with pytest.raises(ValueError):
+            K.literal_key("", "CAP943")
+
+    def test_empty_identifier_raises(self):
+        with pytest.raises(ValueError):
+            K.literal_key("OFSERM", "")
+
+    def test_none_schema_raises(self):
+        with pytest.raises(ValueError):
+            K.literal_key(None, "CAP943")  # type: ignore[arg-type]
+
+    def test_none_identifier_raises(self):
+        with pytest.raises(ValueError):
+            K.literal_key("OFSERM", None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # logic_cache_key
 # ---------------------------------------------------------------------------
 
