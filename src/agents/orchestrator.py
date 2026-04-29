@@ -154,16 +154,26 @@ Query types:
                               that asks for numbers/rows.
 - UNSUPPORTED:            question the system cannot honestly answer. Set
                           unsupported_reason. Triggers:
-                            * References to FCT_* tables or downstream result tables
-                              not present in the graph (cross-table reconciliation).
+                            * Reconciliation queries comparing values across two
+                              tables (typically STG vs FCT) — phrased with
+                              "differs from", "differs between", "doesn't match",
+                              "reconcile X with Y", "X vs Y for account ...". A
+                              bare aggregate / row query against an FCT_* table
+                              in any discovered schema is NOT unsupported — it
+                              routes as DATA_QUERY against the table's owning
+                              schema.
                             * Forecasting / prediction ("likely to fail", "next quarter",
                               "forecast", "will X happen").
                             * Any other capability outside read-only introspection of
-                              the current schema + graph.
+                              any discovered schema + its parsed graph.
 
 Routing rules (apply in order):
- 1. If the query contains forecasting / FCT-vs-STG / future-tense prediction
-    language -> UNSUPPORTED. Use unsupported_reason to name it.
+ 1. If the query contains forecasting / future-tense prediction language,
+    OR reconciliation language comparing values across two tables ("STG
+    vs FCT", "differs from", "doesn't match", "reconcile X with Y") ->
+    UNSUPPORTED. Use unsupported_reason to name it. A bare reference to
+    an FCT_* table without reconciliation phrasing is NOT a trigger —
+    those route as DATA_QUERY against the table's owning schema.
  2. Otherwise, if the query mentions TWO MIS dates (a date range / time-series
     comparison) -> DATA_QUERY, regardless of whether an account_number is
     present. Set start_date and end_date; leave mis_date null.
@@ -232,6 +242,13 @@ Examples:
 - "Show me all accounts on 2025-12-31"
     -> query_type: "DATA_QUERY", target_variable: null, mis_date: "2025-12-31",
        start_date: null, end_date: null
+- "What is the total N_STD_ACCT_HEAD_AMT in FCT_STANDARD_ACCT_HEAD on 2025-12-31?"
+    -> query_type: "DATA_QUERY", target_variable: "N_STD_ACCT_HEAD_AMT",
+       schema_name: "OFSERM", mis_date: "2025-12-31",
+       start_date: null, end_date: null
+       # FCT_* table named without reconciliation phrasing — answerable
+       # as a single-table aggregate. Routes to OFSERM via Phase 4
+       # schema pivot.
 - "How did N_EOP_BAL change for account TF1528012748-T24-COLLBLG between 2025-09-30 and 2025-12-31?"
     -> query_type: "DATA_QUERY", target_variable: "N_EOP_BAL",
        account_number: "TF1528012748-T24-COLLBLG",

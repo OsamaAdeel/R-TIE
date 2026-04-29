@@ -59,7 +59,9 @@ from src.parsing.query_engine import (
 from src.parsing.schema_discovery import (
     discovered_schemas,
     fallback_to_default_schema,
+    identifier_grounded_in_any_schema,
     schema_for_function,
+    schemas_for_column,
 )
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
@@ -850,6 +852,30 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         "main.graph_pipeline", correlation_id,
                     )
 
+                    # Phase 4: when the target is a column, prefer the
+                    # schema that actually owns the column over the
+                    # orchestrator-classified default. This makes
+                    # `What writes <OFSERM_COLUMN>?` consume the right
+                    # graph:index:<schema> instead of looking up an
+                    # OFSERM column in graph:index:OFSMDM (a guaranteed
+                    # miss). When the column lives in multiple schemas,
+                    # we keep the orchestrator's default — main.py's
+                    # downstream caveat / clarification path still
+                    # applies, and the multi-schema multi_source from
+                    # Phase 3 keeps the user-visible response useful.
+                    if target_var and _graph_redis is not None:
+                        column_owners = schemas_for_column(
+                            target_var, _graph_redis
+                        )
+                        if len(column_owners) == 1 and column_owners[0] != g_schema:
+                            logger.info(
+                                "Graph pipeline schema pivot: %s -> %s "
+                                "(column %s lives in %s)",
+                                g_schema, column_owners[0],
+                                target_var, column_owners[0],
+                            )
+                            g_schema = column_owners[0]
+
                     if target_var:
                         g_query_type = "variable"
                         g_search_term = target_var
@@ -956,9 +982,17 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # still returns name-similar neighbors, but none of them compute
             # the asked identifier — the normal path would describe a
             # neighbor as if it were the answer.
+            # Phase 4: pass the graph Redis client so the detector can
+            # consult every discovered schema's source bodies before
+            # flagging an identifier as ungrounded. Pre-Phase-4 the
+            # check used only the (already retrieved) multi_source —
+            # accurate when semantic search reaches every schema, but
+            # vulnerable to false positives when an OFSERM function
+            # owning the identifier wasn't in the top-K retrieval.
             ungrounded_ids = detect_ungrounded_identifiers(
                 raw_query=request.query,
                 multi_source=state.get("multi_source", {}) or {},
+                redis_client=_graph_redis,
             )
 
             # W49 pre-generation check: the asked-about FUNCTION exists in
@@ -1136,6 +1170,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     multi_source=multi_source,
                     functions_analyzed=functions_analyzed,
                     query_type=state.get("query_type", ""),
+                    redis_client=_graph_redis,
                 )
 
             # W49: when the partial-source branch ran, surface the
@@ -1440,7 +1475,9 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     # Identifier-ambiguity short-circuit — no SQL was generated because
     # the target column is ambiguous across multiple tables. Surface the
     # explanatory message + suggestions instead of a data_query response.
-    if result.get("type") == "identifier_ambiguous":
+    # Phase 4 adds the parallel `table_ambiguous` short-circuit for
+    # multi-schema collisions (a named table exists in OFSMDM and OFSERM).
+    if result.get("type") in ("identifier_ambiguous", "table_ambiguous"):
         message = result.get("message") or ""
         for chunk in _chunk_text(message):
             yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
@@ -1453,7 +1490,10 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         return
 
     meta = {
-        "schema": schema,
+        # Phase 4: prefer the schema DataQueryAgent actually routed to —
+        # may differ from the orchestrator-classified `schema` when the
+        # user named an OFSERM table on a default-OFSMDM request.
+        "schema": result.get("schema") or schema,
         "query_type": "DATA_QUERY",
         "status": result.get("status"),
         "query_kind": result.get("query_kind"),

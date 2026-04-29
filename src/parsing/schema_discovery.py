@@ -25,7 +25,11 @@ from typing import Optional
 
 from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.manifest import RECOGNIZED_SCHEMAS
-from src.parsing.store import get_function_graph
+from src.parsing.store import (
+    get_column_index,
+    get_function_graph,
+    get_raw_source,
+)
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -159,3 +163,192 @@ def fallback_to_default_schema(callsite: str, correlation_id: str = "") -> str:
         correlation_id or "?",
     )
     return DEFAULT_FALLBACK_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 multi-schema lookup helpers
+# ---------------------------------------------------------------------------
+
+
+def schemas_for_table(
+    table_name: str,
+    redis_client,
+    schemas: Optional[list[str]] = None,
+) -> list[str]:
+    """Return the schemas whose parsed graph references *table_name*.
+
+    A table "lives in" a schema when at least one function in that schema
+    has a node with the table as its target_table or source_tables entry.
+    Used by DATA_QUERY routing to decide which schema to qualify the SQL
+    with when the user names a table that exists in OFSERM but not OFSMDM
+    (or vice versa).
+
+    Returns an empty list when *table_name* is missing from every
+    discovered schema, when Redis is unreachable, or when the table token
+    is empty/None. Lookup is case-insensitive on the table name.
+
+    *schemas* lets callers reuse a snapshotted discovery list — saves a
+    repeat SCAN when this is called from a code path that already
+    enumerated schemas.
+    """
+    if not table_name or redis_client is None:
+        return []
+
+    table_upper = table_name.strip().upper()
+    if not table_upper:
+        return []
+
+    if schemas is None:
+        schemas = discovered_schemas(redis_client)
+
+    matched: list[str] = []
+    for schema in schemas:
+        try:
+            keys = redis_client.keys(
+                SchemaAwareKeyspace.graph_scan_pattern(schema)
+            ) or []
+        except Exception as exc:
+            logger.warning(
+                "schemas_for_table: keys() failed for %s: %s", schema, exc
+            )
+            continue
+        found_in_schema = False
+        for raw_key in keys:
+            key = (
+                raw_key.decode("utf-8", errors="ignore")
+                if isinstance(raw_key, (bytes, bytearray))
+                else str(raw_key)
+            )
+            parsed = SchemaAwareKeyspace.parse_graph_key(key)
+            if parsed is None or parsed[0] != schema:
+                continue
+            try:
+                graph = get_function_graph(redis_client, schema, parsed[1])
+            except Exception:
+                continue
+            if not graph:
+                continue
+            for node in graph.get("nodes", []) or []:
+                target = (node.get("target_table") or "").strip().upper()
+                if target == table_upper:
+                    found_in_schema = True
+                    break
+                sources = node.get("source_tables") or []
+                if any(
+                    isinstance(s, str) and s.strip().upper() == table_upper
+                    for s in sources
+                ):
+                    found_in_schema = True
+                    break
+                for arm in node.get("union_arms", []) or []:
+                    arm_target = (arm.get("target_table") or "").strip().upper()
+                    if arm_target == table_upper:
+                        found_in_schema = True
+                        break
+                if found_in_schema:
+                    break
+            if found_in_schema:
+                break
+        if found_in_schema:
+            matched.append(schema)
+    return matched
+
+
+def schemas_for_column(
+    column_name: str,
+    redis_client,
+    schemas: Optional[list[str]] = None,
+) -> list[str]:
+    """Return the schemas whose ``graph:index:<schema>`` lists *column_name*.
+
+    Resolves a bare column to the schemas that own functions touching it.
+    Used by VARIABLE_TRACE routing to scope the column-index lookup to the
+    right schema before running the existing graph traversal.
+
+    Returns an empty list when the column is absent from every discovered
+    schema's column index. Lookup is case-insensitive on the column name.
+    """
+    if not column_name or redis_client is None:
+        return []
+
+    col_upper = column_name.strip().upper()
+    if not col_upper:
+        return []
+
+    if schemas is None:
+        schemas = discovered_schemas(redis_client)
+
+    matched: list[str] = []
+    for schema in schemas:
+        try:
+            col_index = get_column_index(redis_client, schema)
+        except Exception as exc:
+            logger.warning(
+                "schemas_for_column: index read failed for %s: %s", schema, exc
+            )
+            continue
+        if col_index and col_upper in col_index and col_index[col_upper]:
+            matched.append(schema)
+    return matched
+
+
+def identifier_grounded_in_any_schema(
+    identifier: str,
+    redis_client,
+    schemas: Optional[list[str]] = None,
+) -> bool:
+    """Return True when *identifier* appears in any function's source body
+    in any discovered schema.
+
+    Used by the W45 detector as a multi-schema backstop — only flag an
+    identifier as ungrounded when it is truly absent from every loaded
+    function across every schema, not just the small batch of candidates
+    semantic search returned for this query. Lookup is case-insensitive
+    and matches a substring (so e.g. ``CAP943`` matches a WHERE-clause
+    literal embedded in any function).
+
+    Returns False when Redis is unreachable, when no source bodies are
+    cached, or when *identifier* is empty.
+    """
+    if not identifier or redis_client is None:
+        return False
+
+    needle = identifier.strip().upper()
+    if not needle:
+        return False
+
+    if schemas is None:
+        schemas = discovered_schemas(redis_client)
+
+    for schema in schemas:
+        try:
+            keys = redis_client.keys(f"graph:source:{schema}:*") or []
+        except Exception as exc:
+            logger.warning(
+                "identifier_grounded_in_any_schema: keys() failed for %s: %s",
+                schema, exc,
+            )
+            continue
+        for raw_key in keys:
+            key = (
+                raw_key.decode("utf-8", errors="ignore")
+                if isinstance(raw_key, (bytes, bytearray))
+                else str(raw_key)
+            )
+            # Expect ``graph:source:<schema>:<fn>``; skip anything else.
+            parts = key.split(":")
+            if len(parts) != 4 or parts[0] != "graph" or parts[1] != "source":
+                continue
+            if parts[2] != schema:
+                continue
+            try:
+                lines = get_raw_source(redis_client, schema, parts[3])
+            except Exception:
+                continue
+            if not lines:
+                continue
+            for line in lines:
+                text = line if isinstance(line, str) else str(line)
+                if needle in text.upper():
+                    return True
+    return False
