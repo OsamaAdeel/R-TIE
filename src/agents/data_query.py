@@ -32,6 +32,7 @@ from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 from src.parsing.keyspace import SchemaAwareKeyspace
+from src.parsing.schema_discovery import schemas_for_table
 from src.parsing.store import get_column_index
 from src.telemetry import stage_timer
 from src.tools.sql_guardian import (
@@ -47,6 +48,27 @@ DEFAULT_HARD_LIMIT = 10_000
 DEFAULT_WARN_LIMIT = 100
 DEFAULT_DISPLAY_LIMIT = 100
 
+# When the resolved target schema matches this, the catalog renders bare
+# table names (no `SCHEMA.` prefix) — preserves the rendered prompt for
+# OFSMDM-only canaries unchanged. Other schemas always render qualified.
+_DEFAULT_LEGACY_SCHEMA = "OFSMDM"
+
+# Phase 4 table-token regex: matches OFSAA staging / fact / dimension /
+# setup / DIM / DWH / mapping table names that appear in user queries.
+# Function-name prefixes (FN_, TLX_, ABL_, MAPPING_) are deliberately
+# excluded — those are typically called as functions in user questions,
+# not queried as tables.
+_USER_QUERY_TABLE_RE = re.compile(
+    r"\b((?:STG|FCT|FSI|DIM|SETUP|OFSDWH|INTERNAL|MAP)_[A-Z][A-Z0-9_]+)\b",
+    re.IGNORECASE,
+)
+
+# Token list — tables that look table-shaped by their prefix but should
+# be ignored when extracting from user queries (e.g. system tokens).
+_USER_QUERY_TABLE_SKIP = frozenset({"DIM_DATES", "DIM_DATE"})
+
+TABLE_AMBIGUOUS_TYPE = "table_ambiguous"
+
 
 SYSTEM_PROMPT = """You generate a single Oracle read-only SELECT statement.
 
@@ -57,6 +79,14 @@ HARD CONSTRAINTS — violating any of these produces an invalid response:
 - Reference ONLY tables and columns listed in the provided schema.
   If the question needs a table that is not listed, respond with the
   special JSON shape `{"unsupported": true, "reason": "..."}`.
+- SCHEMA QUALIFICATION: each table block in the schema below is rendered
+  as either `Table: SCHEMA.TABLE` (multi-schema deployments) or
+  `Table: TABLE` (single-schema). When a `SCHEMA.TABLE` form is shown,
+  you MUST write the same `SCHEMA.TABLE` qualifier in your `FROM` and
+  `JOIN` clauses — Oracle resolves an unqualified name in the connected
+  user's default schema, which is the wrong schema for tables shown
+  with an explicit qualifier. Bare-table catalogs do NOT need
+  qualification.
 - COLUMN RESIDENCY: you MUST only use columns that are listed under the
   table you are querying FROM. A column listed under STG_PRODUCT_PROCESSOR
   does NOT exist on STG_GL_DATA (and vice-versa) unless it also appears
@@ -205,9 +235,45 @@ class DataQueryAgent:
         correlation_id = get_correlation_id()
         filters = dict(filters or {})
 
+        # Phase 4 routing: when the user query names a table, resolve it
+        # across all discovered schemas before building the catalog. If
+        # the named table lives in exactly one schema, pivot to that
+        # schema (so OFSERM-table queries no longer get a default-OFSMDM
+        # catalog). When the named table is ambiguous across schemas,
+        # short-circuit with a CLARIFICATION response — never guess.
+        target_schema = schema
+        ambiguity_info = None
+        try:
+            target_schema, ambiguity_info = _resolve_target_schema(
+                user_query=user_query,
+                default_schema=schema,
+                redis_client=self._redis,
+            )
+        except Exception as exc:
+            logger.warning("DataQuery schema resolution failed: %s", exc)
+
+        if ambiguity_info is not None:
+            logger.info(
+                "DataQuery table ambiguous across schemas | table=%s schemas=%s",
+                ambiguity_info["table"], ambiguity_info["schemas"],
+            )
+            return _build_table_ambiguous_response(
+                table=ambiguity_info["table"],
+                schemas=ambiguity_info["schemas"],
+                user_query=user_query,
+            )
+
+        if target_schema != schema:
+            logger.info(
+                "DataQuery routing pivoted: %s -> %s based on user-named table",
+                schema, target_schema,
+            )
+
         try:
             with stage_timer("data_query_schema_catalog_build", correlation_id):
-                catalog_text, tables_to_columns, column_types = self._build_schema_catalog(schema)
+                catalog_text, tables_to_columns, column_types = self._build_schema_catalog(
+                    target_schema, qualify_in_prompt=(target_schema != _DEFAULT_LEGACY_SCHEMA)
+                )
         except Exception as exc:
             logger.warning("DataQuery catalog build failed: %s", exc)
             catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
@@ -524,6 +590,7 @@ class DataQueryAgent:
         return {
             "status": "answered",
             "query_kind": query_kind,
+            "schema": target_schema,
             "sql": exec_sql,
             "count_sql": count_sql,
             "params": params,
@@ -594,7 +661,7 @@ class DataQueryAgent:
         return parsed
 
     def _build_schema_catalog(
-        self, schema: str
+        self, schema: str, qualify_in_prompt: bool = False,
     ) -> tuple[str, dict[str, set[str]], dict[str, dict[str, dict]]]:
         """Build a per-table catalog from the graph + Oracle type snapshot.
 
@@ -606,7 +673,14 @@ class DataQueryAgent:
         3. The Oracle schema snapshot cached in Redis under
            `rtie:schema:snapshot:<schema>` — provides each column's data
            type, length, precision, and scale so the LLM can avoid the
-           CHAR(n) blank-padding trap.
+           CHAR(n) blank-padding trap. Phase 4: this snapshot is also
+           consulted as a column-set fall-through for tables that appear
+           in the graph as a read-only source (`source_tables`) but
+           never as an INSERT target — DIM_DATES is the prime example.
+           Without the fall-through the catalog rendered an empty
+           `Columns:` block for those tables and the LLM either aborted
+           with `unsupported` or generated SQL the residency check then
+           rejected.
 
         Returns
         -------
@@ -624,13 +698,29 @@ class DataQueryAgent:
         tables_to_columns = build_tables_to_columns(self._redis, schema)
         column_types = load_column_types(self._redis, schema)
 
+        # Phase 4: when a table is in the catalog because some function
+        # READ from it (source_tables) but never INSERTed to it, the
+        # graph-derived column set is empty. Fall through to the Oracle
+        # snapshot — the columns are real, RTIE just hadn't seen any
+        # INSERT statement to attribute them to. Without this enrichment
+        # the LLM sees an empty `Columns:` block for tables like
+        # OFSERM.DIM_DATES (read by ~141 OFSERM functions, INSERTed to by
+        # zero) and either aborts with `unsupported` or generates SQL
+        # that SQLGuardian then rejects on column residency.
+        for table, types_for_table in column_types.items():
+            if table in tables_to_columns and not tables_to_columns[table]:
+                tables_to_columns[table] = {
+                    str(c).upper() for c in types_for_table.keys()
+                }
+
         if not tables_to_columns:
             return "(no tables discovered — schema catalog empty)", {}, column_types
 
         lines: list[str] = []
+        table_prefix = f"{schema}." if qualify_in_prompt and schema else ""
         for table in sorted(tables_to_columns.keys()):
             cols = sorted(tables_to_columns[table])
-            lines.append(f"Table: {table}")
+            lines.append(f"Table: {table_prefix}{table}")
             if not cols:
                 lines.append("Columns: (none discovered in graph)")
                 lines.append("")
@@ -1077,6 +1167,115 @@ _FROM_PRIMARY_RE = re.compile(
     r"\bFROM\s+([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?)",
     re.IGNORECASE,
 )
+
+
+def _extract_user_query_tables(user_query: str) -> list[str]:
+    """Return OFSAA-shaped table tokens found in *user_query*.
+
+    Deduplicated, upper-cased. Used by Phase 4 schema routing to decide
+    which schema to pivot to when the user names a specific table.
+    """
+    if not user_query:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _USER_QUERY_TABLE_RE.finditer(user_query):
+        token = match.group(1).upper()
+        if token in seen or token in _USER_QUERY_TABLE_SKIP:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _resolve_target_schema(
+    user_query: str,
+    default_schema: str,
+    redis_client,
+) -> tuple[str, Optional[dict]]:
+    """Phase 4 routing: pivot to the schema that owns the user-named table.
+
+    Returns ``(schema_to_use, ambiguity_info)``:
+
+    * ``(single_schema, None)`` — every table named in *user_query* lives
+      in the same schema. ``single_schema`` may differ from
+      *default_schema* (Phase 4: pivot to the table's owner).
+    * ``(default_schema, {"table": ..., "schemas": [...]})`` — at least
+      one named table lives in two or more schemas. The caller should
+      surface this as a CLARIFICATION rather than guessing which schema
+      the user meant.
+    * ``(default_schema, None)`` — no recognised table token in the
+      query, no resolution found in any schema, or multiple named
+      tables span multiple schemas (cross-schema query — Phase 4 leaves
+      these to the catalog visibility path).
+
+    Lookup is case-insensitive on the table name. When *redis_client* is
+    None, the function is a no-op and returns ``(default_schema, None)``.
+    """
+    if not user_query or redis_client is None:
+        return default_schema, None
+
+    candidates = _extract_user_query_tables(user_query)
+    if not candidates:
+        return default_schema, None
+
+    schemas_seen: set[str] = set()
+    for table in candidates:
+        owners = schemas_for_table(table, redis_client)
+        if not owners:
+            continue
+        if len(owners) > 1:
+            return default_schema, {
+                "table": table,
+                "schemas": sorted(owners),
+            }
+        schemas_seen.add(owners[0])
+
+    if len(schemas_seen) == 1:
+        return next(iter(schemas_seen)), None
+    return default_schema, None
+
+
+def _build_table_ambiguous_response(
+    table: str,
+    schemas: list[str],
+    user_query: str,
+) -> dict:
+    """Construct a CLARIFICATION response when a named table exists in
+    multiple schemas.
+
+    Mirrors the ``identifier_ambiguous`` response shape so the existing
+    main.py dispatch (``result.get("type") == "table_ambiguous"``) can
+    surface the message and suggestions verbatim.
+    """
+    suggestions = [
+        # Replace the bare table name with a schema-qualified suggestion.
+        # Each rephrase substitutes only the first occurrence so a query
+        # mentioning the same table twice doesn't produce malformed text.
+        user_query.replace(table, f"{schema}.{table}", 1)
+        for schema in schemas
+    ]
+    candidate_payload = [
+        {"table": table, "schema": schema} for schema in schemas
+    ]
+    schema_labels = ", ".join(schemas)
+    lines = [
+        f"`{table}` exists in more than one schema: {schema_labels}.",
+        "",
+        "Try rephrasing with the schema-qualified table name:",
+    ]
+    for suggestion in suggestions:
+        lines.append(f'  - "{suggestion}"')
+    message = "\n".join(lines)
+    return {
+        "status": TABLE_AMBIGUOUS_TYPE,
+        "type":   TABLE_AMBIGUOUS_TYPE,
+        "table": table,
+        "candidate_schemas": candidate_payload,
+        "message": message,
+        "suggestions": suggestions,
+        "correlation_id": get_correlation_id(),
+    }
 
 
 def _strip_sql_literals(sql: str) -> str:

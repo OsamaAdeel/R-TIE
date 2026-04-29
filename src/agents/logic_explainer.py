@@ -57,6 +57,7 @@ def evaluate_grounding(
     multi_source: Dict[str, Any],
     functions_analyzed: List[str],
     query_type: str,
+    redis_client: Any = None,
 ) -> Dict[str, Any]:
     """Evaluate whether a streamed explanation is grounded in retrieved source.
 
@@ -65,6 +66,13 @@ def evaluate_grounding(
       - business-identifier grounding (CAP codes, etc.)
       - line-citation presence
       - empty source_citations rule for logic-explaining query types
+
+    Phase 4: when *redis_client* is provided, the identifier-grounding
+    check uses the same multi-schema backstop as
+    :func:`detect_ungrounded_identifiers` — an identifier present in any
+    schema's source body is treated as grounded even when the local
+    multi_source didn't include it (so the post-hoc warning matches the
+    pre-generation routing decision).
 
     Returns a dict with keys ``badge`` (VERIFIED | UNVERIFIED), ``confidence``,
     ``source_citations`` (line-reference stubs), ``warnings`` (machine-readable),
@@ -90,9 +98,24 @@ def evaluate_grounding(
     query_identifiers = set(_IDENTIFIER_CODE_RE.findall(raw_query.upper()))
     if query_identifiers:
         raw_source_text = _concat_multi_source(multi_source).upper()
-        ungrounded = sorted(
+        local_ungrounded = [
             ident for ident in query_identifiers if ident not in raw_source_text
-        )
+        ]
+        if local_ungrounded and redis_client is not None:
+            from src.parsing.schema_discovery import (
+                identifier_grounded_in_any_schema,
+            )
+            kept: List[str] = []
+            for ident in local_ungrounded:
+                try:
+                    if identifier_grounded_in_any_schema(ident, redis_client):
+                        continue
+                except Exception:
+                    pass
+                kept.append(ident)
+            ungrounded = sorted(kept)
+        else:
+            ungrounded = sorted(local_ungrounded)
         if ungrounded:
             ident_list = ", ".join(ungrounded)
             warnings.append(
@@ -165,27 +188,63 @@ def evaluate_grounding(
 def detect_ungrounded_identifiers(
     raw_query: str,
     multi_source: Dict[str, Any],
+    redis_client: Any = None,
 ) -> List[str]:
     """Return business identifiers named in the query but absent from every
     retrieved function's source_code body.
 
-    Pure function — no side effects, no LLM calls, no Redis reads. Uses the
-    same identifier regex and matching logic as evaluate_grounding so the
-    pre-generation branch and the post-hoc backstop always agree on which
-    identifiers are ungrounded. Call this BEFORE the LLM generation step to
-    decide whether to route to the ungrounded branch.
+    Phase 4: when *redis_client* is provided, after the multi_source check
+    runs an additional cross-schema scan over ``graph:source:*`` keys and
+    drops any identifier that DOES appear in some loaded function's body
+    in any discovered schema. The cross-schema scan turns the local
+    "missing from this query's top-K candidates" check into a global
+    "missing from every loaded function in every schema" backstop, which
+    is what W45 truly cares about. Pre-Phase-4 callers (``redis_client``
+    omitted) get the original Phase-1/2/3 behaviour unchanged.
 
-    An empty list means either (a) the query contains no business identifiers,
-    or (b) every identifier is present in at least one retrieved function.
-    In either case the normal generation path should run.
+    Uses the same identifier regex and matching logic as
+    evaluate_grounding so the pre-generation branch and the post-hoc
+    backstop always agree on which identifiers are ungrounded. Call this
+    BEFORE the LLM generation step to decide whether to route to the
+    ungrounded branch.
+
+    An empty list means either (a) the query contains no business
+    identifiers, or (b) every identifier is present in at least one
+    retrieved function or somewhere in any schema's source bodies.
     """
     query_identifiers = set(_IDENTIFIER_CODE_RE.findall(raw_query.upper()))
     if not query_identifiers:
         return []
     source_text = _concat_multi_source(multi_source).upper()
-    return sorted(
+    locally_ungrounded = [
         ident for ident in query_identifiers if ident not in source_text
-    )
+    ]
+    if not locally_ungrounded or redis_client is None:
+        return sorted(locally_ungrounded)
+
+    # Phase 4 multi-schema backstop: drop identifiers found anywhere in
+    # the cross-schema source corpus. Imported lazily to avoid a circular
+    # import (schema_discovery -> store -> [...] -> logic_explainer when
+    # the explainer is reloaded by tests).
+    from src.parsing.schema_discovery import identifier_grounded_in_any_schema
+
+    truly_ungrounded: List[str] = []
+    for ident in locally_ungrounded:
+        try:
+            if identifier_grounded_in_any_schema(ident, redis_client):
+                logger.info(
+                    "W45 backstop: identifier %s found in cross-schema "
+                    "source corpus; suppressing ungrounded flag",
+                    ident,
+                )
+                continue
+        except Exception as exc:
+            logger.warning(
+                "W45 multi-schema backstop check failed for %s: %s",
+                ident, exc,
+            )
+        truly_ungrounded.append(ident)
+    return sorted(truly_ungrounded)
 
 
 # Minimum source-body length (in characters) below which we consider a
