@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.parsing.serializer import to_msgpack, from_msgpack, to_json, from_json
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -210,6 +211,59 @@ def is_graph_stale(redis_client, schema: str, function_name: str, file_path: str
             schema, function_name, file_path, e,
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# Business identifier literal index (W35 Phase 5)
+# ---------------------------------------------------------------------------
+
+def store_literal_index(
+    redis_client,
+    schema: str,
+    literal_index: dict[str, list[dict]],
+) -> int:
+    """Persist a per-schema literal index at ``graph:literal:<schema>:<id>``.
+
+    *literal_index* maps each identifier string (e.g. ``"CAP943"``) to a
+    list of ``{function, line, role}`` records. One Redis SET is issued
+    per identifier with msgpack-encoded payload. Empty buckets are
+    skipped. Returns the number of keys successfully written; failures
+    on individual identifiers are logged and do not abort the rest.
+    """
+    written = 0
+    for identifier, records in literal_index.items():
+        if not records:
+            continue
+        try:
+            key = SchemaAwareKeyspace.literal_key(schema, identifier)
+            redis_client.set(key, to_msgpack(records))
+            written += 1
+        except Exception as e:
+            logger.warning(
+                "Failed to store literal index for %s.%s: %s",
+                schema, identifier, e,
+            )
+    return written
+
+
+def get_literal_index(
+    redis_client,
+    schema: str,
+    identifier: str,
+) -> list[dict] | None:
+    """Retrieve the literal-index records for one identifier in *schema*."""
+    try:
+        key = SchemaAwareKeyspace.literal_key(schema, identifier)
+        data = redis_client.get(key)
+        if data is None:
+            return None
+        return from_msgpack(data)
+    except Exception as e:
+        logger.warning(
+            "Failed to get literal index for %s.%s: %s",
+            schema, identifier, e,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

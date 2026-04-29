@@ -337,12 +337,19 @@ async def lifespan(app: FastAPI):
             mod_name = os.path.basename(os.path.dirname(abs_dir)) or fn_dir
             load_targets.append((mod_name, fn_dir))
 
+        # W35 Phase 5: pass the business-identifier pattern config from
+        # settings.yaml so the loader can build the per-schema literal
+        # index at graph:literal:<schema>:<identifier>. Default
+        # (CAP\d{3}) applies when the block is absent.
+        bi_patterns = _settings.get("business_identifier_patterns")
+
         for mod_name, fn_dir in load_targets:
             result = load_all_functions(
                 functions_dir=fn_dir,
                 schema=oracle_cfg["schema"],
                 redis_client=_graph_redis,
                 force_reparse=graph_cfg.get("force_reparse_on_startup", False),
+                business_identifier_patterns=bi_patterns,
             )
             logger.info(
                 "Module %s: loaded %d, skipped %d, failed %d (status=%s)",
