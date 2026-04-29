@@ -22,6 +22,10 @@ from src.parsing.literals import (
     extract_literals,
     merge_into_index,
 )
+from src.parsing.derivations import (
+    attach_derivations_to_literal_index,
+    extract_derivations,
+)
 from src.parsing.serializer import calculate_compression_ratio, to_json
 from src.parsing.store import (
     store_function_graph,
@@ -208,6 +212,8 @@ def load_all_functions(
             "compression_stats": {},
             "execution_order": [],
             "errors": [msg],
+            "literals_indexed": 0,
+            "derivations_indexed": 0,
         }
 
     # ------------------------------------------------------------------
@@ -258,6 +264,8 @@ def load_all_functions(
             "compression_stats": {},
             "execution_order": [],
             "errors": [msg],
+            "literals_indexed": 0,
+            "derivations_indexed": 0,
         }
 
     # Build the parse order: manifest order (declaration order, both active
@@ -317,6 +325,12 @@ def load_all_functions(
     )
     literal_index_by_schema: dict[str, dict[str, list[dict]]] = {}
 
+    # W35 Phase 6: per-schema accumulator for derivation records. Built
+    # alongside the literal index (same compiled patterns drive both).
+    # Used after the loop to cross-reference derivations into the
+    # literal index before persisting.
+    derivations_by_schema: dict[str, list[dict]] = {}
+
     for sql_file in sql_files:
         func_name = _function_name_from_file(sql_file)
         try:
@@ -342,12 +356,16 @@ def load_all_functions(
                 if task is not None:
                     hierarchy = task.to_node_hierarchy()
 
-            # W35 Phase 5: extract business identifier literals before the
-            # cache short-circuit. Comments are stripped first so we don't
-            # match e.g. `'CAP973'` inside a `-- ... 'CAP973' ...` comment.
-            # Literals are accumulated per-schema in memory and flushed to
+            # W35 Phase 5/6: extract business identifier literals AND
+            # derivations from the cleaned source before the cache short-
+            # circuit. Comments are stripped first so we don't match e.g.
+            # `'CAP973'` inside a `-- ... 'CAP973' ...` comment. Both
+            # results are accumulated per-schema in memory and flushed to
             # Redis once after the loop. Done unconditionally (cached or
-            # parsed) so the persisted index is complete after every load.
+            # parsed) so the persisted indexes are complete after every
+            # load — including when a cached graph from before Phase 6
+            # has no derivations field of its own.
+            this_func_derivations: list[dict] = []
             if compiled_literal_patterns:
                 cleaned_lines, _ = clean_source_lines(source_lines)
                 lit_records = extract_literals(
@@ -360,6 +378,16 @@ def load_all_functions(
                         effective_schema, {}
                     )
                     merge_into_index(schema_bucket, lit_records)
+
+                this_func_derivations = extract_derivations(
+                    source_lines=cleaned_lines,
+                    function_name=func_name,
+                    patterns=compiled_literal_patterns,
+                )
+                if this_func_derivations:
+                    derivations_by_schema.setdefault(
+                        effective_schema, []
+                    ).extend(this_func_derivations)
 
             # Staleness check (keyed by effective schema, not the directory
             # default). Cached graphs are only trusted when the hierarchy
@@ -389,6 +417,15 @@ def load_all_functions(
                 schema=effective_schema,
                 hierarchy=hierarchy,
             )
+
+            # W35 Phase 6: attach derivation records (computed above) onto
+            # the per-function graph dict. Existing graph consumers ignore
+            # unknown fields, so this is backward-compatible. The full
+            # records (including operands and line_range) live here; the
+            # literal index gets a compact summary cross-reference after
+            # the loop completes.
+            if this_func_derivations:
+                graph["derivations"] = this_func_derivations
 
             # Store in Redis
             store_function_graph(redis_client, effective_schema, func_name, graph)
@@ -489,6 +526,33 @@ def load_all_functions(
             logger.error("Error storing batch hierarchy:\n%s", tb)
 
     # ------------------------------------------------------------------
+    # W35 Phase 6: cross-reference derivations into the literal index
+    # ------------------------------------------------------------------
+    # Each case_when_target record gets a compact derivation summary
+    # (operation, source_literals, target_column) so Phase 7 routing
+    # can format "CAP943 = CAP309 - CAP863" directly from the literal
+    # index without round-tripping to the function graph. The full
+    # records (with operands + line_range) remain on each function's
+    # graph dict for callers that need them.
+    derivations_total = 0
+    for sch, derivs in derivations_by_schema.items():
+        derivations_total += len(derivs)
+        if not derivs:
+            continue
+        schema_lit_index = literal_index_by_schema.get(sch)
+        if schema_lit_index is None:
+            # Derivations exist for a schema with no literal-index entries:
+            # extremely unlikely (every derivation's target is a literal
+            # that the same scan would have indexed) but skip safely.
+            continue
+        attach_derivations_to_literal_index(schema_lit_index, derivs)
+    if derivations_total:
+        logger.info(
+            "Extracted %d derivations across %d schema(s)",
+            derivations_total, len(derivations_by_schema),
+        )
+
+    # ------------------------------------------------------------------
     # W35 Phase 5: persist business identifier literal index
     # ------------------------------------------------------------------
     # Single fan-out write per (schema, identifier) — failures on one key
@@ -524,6 +588,7 @@ def load_all_functions(
         "execution_order": execution_order,
         "errors": errors,
         "literals_indexed": literals_indexed,
+        "derivations_indexed": derivations_total,
     }
 
     logger.info(
