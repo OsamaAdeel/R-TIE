@@ -39,6 +39,7 @@ from src.agents.logic_explainer import (
     detect_ungrounded_identifiers,
     detect_partial_source_function,
     evaluate_grounding,
+    render_derivation_header,
 )
 from src.agents.variable_tracer import VariableTracer
 from src.agents.value_tracer import ValueTracerAgent
@@ -297,6 +298,15 @@ async def lifespan(app: FastAPI):
         # look up batch/process hierarchy and prepend a one-line context
         # header on streamed explanations.
         _logic_explainer.set_redis_client(_graph_redis)
+
+        # W35 Phase 7: wire the same client + business-identifier
+        # pattern config into the orchestrator so BI routing
+        # (apply_bi_routing) can read graph:literal:<schema>:<id>
+        # without an additional plumbing layer.
+        _orchestrator.set_redis_client(_graph_redis)
+        _orchestrator.set_bi_patterns(
+            _settings.get("business_identifier_patterns")
+        )
 
         # Phase 3: same client into MetadataInterpreter so source
         # retrieval can read graph:source:<schema>:<fn> (the loader's
@@ -602,6 +612,7 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             "llm_payload": "",
             "graph_node_ids": [],
             "graph_available": _graph_available,
+            "bi_routing": {},
             "output": {},
             "partial_flag": False,
         }
@@ -712,6 +723,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "phase2_expected_value": None,
                 "phase2_actual_value": None,
                 "unsupported_reason": "",
+                "bi_routing": {},
                 "output": {},
                 "partial_flag": False,
             }
@@ -810,6 +822,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     async for event in _stream_declined_response(precheck):
                         yield event
                     return
+
+            # --- W35 Phase 7: business-identifier (BI) routing. For
+            # COLUMN_LOGIC / FUNCTION_LOGIC queries that mention a CAP-code
+            # (or other configured identifier), route to the function the
+            # literal index says COMPUTES that identifier rather than
+            # whichever loader the enriched-string semantic search ranks
+            # first. The pre-check above already passed; an explicit
+            # function name in the query is honoured by apply_bi_routing
+            # itself (it skips when extract_function_candidates returns a
+            # name that exists in the graph).
+            if _graph_redis is not None:
+                with stage_timer("bi_routing", correlation_id):
+                    _orchestrator.apply_bi_routing(state)
 
             # Stage 2: Semantic search
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Searching across database schemas...'})}\n\n"
@@ -1034,6 +1059,18 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     full_markdown += hierarchy_prefix
                     mark_event("first_sse_token_emit", correlation_id, source="hierarchy_header")
                     yield f"event: token\ndata: {json_mod.dumps(hierarchy_prefix)}\n\n"
+
+                # W35 Phase 7: Derivation banner. Rendered when BI routing
+                # resolved the query to a function whose Phase 6
+                # derivation summary is on its case_when_target literal
+                # record. Order is hierarchy -> derivation -> body. The
+                # banner is deterministic markdown — the LLM does not
+                # write it.
+                with stage_timer("derivation_header", correlation_id):
+                    derivation_prefix = render_derivation_header(state)
+                if derivation_prefix:
+                    full_markdown += derivation_prefix
+                    yield f"event: token\ndata: {json_mod.dumps(derivation_prefix)}\n\n"
 
             if ungrounded_ids:
                 # W45 ungrounded branch: bypass resolve/alias/extract/build

@@ -23,8 +23,9 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
-from src.parsing.store import get_function_graph
+from src.parsing.store import get_function_graph, get_literal_index
 from src.parsing.keyspace import SchemaAwareKeyspace
+from src.parsing.literals import compile_patterns
 from src.parsing.schema_discovery import discovered_schemas
 from src.telemetry import stage_timer
 
@@ -290,6 +291,45 @@ class Orchestrator:
         """
         self._temperature = temperature
         self._max_tokens = max_tokens
+        # W35 Phase 7: optional graph Redis client and BI pattern config,
+        # injected by main.py post-construction (the graph Redis client is
+        # built after the orchestrator). Absence is non-fatal — BI routing
+        # becomes a no-op when either is missing.
+        self._graph_redis_client: Any = None
+        self._bi_patterns: Optional[Dict[str, Any]] = None
+
+    def set_redis_client(self, redis_client: Any) -> None:
+        """Inject the graph Redis client used by BI routing.
+
+        Wired post-construction from main.py because the graph Redis
+        client is created later in the FastAPI lifespan than the
+        Orchestrator itself. Optional — when absent
+        :meth:`apply_bi_routing` short-circuits as a no-op.
+        """
+        self._graph_redis_client = redis_client
+
+    def set_bi_patterns(self, patterns: Optional[Dict[str, Any]]) -> None:
+        """Inject the ``business_identifier_patterns`` config.
+
+        ``None`` (the default) tells :meth:`apply_bi_routing` to fall back
+        to the default ``CAP\\d{3}`` pattern in
+        :data:`src.parsing.literals.DEFAULT_BUSINESS_IDENTIFIER_PATTERNS`.
+        """
+        self._bi_patterns = patterns
+
+    def apply_bi_routing(self, state: LogicState) -> LogicState:
+        """Instance-level convenience for the module-level helper.
+
+        Forwards to :func:`apply_bi_routing` using the injected redis
+        client and pattern config. Safe to call without injection — the
+        underlying helper short-circuits when ``redis_client`` is None.
+        """
+        return apply_bi_routing(
+            state,
+            state.get("raw_query", "") or "",
+            self._graph_redis_client,
+            self._bi_patterns,
+        )
 
     def _get_llm(
         self,
@@ -534,6 +574,324 @@ def find_similar_function_names(
     return get_close_matches(
         target.upper(), list(all_names), n=top_n, cutoff=0.5
     )
+
+
+# ---------------------------------------------------------------------------
+# W35 Phase 7 — business-identifier (BI) routing
+# ---------------------------------------------------------------------------
+#
+# BI routing turns a query like "How is CAP943 calculated?" into a routing
+# decision *before* semantic search runs. It uses the graph:literal:<schema>:
+# <id> index Phase 5 built (and the derivation summaries Phase 6 attached
+# to case_when_target records) to pick the function that COMPUTES the
+# identifier rather than the function that loads it.
+#
+# Role priority (most preferred first):
+#   1. case_when_target with an embedded derivation
+#   2. case_when_target without a derivation
+#   3. case_when_source
+#   4. in_list_member
+#   5. filter
+#
+# BI routing only fires for COLUMN_LOGIC / FUNCTION_LOGIC queries — the
+# logic-explainer paths. DATA_QUERY, VARIABLE_TRACE, VALUE_TRACE,
+# DIFFERENCE_EXPLANATION, and UNSUPPORTED queries are left untouched. An
+# explicitly-named function in the query (e.g. "How does
+# CS_Deferred_Tax_... work?") also short-circuits BI routing — the user's
+# explicit choice wins over the literal-index lookup.
+
+# Routes BI fires for. COLUMN_LOGIC is what the live classifier emits;
+# FUNCTION_LOGIC is the forward-compatible alias kept in
+# logic_explainer._REQUIRES_CITATIONS.
+_BI_ROUTING_QUERY_TYPES = frozenset({"COLUMN_LOGIC", "FUNCTION_LOGIC"})
+
+# Role priority ordering — lower number wins. Mirrors the priority list in
+# the Phase 7 prompt.
+_BI_ROLE_PRIORITY = {
+    "case_when_target": 1,    # +derivation: 0 (handled separately)
+    "case_when_source": 2,
+    "in_list_member": 3,
+    "filter": 4,
+}
+
+
+def detect_business_identifiers(
+    raw_query: str,
+    patterns: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Return business identifiers found in the user query, in order.
+
+    Reuses the configured ``business_identifier_patterns`` block from
+    settings.yaml (default ``CAP\\d{3}``) — same source as Phase 5's
+    literal extraction, so the indexer and the router agree on what
+    counts as a business identifier.
+
+    Matching is case-sensitive: CAP-codes are uppercase by convention,
+    so ``cap973`` does NOT match. Word boundaries on either side prevent
+    matches inside larger tokens (``XCAP943Y`` does not match).
+
+    Args:
+        raw_query: The user's question string.
+        patterns: Optional ``business_identifier_patterns`` dict (same
+            shape ``compile_patterns`` accepts). When ``None`` or empty,
+            the default ``CAP\\d{3}`` pattern set is used.
+
+    Returns:
+        Ordered list of identifier strings. Duplicates are removed,
+        first occurrence wins, ordering follows the user's query.
+        Empty list when no patterns are configured or no matches found.
+    """
+    compiled = compile_patterns(patterns)
+    if not compiled or not raw_query:
+        return []
+
+    seen: set[str] = set()
+    found: list[tuple[int, str]] = []
+    for pat in compiled:
+        # Wrap the bare regex in word boundaries for query-side detection
+        # (literals.py uses string-quote anchors for SQL-side detection).
+        try:
+            search_re = re.compile(rf"\b(?:{pat.raw_regex})\b")
+        except re.error:
+            continue
+        for m in search_re.finditer(raw_query):
+            ident = m.group(0)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            found.append((m.start(), ident))
+    found.sort(key=lambda x: x[0])
+    return [ident for _, ident in found]
+
+
+def _bi_record_priority(record: Dict[str, Any]) -> tuple:
+    """Return a sort key — lower tuples win. Used by resolve_bi_to_function.
+
+    Tie-breakers: function name (alphabetical) then line number, both
+    ascending — deterministic across reloads.
+    """
+    role = record.get("role", "")
+    role_rank = _BI_ROLE_PRIORITY.get(role, 99)
+    has_derivation = bool(record.get("derivation"))
+    # case_when_target with derivation beats case_when_target without.
+    derivation_rank = 0 if (role == "case_when_target" and has_derivation) else 1
+    fn = (record.get("function") or "").upper()
+    line = record.get("line") or 0
+    return (role_rank, derivation_rank, fn, line)
+
+
+def resolve_bi_to_function(
+    identifier: str,
+    redis_client: Any,
+    schemas: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve *identifier* to its best-match function via the literal index.
+
+    Reads ``graph:literal:<schema>:<identifier>`` for each schema in scope,
+    flattens the records, and picks the highest-priority record by role.
+
+    Args:
+        identifier: The business identifier (e.g. ``"CAP943"``).
+        redis_client: Active Redis client used to read the literal index.
+        schemas: Optional list of schemas to restrict the lookup to.
+            When ``None``, every discovered schema is scanned.
+
+    Returns:
+        Dict with keys ``function``, ``schema``, ``role``, ``derivation``,
+        and ``candidates`` (the full list of records considered, sorted by
+        priority — useful for logging / debugging). ``derivation`` is the
+        embedded summary Phase 6 attached to case_when_target records, or
+        ``None`` when the routed record has no derivation.
+
+        Returns ``None`` when:
+          - ``identifier`` is empty or ``redis_client`` is None
+          - the identifier is absent from every in-scope schema's index
+          - the schemas list is empty (caller-restricted to no schemas)
+    """
+    if not identifier or redis_client is None:
+        return None
+    if schemas is None:
+        schemas = discovered_schemas(redis_client)
+    if not schemas:
+        return None
+
+    candidates: list[tuple[tuple, str, Dict[str, Any]]] = []
+    for schema in schemas:
+        try:
+            records = get_literal_index(redis_client, schema, identifier)
+        except Exception as exc:
+            logger.warning(
+                "resolve_bi_to_function: literal-index read failed for %s.%s: %s",
+                schema, identifier, exc,
+            )
+            continue
+        if not records:
+            continue
+        for rec in records:
+            candidates.append((_bi_record_priority(rec), schema, rec))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    _, primary_schema, primary = candidates[0]
+    derivation = primary.get("derivation")
+
+    return {
+        "function": primary.get("function", ""),
+        "schema": primary_schema,
+        "role": primary.get("role", ""),
+        "derivation": dict(derivation) if isinstance(derivation, dict) else None,
+        "candidates": [
+            {"schema": sch, **rec} for _, sch, rec in candidates
+        ],
+    }
+
+
+def apply_bi_routing(
+    state: LogicState,
+    raw_query: str,
+    redis_client: Any,
+    patterns: Optional[Dict[str, Any]] = None,
+) -> LogicState:
+    """Conditionally rewrite *state* to route through a BI-resolved function.
+
+    Idempotent and safe to call: when any precondition fails the state is
+    returned unchanged. Mutates and also returns *state* for callers that
+    prefer a chainable form.
+
+    Fires when ALL of:
+      - ``state["query_type"]`` is in ``{COLUMN_LOGIC, FUNCTION_LOGIC}``
+      - the user did NOT name a function from the indexed corpus in
+        ``raw_query`` (explicit choice wins)
+      - at least one configured business identifier appears in *raw_query*
+      - the first such identifier resolves via the literal index
+
+    On fire it stamps:
+      - ``state["bi_routing"]`` — the resolved record (identifier,
+        function, schema, role, derivation)
+      - ``state["object_name"]`` — overridden to the resolved function so
+        the graph pipeline / source retrieval load the right body
+      - ``state["schema"]`` — overridden to the resolved schema
+
+    Off-fire (any precondition fails) the state is left untouched.
+
+    Args:
+        state: Current pipeline state. Mutated in place.
+        raw_query: The user's original query string.
+        redis_client: Active graph Redis client. ``None`` short-circuits
+            the call (no BI routing — pipeline runs unchanged).
+        patterns: Optional ``business_identifier_patterns`` config block.
+            ``None`` uses the default ``CAP\\d{3}`` pattern.
+
+    Returns:
+        The same state dict, possibly with bi_routing/object_name/schema
+        rewritten.
+    """
+    if redis_client is None:
+        return state
+    if not raw_query:
+        return state
+
+    qt = state.get("query_type", "")
+
+    # Decide where to look for the identifier and whether to promote.
+    promoted_from_variable_trace = False
+    if qt in _BI_ROUTING_QUERY_TYPES:
+        # COLUMN_LOGIC / FUNCTION_LOGIC: scan the user's whole query for
+        # configured business identifiers.
+        identifiers = detect_business_identifiers(raw_query, patterns)
+    elif qt == "VARIABLE_TRACE":
+        # TODO(W36-followup): The classifier rule "VARIABLE_TRACE: how is X
+        # calculated" routes CAP-code queries here despite their being
+        # formula-definition questions. This branch corrects that downstream
+        # by promoting query_type to FUNCTION_LOGIC when the VARIABLE_TRACE
+        # target is a business identifier. A cleaner fix would amend the
+        # classifier prompt to route CAP-code-shaped targets to COLUMN_LOGIC /
+        # FUNCTION_LOGIC directly. Deferred to keep classifier prompt changes
+        # out of Phase 7's scope and avoid LLM-determinism regressions.
+        target_var = (state.get("target_variable") or "").strip()
+        if not target_var:
+            return state
+        # Gate strictly on the target_variable matching a BI pattern — a
+        # query like "what writes N_EOP_BAL" must NOT fire BI routing,
+        # only CAP-code-shaped targets should.
+        identifiers = detect_business_identifiers(target_var, patterns)
+        if not identifiers:
+            return state
+        promoted_from_variable_trace = True
+    else:
+        return state
+
+    # Explicit-function-name override: if the query mentions a function
+    # that exists in the indexed corpus, preserve the user's choice.
+    candidates = extract_function_candidates(raw_query)
+    if candidates:
+        for cand in candidates:
+            if function_exists_in_graph(cand, redis_client):
+                logger.info(
+                    "apply_bi_routing: explicit function %s named in query — "
+                    "skipping BI routing",
+                    cand,
+                )
+                return state
+
+    if not identifiers:
+        return state
+
+    primary = identifiers[0]
+    resolved = resolve_bi_to_function(primary, redis_client)
+    if resolved is None:
+        logger.info(
+            "apply_bi_routing: identifier %s not found in any literal index",
+            primary,
+        )
+        return state
+
+    bi_routing = {
+        "identifier": primary,
+        "function": resolved["function"],
+        "schema": resolved["schema"],
+        "role": resolved["role"],
+        "derivation": resolved.get("derivation"),
+    }
+    state["bi_routing"] = bi_routing
+
+    # Stamp routing target so semantic search / graph pipeline pick this
+    # function rather than relying on enriched-string ranking. The schema
+    # override is a happy by-product that fixes the classifier-default
+    # OFSMDM mis-routing for OFSERM-only identifiers (CAP-codes live in
+    # OFSERM, but the classifier defaults schema to OFSMDM when it sees
+    # no other signal — without this override the graph pipeline would
+    # query graph:index:OFSMDM for an identifier that lives in
+    # graph:literal:OFSERM, miss every time, and fall back to a wrong
+    # answer).
+    state["object_name"] = resolved["function"]
+    state["schema"] = resolved["schema"]
+
+    if promoted_from_variable_trace:
+        # Promote the classifier's verdict. The literal-index hit is
+        # stronger downstream evidence than the classifier's regex-style
+        # "how is X calculated -> VARIABLE_TRACE" rule, and the
+        # variable-tracer agent would otherwise miss the derivation
+        # banner because the streaming endpoint branches on query_type.
+        state["query_type"] = "FUNCTION_LOGIC"
+        logger.info(
+            "apply_bi_routing: promoted VARIABLE_TRACE -> FUNCTION_LOGIC "
+            "for BI target %s (classifier mis-routed CAP-code-shaped "
+            "target_variable)",
+            primary,
+        )
+
+    logger.info(
+        "apply_bi_routing: %s -> %s.%s (role=%s, derivation=%s)",
+        primary,
+        resolved["schema"],
+        resolved["function"],
+        resolved["role"],
+        "yes" if resolved.get("derivation") else "no",
+    )
+    return state
 
 
 def build_function_not_found_response(
