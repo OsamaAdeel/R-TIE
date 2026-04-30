@@ -51,6 +51,95 @@ _LINE_REF_RE = re.compile(
 _REQUIRES_CITATIONS = frozenset({"VARIABLE_TRACE", "COLUMN_LOGIC", "FUNCTION_LOGIC"})
 
 
+# W35 Phase 7: derivation banner template. Rendered programmatically (NOT
+# via the LLM) when the orchestrator's BI routing resolved an identifier
+# to a function whose Phase 6 derivation summary is available. The
+# wording is owned by RTIE so the user always sees the same shape for
+# the same arithmetic.
+_DERIVATION_HEADER_TEMPLATE = (
+    "## Derivation\n\n"
+    "**{formula}**\n\n"
+    "{description}\n\n"
+)
+
+# Per-operation natural-language description used inside the banner.
+# Operands are referenced by name (target_literal, source_literals[0],
+# source_literals[1], etc.) so adding a new operation only requires a
+# new entry here.
+_DERIVATION_OP_DESCRIPTIONS = {
+    "SUBTRACT": (
+        "This value is computed in {function} ({schema} schema) by "
+        "subtracting {b} from {a}."
+    ),
+    "DIRECT_ASSIGN": (
+        "This value is assigned in {function} ({schema} schema) directly "
+        "from {a}."
+    ),
+}
+
+
+def render_derivation_header(state: LogicState) -> str:
+    """Render the structured Derivation banner for a BI-routed query.
+
+    Reads ``state["bi_routing"]`` (set by
+    :func:`src.agents.orchestrator.apply_bi_routing`). Returns an empty
+    string when:
+      - BI routing did not fire (``bi_routing`` is missing/empty)
+      - the routed function had no Phase 6 derivation summary
+      - the operation kind is not one we know how to format
+
+    The wording is rendered programmatically — the LLM does NOT generate
+    this banner. The hierarchy header (W39 behaviour) renders ABOVE the
+    derivation banner; the section ordering is hierarchy -> derivation
+    -> step-by-step body.
+
+    Args:
+        state: Current pipeline state.
+
+    Returns:
+        Markdown string ready to prepend to the explanation, or ``""``.
+    """
+    bi = state.get("bi_routing") or {}
+    derivation = bi.get("derivation") or {}
+    if not derivation:
+        return ""
+
+    target = (bi.get("identifier") or "").strip()
+    function = (bi.get("function") or "").strip()
+    schema = (bi.get("schema") or "").strip()
+    operation = (derivation.get("operation") or "").strip().upper()
+    sources = list(derivation.get("source_literals") or [])
+    if not target or not function or not operation:
+        return ""
+
+    desc_template = _DERIVATION_OP_DESCRIPTIONS.get(operation)
+    if desc_template is None:
+        return ""
+
+    if operation == "SUBTRACT":
+        if len(sources) < 2:
+            return ""
+        formula = f"{target} = {sources[0]} - {sources[1]}"
+        description = desc_template.format(
+            function=function, schema=schema, a=sources[0], b=sources[1],
+        )
+    elif operation == "DIRECT_ASSIGN":
+        if len(sources) < 1:
+            return ""
+        formula = f"{target} is assigned the value of {sources[0]}"
+        description = desc_template.format(
+            function=function, schema=schema, a=sources[0],
+        )
+    else:
+        # Defensive — _DERIVATION_OP_DESCRIPTIONS gate above should make
+        # this branch unreachable.
+        return ""
+
+    return _DERIVATION_HEADER_TEMPLATE.format(
+        formula=formula, description=description,
+    )
+
+
 def evaluate_grounding(
     raw_query: str,
     markdown: str,
@@ -843,10 +932,15 @@ class LogicExplainer:
             ) from exc
         markdown_content = response.content.strip()
 
-        # Prepend hierarchy context header when available
+        # Prepend hierarchy + derivation context headers when available.
+        # Order is hierarchy -> derivation -> body so the deterministic
+        # Phase 7 banner sits between the W39 hierarchy line and the
+        # LLM-generated step-by-step explanation.
+        derivation = render_derivation_header(state)
         header = self.hierarchy_header(state)
-        if header:
-            markdown_content = header + markdown_content
+        prefix = (header or "") + (derivation or "")
+        if prefix:
+            markdown_content = prefix + markdown_content
 
         # Store as markdown explanation
         state["explanation"] = {

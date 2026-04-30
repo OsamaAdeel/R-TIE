@@ -88,11 +88,19 @@ def build_logic_graph(
         """
         logger.info(f"[parse_query] Classifying: {state['raw_query'][:80]}...")
         llm_cfg = _extract_llm_config(config)
-        return await orchestrator.classify_query(
+        state = await orchestrator.classify_query(
             state["raw_query"], state,
             provider=llm_cfg["provider"],
             model=llm_cfg["model"],
         )
+        # W35 Phase 7: route business-identifier queries (e.g. "How is
+        # CAP943 calculated?") to the function that COMPUTES the
+        # identifier instead of letting semantic search rank loaders
+        # ahead of computers. No-op when redis is unavailable, when the
+        # query type is outside the BI scope, when the user named an
+        # explicit function, or when the identifier is unknown.
+        orchestrator.apply_bi_routing(state)
+        return state
 
     async def semantic_search(state: LogicState) -> LogicState:
         """Perform vector similarity search to find relevant functions.

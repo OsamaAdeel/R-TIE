@@ -68,6 +68,13 @@ class LogicState(TypedDict):
     phase2_actual_value: Optional[float]
     # Populated only when query_type == "UNSUPPORTED"
     unsupported_reason: str
+    # W35 Phase 7: business-identifier routing. Populated by
+    # orchestrator.apply_bi_routing when a CAP-code (or other configured
+    # business identifier) in the query resolves to a function via the
+    # graph:literal:<schema>:<id> index. Empty dict / missing key when BI
+    # routing did not fire — the existing classification + retrieval path
+    # runs unchanged.
+    bi_routing: dict
     # Final output
     output: dict
     partial_flag: bool
