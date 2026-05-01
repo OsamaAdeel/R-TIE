@@ -2,213 +2,193 @@
 @plugin "@tailwindcss/typography";
 
 @theme {
-  --color-bg-primary: #f8fafc;
-  --color-bg-secondary: #ffffff;
-  --color-bg-tertiary: #f1f5f9;
-  --color-bg-hover: #e2e8f0;
-  --color-border: #e2e8f0;
-  --color-border-strong: #cbd5e1;
-  --color-text-primary: #0f172a;
-  --color-text-secondary: #475569;
-  --color-text-muted: #94a3b8;
-  --color-accent: #1e293b;
-  --color-accent-hover: #0f172a;
-  --color-accent-light: #cbd5e1;
-  --color-accent-soft: #f1f5f9;
-  --color-success: #16a34a;
-  --color-success-light: #dcfce7;
-  --color-warning: #d97706;
-  --color-warning-light: #fef3c7;
-  --color-error: #dc2626;
-  --color-error-light: #fee2e2;
-  --color-info: #0284c7;
-  --color-info-light: #e0f2fe;
-  --color-purple: #7c3aed;
-  --color-purple-light: #ede9fe;
-  --color-sidebar: #1e293b;
-  --color-sidebar-hover: #334155;
-  --color-sidebar-text: #e2e8f0;
-  --color-sidebar-muted: #94a3b8;
+  /* ------------------------------------------------------------------
+     Default theme — `linen` (light, clean white with navy accent).
+     Token names use ROLES (ink = surface, ivory = primary text,
+     gold = accent), not literal colors — so the same `text-gold`
+     utility renders navy in linen and gold in signature. The dark
+     `signature` variant overrides them under :root[data-theme="dark"]
+     further down.
+     Lifted from design_handoff_rtie_frontend (variant-linen).
+     ------------------------------------------------------------------ */
+  --color-ink: #ffffff;
+  --color-ink-2: #f4f5f8;
+  --color-panel: #ffffff;
+  --color-panel-2: #f7f9fc;
+  --color-line: rgba(20, 25, 40, 0.08);
+  --color-line-strong: rgba(20, 25, 40, 0.14);
+  --color-line-gold: oklch(0.5 0.18 255 / 0.30);
+
+  --color-ivory: #16181d;
+  --color-ivory-dim: rgba(22, 24, 29, 0.65);
+  --color-ivory-faint: rgba(22, 24, 29, 0.42);
+
+  --color-gold: oklch(0.5 0.18 255);          /* navy accent in linen */
+  --color-gold-dim: oklch(0.42 0.18 255);
+  --color-gold-soft: oklch(0.5 0.18 255 / 0.10);
+
+  --color-burgundy: oklch(0.5 0.16 25);
+  --color-emerald: oklch(0.55 0.16 155);
+  --color-amber: oklch(0.7 0.15 70);
+  --color-violet: oklch(0.55 0.18 290);
+
+  /* Hover overlays — flip with theme so they stay visible on both
+     surfaces (subtle dark tint over white, subtle light tint over ink). */
+  --color-hover: rgba(20, 25, 40, 0.05);
+  --color-hover-strong: rgba(20, 25, 40, 0.09);
+
+  /* Themed surfaces that aren't expressible as a single Tailwind color */
+  --gradient-sidebar: linear-gradient(180deg, #ffffff 0%, #fafbfd 100%);
+  --gradient-chat-wash:
+    radial-gradient(circle at 78% -10%, oklch(0.5 0.18 255 / 0.04), transparent 45%),
+    radial-gradient(circle at 8% 110%, oklch(0.5 0.16 25 / 0.03), transparent 50%);
+
+  /* Popup menu shadow — none in linen (border alone defines the box),
+     deeper in signature (where the panel surface needs to lift off the
+     dark shell). */
+  --shadow-menu: none;
+
+  /* Border radius scale (chips → cards → banners) */
+  --radius-chip: 6px;
+  --radius-button: 8px;
+  --radius-banner: 10px;
+  --radius-card: 12px;
+
+  /* Type stack — Geist (Vercel) is the primary UI sans, Geist Mono its
+     companion. Inter / system stack are loaded as fallbacks until Geist
+     finishes loading. Tomorrow stays for the bold R-TIE wordmark. */
+  --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Tomorrow', 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', 'JetBrains Mono', 'Söhne Mono', 'Fira Code', Consolas, monospace;
 }
 
-/* Force light mode — disable Tailwind v4 automatic dark mode */
-html {
-  color-scheme: light !important;
+/* Dark / "signature" — opt-in via <html data-theme="dark">. Lifted from
+   design_handoff_rtie_frontend/styles.css `.dark-shell`. */
+:root[data-theme="dark"] {
+  --color-ink: #0a0a12;
+  --color-ink-2: #0f0f1a;
+  --color-panel: #11121d;
+  --color-panel-2: #161725;
+  --color-line: rgba(255, 255, 255, 0.07);
+  --color-line-strong: rgba(255, 255, 255, 0.12);
+  --color-line-gold: oklch(0.75 0.15 85 / 0.3);
+
+  --color-ivory: #ece6d6;
+  --color-ivory-dim: rgba(236, 230, 214, 0.62);
+  --color-ivory-faint: rgba(236, 230, 214, 0.42);
+
+  --color-gold: oklch(0.78 0.15 85);
+  --color-gold-dim: oklch(0.78 0.15 85 / 0.7);
+  --color-gold-soft: oklch(0.78 0.15 85 / 0.12);
+
+  --color-burgundy: oklch(0.55 0.16 25);
+  --color-emerald: oklch(0.65 0.16 155);
+  --color-amber: oklch(0.78 0.15 70);
+  --color-violet: oklch(0.65 0.18 290);
+
+  --color-hover: rgba(255, 255, 255, 0.05);
+  --color-hover-strong: rgba(255, 255, 255, 0.10);
+
+  --gradient-sidebar: linear-gradient(180deg, #0c0d17 0%, #0a0a12 100%);
+  --gradient-chat-wash:
+    radial-gradient(circle at 78% -10%, oklch(0.78 0.15 85 / 0.07), transparent 45%),
+    radial-gradient(circle at 8% 110%, oklch(0.55 0.16 25 / 0.08), transparent 50%);
+
+  --shadow-menu: 0 12px 36px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
-* {
-  box-sizing: border-box;
-}
+html { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--color-ink);
+  color: var(--color-ivory);
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border-strong);
+  background: var(--color-line-strong);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+  background: var(--color-ivory-faint);
+}
+
+/* Themed background helpers — used by the Sidebar gradient and the chat
+   radial wash. Driven by CSS vars so they flip with [data-theme]. */
+.rtie-sidebar-bg  { background: var(--gradient-sidebar); }
+.rtie-chat-wash   { background-image: var(--gradient-chat-wash); }
+.rtie-menu-shadow { box-shadow: var(--shadow-menu); }
+
+/* ──────────────────────────────────────────────
+   Agent-activity row appearance — each step row
+   fades up as it activates so successive stages
+   feel like real-time thinking instead of a
+   static grid.
+   ────────────────────────────────────────────── */
+@keyframes rtie-row-appear {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+.rtie-row-appear {
+  animation: rtie-row-appear 220ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rtie-row-appear { animation: none; }
 }
 
 /* ──────────────────────────────────────────────
-   RTIE Markdown — Claude-style typography
+   Connector status dots — used by the Sidebar's
+   connector rail. Pulse on "ok" signals the
+   service is alive; static halos on degraded /
+   down. Reduced-motion users get no animation.
    ────────────────────────────────────────────── */
-
-.rtie-markdown {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 14.5px;
-  line-height: 1.7;
-  color: #1a1a2e;
+@keyframes rtie-conn-pulse {
+  0%, 100% {
+    box-shadow: 0 0 6px oklch(0.65 0.16 155 / 0.55);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 9px oklch(0.65 0.16 155 / 0.85);
+    opacity: 0.82;
+  }
 }
 
-.rtie-markdown h1,
-.rtie-markdown h2 {
-  font-size: 17px;
-  font-weight: 650;
-  color: #0f172a;
-  margin: 28px 0 8px;
-  letter-spacing: -0.01em;
+.rtie-conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--color-ivory-faint);
+  transition: background 200ms ease, box-shadow 200ms ease;
 }
-
-.rtie-markdown h3 {
-  font-size: 15px;
-  font-weight: 620;
-  color: #0f172a;
-  margin: 22px 0 6px;
+.rtie-conn-dot.is-ok {
+  background: var(--color-emerald);
+  box-shadow: 0 0 6px oklch(0.65 0.16 155 / 0.55);
+  animation: rtie-conn-pulse 1.8s ease-in-out infinite;
 }
-
-.rtie-markdown h4 {
-  font-size: 14px;
-  font-weight: 600;
-  color: #1e293b;
-  margin: 18px 0 4px;
+.rtie-conn-dot.is-degraded {
+  background: var(--color-amber);
+  box-shadow: 0 0 0 2px oklch(0.78 0.15 70 / 0.18), 0 0 8px oklch(0.78 0.15 70 / 0.6);
 }
-
-.rtie-markdown p {
-  margin: 10px 0;
-  color: #334155;
+.rtie-conn-dot.is-down {
+  background: var(--color-burgundy);
+  box-shadow: 0 0 0 2px oklch(0.55 0.16 25 / 0.22), 0 0 9px oklch(0.55 0.16 25 / 0.7);
 }
-
-.rtie-markdown strong {
-  font-weight: 620;
-  color: #0f172a;
+.rtie-conn-dot.is-unknown {
+  background: var(--color-ivory-faint);
+  opacity: 0.5;
 }
-
-.rtie-markdown ul, .rtie-markdown ol {
-  margin: 8px 0;
-  padding-left: 20px;
-}
-
-.rtie-markdown li {
-  margin: 4px 0;
-  color: #334155;
-}
-
-.rtie-markdown a {
-  color: #2563eb;
-  text-decoration: none;
-  font-weight: 500;
-}
-
-/* Inline code — subtle warm tint */
-.rtie-markdown code {
-  font-family: 'Söhne Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
-  font-size: 0.85em;
-  font-weight: 500;
-  color: #c7254e;
-  background: #fdf2f4;
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-/* Kill prose defaults on pre/code */
-.rtie-markdown pre {
-  background: transparent !important;
-  border: none !important;
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-.rtie-markdown pre code {
-  background: transparent !important;
-  padding: 0 !important;
-  font-size: 13px !important;
-  color: inherit !important;
-}
-
-/* ──────────────────────────────────────────────
-   Code Block — Claude style
-   ────────────────────────────────────────────── */
-
-.rtie-codeblock {
-  margin: 14px 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.rtie-codeblock-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 14px;
-  border-bottom: 1px solid #e5e7eb;
-  background: #fafafa;
-}
-
-.rtie-codeblock-lang {
-  font-family: 'Inter', sans-serif;
-  font-size: 12px;
-  font-weight: 500;
-  color: #6b7280;
-  text-transform: lowercase;
-}
-
-.rtie-codeblock-copy {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: #9ca3af;
-  padding: 2px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  transition: color 0.15s;
-}
-
-.rtie-codeblock-copy:hover {
-  color: #374151;
-}
-
-.rtie-codeblock-body {
-  background: #ffffff;
-  padding: 4px 6px;
-}
-
-/* Override any Tailwind prose interference */
-.prose pre,
-.prose pre[class*="language-"],
-.prose :where(pre):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-  background: transparent !important;
-  color: inherit !important;
-  border: none !important;
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-.prose code::before,
-.prose code::after {
-  content: none !important;
+@media (prefers-reduced-motion: reduce) {
+  .rtie-conn-dot.is-ok { animation: none; }
 }
