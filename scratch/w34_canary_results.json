@@ -1,0 +1,287 @@
+{
+  "started_at": "2026-05-02T16:52:37+0500",
+  "base_url": "http://localhost:8000",
+  "runs_per_canary": 3,
+  "gap_seconds": 2.0,
+  "canaries": [
+    {
+      "id": "C1",
+      "label": "FUNCTION_LOGIC OFSMDM (FN_LOAD_OPS_RISK_DATA)",
+      "query": "How does FN_LOAD_OPS_RISK_DATA work?",
+      "runs": [
+        {
+          "correlation_id": "574e97d8-8afd-4e49-a536-9f3da91d3f6c",
+          "total_ms": 25842.4,
+          "ttft_ms": 18677.6,
+          "char_count": 2480,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "40ff93c6-1ed4-40e9-bb84-5a3593e1abcf",
+          "total_ms": 11145.3,
+          "ttft_ms": 6336.6,
+          "char_count": 1774,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "e442d317-86d4-4d0e-9df8-e4941ddda416",
+          "total_ms": 14337.7,
+          "ttft_ms": 7581.0,
+          "char_count": 1847,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C2",
+      "label": "DATA_QUERY OFSMDM (N_EOP_BAL ABL on 2025-12-31)",
+      "query": "What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?",
+      "runs": [
+        {
+          "correlation_id": "890c0728-4543-4bb3-87ab-f0aec2d50d2d",
+          "total_ms": 9505.7,
+          "ttft_ms": 9495.4,
+          "char_count": 327,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "07d28f97-8702-490e-916c-1eb4d7c21d78",
+          "total_ms": 16575.8,
+          "ttft_ms": 16566.9,
+          "char_count": 327,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "58d5d466-bf20-42b7-ac66-d1e3696d5f3d",
+          "total_ms": 10692.3,
+          "ttft_ms": 10682.9,
+          "char_count": 320,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C3",
+      "label": "FUNCTION_LOGIC OFSERM via BI routing (CAP973)",
+      "query": "How is CAP973 calculated?",
+      "runs": [
+        {
+          "correlation_id": "51507ad6-eead-46c8-8b05-f6c752a59cb6",
+          "total_ms": 13259.8,
+          "ttft_ms": 6753.5,
+          "char_count": 3334,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "6c7fed71-d1a6-49dd-a20f-73aa6e5feb22",
+          "total_ms": 16055.1,
+          "ttft_ms": 7568.8,
+          "char_count": 3288,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "ca11c8cc-658b-480c-9964-d26afdce078d",
+          "total_ms": 15717.3,
+          "ttft_ms": 5753.4,
+          "char_count": 3798,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C4",
+      "label": "FUNCTION_LOGIC OFSERM explicit (Deferred_Tax_Asset)",
+      "query": "How does CS_Deferred_Tax_Asset_Net_of_DTL_Calculation work?",
+      "runs": [
+        {
+          "correlation_id": "d1f89f85-27ec-42fc-bde9-93c1b3e27403",
+          "total_ms": 26871.3,
+          "ttft_ms": 12385.5,
+          "char_count": 4673,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "9521441e-e6bc-4bb0-978f-68d7c8dfeb84",
+          "total_ms": 26433.2,
+          "ttft_ms": 9796.6,
+          "char_count": 4521,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "18b39c90-6c2b-4cd3-9f69-888e48428607",
+          "total_ms": 26146.0,
+          "ttft_ms": 13675.2,
+          "char_count": 4100,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C5",
+      "label": "DATA_QUERY OFSERM (N_STD_ACCT_HEAD_AMT 2025-12-31)",
+      "query": "What is the total N_STD_ACCT_HEAD_AMT in FCT_STANDARD_ACCT_HEAD on 2025-12-31?",
+      "runs": [
+        {
+          "correlation_id": "9d5eb6bb-72e1-4017-821f-9e944b1bd230",
+          "total_ms": 18645.5,
+          "ttft_ms": 18633.4,
+          "char_count": 463,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "8866b328-a12a-4f0d-8af6-0b33f9bee3ce",
+          "total_ms": 22909.4,
+          "ttft_ms": 22895.9,
+          "char_count": 465,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "cf795cf3-6c4e-4f8c-924d-33b39fec30bc",
+          "total_ms": 15179.4,
+          "ttft_ms": 15166.9,
+          "char_count": 465,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C6",
+      "label": "VARIABLE_TRACE OFSMDM (writes N_STD_ACCT_HEAD_AMT)",
+      "query": "What writes N_STD_ACCT_HEAD_AMT?",
+      "runs": [
+        {
+          "correlation_id": "ad81e33d-0aa2-468a-acee-18c00033635c",
+          "total_ms": 36788.9,
+          "ttft_ms": 9145.5,
+          "char_count": 4021,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "2fa6814e-b980-4208-a71c-53e56b3a7a48",
+          "total_ms": 15787.9,
+          "ttft_ms": 6752.0,
+          "char_count": 4090,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "0ebce44a-e705-495a-9e9e-88ee5a64505c",
+          "total_ms": 14870.1,
+          "ttft_ms": 6627.2,
+          "char_count": 4202,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C7",
+      "label": "DECLINED reconciliation",
+      "query": "Why does FCT_PRODUCT_EXPOSURES differ from STG_PRODUCT_PROCESSOR?",
+      "runs": [
+        {
+          "correlation_id": "b13ac92a-f971-4547-ba26-2fb6c0527a0f",
+          "total_ms": 6108.1,
+          "ttft_ms": 6093.0,
+          "char_count": 589,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "4c58baa3-de9f-4d99-9b39-c288555ed38a",
+          "total_ms": 6103.8,
+          "ttft_ms": 6088.6,
+          "char_count": 589,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "8b9500c2-a9b9-4e71-9029-1b4607d534cd",
+          "total_ms": 7995.9,
+          "ttft_ms": 7980.4,
+          "char_count": 589,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C8",
+      "label": "FUNCTION_LOGIC OFSERM via BI routing + derivation (CAP943)",
+      "query": "How is CAP943 calculated?",
+      "runs": [
+        {
+          "correlation_id": "3d870767-bbbb-41ef-aa06-e340d39b9c76",
+          "total_ms": 18014.0,
+          "ttft_ms": 8225.4,
+          "char_count": 4247,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "23789b38-2a44-4b67-b84b-92df711bf783",
+          "total_ms": 15207.8,
+          "ttft_ms": 7652.7,
+          "char_count": 3569,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "365f4de1-ced1-4267-a1ce-e05d8f2e6b40",
+          "total_ms": 16250.5,
+          "ttft_ms": 6907.0,
+          "char_count": 4092,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C9",
+      "label": "W45 ungrounded path (CAP999)",
+      "query": "How is CAP999 calculated?",
+      "runs": [
+        {
+          "correlation_id": "1999f256-dac0-4248-89b2-445a976d4e10",
+          "total_ms": 13789.6,
+          "ttft_ms": 11144.4,
+          "char_count": 1757,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "6f1a2cbe-5533-4b41-a188-fa2764644730",
+          "total_ms": 11302.9,
+          "ttft_ms": 8900.8,
+          "char_count": 1718,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "11af407e-2f7c-4bc4-8015-6c3804f1eaea",
+          "total_ms": 14912.2,
+          "ttft_ms": 12795.4,
+          "char_count": 1718,
+          "done": true,
+          "error": null
+        }
+      ]
+    }
+  ]
+}

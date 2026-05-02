@@ -297,11 +297,27 @@ def t12_n_annual_gross_income_grounded():
 @test("TEST 13 — W45 regression: DATA_QUERY unaffected")
 def t13_n_eop_bal_data_query():
     """DATA_QUERY responses must not accidentally hit the ungrounded
-    branch. Ensures the W45 fix didn't leak across response types."""
+    branch. Ensures the W45 fix didn't leak across response types.
+
+    W34a addition: verify that progressive stage events fire in the
+    expected order — generating_sql, validating, fetch, explain — and
+    that the misleading pre-W34a upfront cluster is gone (no
+    ``"Building schema catalog + generating SQL..."`` and no
+    ``"Executing read-only query..."`` literal messages, both of which
+    used to fire ~5 s before their corresponding work actually started).
+    """
     r = run_query(
         "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
     )
     d = r["done"] or {}
+
+    stage_events = [
+        e[1] for e in r["events"]
+        if e[0] == "stage" and isinstance(e[1], dict)
+    ]
+    stage_names = [s.get("stage") for s in stage_events]
+    stage_messages = [s.get("message", "") for s in stage_events]
+
     checks = {
         "type_is_data_query": d.get("type") == "data_query",
         "badge_verified": d.get("badge") == "VERIFIED",
@@ -309,12 +325,26 @@ def t13_n_eop_bal_data_query():
         "no_ungrounded_warning": not any(
             "UNGROUNDED_IDENTIFIERS" in w for w in (d.get("warnings") or [])
         ),
+        # W34a: progressive stage events.
+        "has_generating_sql_stage": "generating_sql" in stage_names,
+        "has_validating_stage": "validating" in stage_names,
+        "has_fetch_stage": "fetch" in stage_names,
+        "has_explain_stage": "explain" in stage_names,
+        # W34a: the misleading upfront cluster must be gone.
+        "no_pre_w34a_search_message": not any(
+            "Building schema catalog + generating SQL" in m
+            for m in stage_messages
+        ),
+        "no_pre_w34a_fetch_message": not any(
+            "Executing read-only query against Oracle" in m
+            for m in stage_messages
+        ),
     }
     passed = all(checks.values())
     failed_checks = [k for k, v in checks.items() if not v]
     extra = (
         f"type={d.get('type')} badge={d.get('badge')} "
-        f"status={d.get('status')}"
+        f"status={d.get('status')} stages={stage_names}"
     )
     if failed_checks:
         extra += f" FAILED_CHECKS={failed_checks}"
