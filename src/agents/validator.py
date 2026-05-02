@@ -35,76 +35,35 @@ class Validator:
 
         Args:
             schema_tools: Oracle query execution tools for DDL checks.
-            cache_client: Redis cache client for cached version retrieval.
+            cache_client: Async Redis client retained for parity with the
+                rest of the agent surface; no longer used by
+                ``cache_validator`` after Phase 8's drift-detection deferral
+                (see W27).
         """
         self._schema_tools = schema_tools
         self._cache = cache_client
 
     async def cache_validator(self, state: LogicState) -> LogicState:
-        """Validate cache freshness by comparing Oracle DDL timestamps.
+        """No-op cache freshness validator (Phase 8).
 
-        Checks the oracle_last_ddl_time stored in the cached object against
-        the current LAST_DDL_TIME in Oracle's ALL_OBJECTS. If they differ,
-        sets cache_stale=True and logs a WARNING.
+        # TODO(W27): Drift detection is intentionally disabled in Phase 8 —
+        # graph:source: is rebuilt at startup via FLUSHDB cycles, not via
+        # per-function drift detection. Re-enable this node when W27 (drift
+        # detection) lands with proper graph:source:-aware semantics.
 
         Args:
-            state: Current pipeline state with cache info.
+            state: Current pipeline state.
 
         Returns:
-            Updated state with cache_stale flag set.
+            State with ``cache_stale`` set to ``False`` unconditionally.
         """
         correlation_id = get_correlation_id()
-        schema = state["schema"]
-        object_name = state["object_name"]
-
+        state["cache_stale"] = False
         logger.info(
-            f"Validating cache freshness for {schema}.{object_name} | "
-            f"correlation_id={correlation_id}"
+            "cache_validator no-op (W27 drift detection deferred) | "
+            "correlation_id=%s",
+            correlation_id,
         )
-
-        # If not a cache hit, nothing to validate
-        if not state.get("cache_hit", False):
-            state["cache_stale"] = False
-            logger.info(
-                f"Skipping cache validation — not a cache hit | "
-                f"correlation_id={correlation_id}"
-            )
-            return state
-
-        # Get current DDL time from Oracle
-        rows = await self._schema_tools.execute_query(
-            "TMPL_OBJECT_EXISTS",
-            {"schema": schema, "object_name": object_name},
-        )
-
-        if not rows:
-            state["cache_stale"] = True
-            logger.warning(
-                f"Object {schema}.{object_name} no longer exists in Oracle — "
-                f"cache is stale | correlation_id={correlation_id}"
-            )
-            return state
-
-        oracle_ddl_time = str(rows[0][2])
-
-        # Get cached DDL time from Redis
-        cached = await self._cache.get_json("logic", schema, object_name)
-        cached_ddl_time = cached.get("oracle_last_ddl_time") if cached else None
-
-        if cached_ddl_time != oracle_ddl_time:
-            state["cache_stale"] = True
-            logger.warning(
-                f"Cache STALE for {schema}.{object_name}: "
-                f"cached_ddl={cached_ddl_time} vs oracle_ddl={oracle_ddl_time} | "
-                f"correlation_id={correlation_id}"
-            )
-        else:
-            state["cache_stale"] = False
-            logger.info(
-                f"Cache is FRESH for {schema}.{object_name} | "
-                f"correlation_id={correlation_id}"
-            )
-
         return state
 
     async def query_relevance_validator(self, state: LogicState) -> LogicState:

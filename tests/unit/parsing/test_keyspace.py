@@ -217,24 +217,14 @@ class TestLiteralKey:
 
 
 # ---------------------------------------------------------------------------
-# logic_cache_key
+# logic_cache_key was retired in Phase 8 (rtie:logic: cache unification).
+# graph:source: is now the sole source-of-source. See SchemaAwareKeyspace.
 # ---------------------------------------------------------------------------
 
-class TestLogicCacheKey:
-    def test_format(self):
-        assert K.logic_cache_key("OFSMDM", "FN_LOAD") == "rtie:logic:OFSMDM:FN_LOAD"
 
-    def test_uses_rtie_prefix(self):
-        # CacheClient(key_prefix="rtie") prepends 'rtie:' — must match.
-        assert K.logic_cache_key("OFSERM", "CS_X").startswith("rtie:logic:")
-
-    def test_empty_schema_raises(self):
-        with pytest.raises(ValueError):
-            K.logic_cache_key("", "FN_X")
-
-    def test_empty_function_raises(self):
-        with pytest.raises(ValueError):
-            K.logic_cache_key("OFSERM", "")
+def test_logic_cache_key_is_removed():
+    """Regression: the legacy helper must not be reintroduced."""
+    assert not hasattr(K, "logic_cache_key")
 
 
 # ---------------------------------------------------------------------------

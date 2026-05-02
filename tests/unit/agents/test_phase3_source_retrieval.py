@@ -1,20 +1,21 @@
 """Phase 3 — schema-aware source retrieval and per-function schema resolution.
 
-Three contracts:
+Three contracts (post-Phase-8 cache unification):
 
 1. ``MetadataInterpreter.fetch_logic`` reads the loader-managed
-   ``graph:source:<schema>:<fn>`` cache as the first lookup. This is
-   what closes W49 for OFSERM functions whose source IS retrievable;
-   pre-Phase-3 the chain went rtie:logic → Oracle → disk and never
-   touched the loader cache.
+   ``graph:source:<schema>:<fn>`` cache as the first and primary
+   lookup. This is what closes W49 for OFSERM functions whose source
+   IS retrievable.
 
 2. ``MetadataInterpreter.fetch_multi_logic`` resolves the actual
    owning schema per result via ``schema_for_function`` and reads from
    that schema's keys. The orchestrator may have routed the request to
    OFSMDM (the default fallback); the function may live in OFSERM.
 
-3. The fallback to rtie:logic / Oracle / disk is preserved as the W49
-   permanent backstop for genuinely missing source.
+3. The fallback chain on a graph:source: miss is Oracle ALL_SOURCE →
+   ``db/modules/`` on disk. The legacy ``rtie:logic:`` cache was retired
+   in Phase 8 — ``cache_client.get_json`` must not be awaited from the
+   source-retrieval path.
 """
 
 from __future__ import annotations
@@ -127,16 +128,17 @@ async def test_fetch_logic_reads_loader_cache_first():
 
 
 @pytest.mark.asyncio
-async def test_fetch_logic_falls_through_when_loader_cache_empty():
-    """No graph:source:<schema>:<fn> → existing chain runs unchanged."""
+async def test_fetch_logic_falls_through_to_oracle_when_loader_cache_empty():
+    """No graph:source:<schema>:<fn> → fall through to Oracle (post-Phase-8).
+
+    The legacy rtie:logic: cache was retired; the chain on miss is
+    Oracle ALL_SOURCE → disk. The async ``cache_client.get_json`` must
+    not be awaited from the source-retrieval path anymore.
+    """
     fake = _FakeGraphRedis({})
-    cached = {
-        "source_code": [{"line": 1, "text": "FROM_RTIE_LOGIC\n"}],
-        "cached_at": "2026-04-28T00:00:00",
-        "version_hash": "abc",
-    }
+    oracle_rows = [(1, "FROM_ORACLE\n")]
     interpreter, schema_tools, cache_client = _make_interpreter(
-        graph_redis=fake, cache_returns=cached
+        graph_redis=fake, oracle_returns=oracle_rows
     )
 
     state = {
@@ -148,21 +150,19 @@ async def test_fetch_logic_falls_through_when_loader_cache_empty():
     }
     result = await interpreter.fetch_logic(state)
 
-    # rtie:logic served the request, like Phase 1.
-    cache_client.get_json.assert_awaited_once()
-    assert schema_tools.execute_query.await_count == 0
-    assert result["source_code"][0]["text"] == "FROM_RTIE_LOGIC\n"
+    # rtie:logic was retired — its async client must not be touched.
+    assert cache_client.get_json.await_count == 0
+    assert cache_client.set_json.await_count == 0
+    schema_tools.execute_query.assert_awaited_once()
+    assert result["source_code"][0]["text"] == "FROM_ORACLE\n"
 
 
 @pytest.mark.asyncio
-async def test_fetch_logic_runs_unchanged_without_graph_redis():
-    """No graph_redis → Phase 1 chain runs. set_graph_redis_client never called."""
-    cached = {
-        "source_code": [{"line": 1, "text": "PHASE1_PATH\n"}],
-        "cached_at": "2026-04-28T00:00:00",
-    }
+async def test_fetch_logic_falls_through_to_oracle_without_graph_redis():
+    """No graph_redis → graph:source: lookup is skipped, Oracle is consulted."""
+    oracle_rows = [(1, "FROM_ORACLE_NO_GRAPH_REDIS\n")]
     interpreter, schema_tools, cache_client = _make_interpreter(
-        graph_redis=None, cache_returns=cached
+        graph_redis=None, oracle_returns=oracle_rows
     )
 
     state = {
@@ -174,8 +174,34 @@ async def test_fetch_logic_runs_unchanged_without_graph_redis():
     }
     result = await interpreter.fetch_logic(state)
 
-    cache_client.get_json.assert_awaited_once()
-    assert result["source_code"][0]["text"] == "PHASE1_PATH\n"
+    assert cache_client.get_json.await_count == 0
+    schema_tools.execute_query.assert_awaited_once()
+    assert result["source_code"][0]["text"] == "FROM_ORACLE_NO_GRAPH_REDIS\n"
+
+
+@pytest.mark.asyncio
+async def test_fetch_logic_never_consults_rtie_logic():
+    """rtie:logic retirement regression: get_json is not awaited from any
+    path through fetch_logic, regardless of where the source ultimately
+    resolves (loader-cache hit, Oracle hit, disk hit, or empty).
+    """
+    fake = _FakeGraphRedis({})
+    interpreter, schema_tools, cache_client = _make_interpreter(
+        graph_redis=fake, oracle_returns=[]
+    )
+
+    state = {
+        "schema": "OFSMDM",
+        "object_name": "DOES_NOT_EXIST_ANYWHERE",
+        "source_code": [],
+        "cache_hit": False,
+        "cache_stale": False,
+    }
+    result = await interpreter.fetch_logic(state)
+
+    assert cache_client.get_json.await_count == 0
+    assert cache_client.set_json.await_count == 0
+    assert result["source_code"] == []
 
 
 @pytest.mark.asyncio
@@ -226,18 +252,17 @@ async def test_fetch_multi_logic_resolves_per_function_schema():
 @pytest.mark.asyncio
 async def test_fetch_multi_logic_falls_back_to_state_schema_when_unresolvable():
     """Function name absent from every loaded schema → request schema is
-    used so the existing rtie:logic / Oracle / disk chain still runs."""
+    used; on graph:source: miss the chain falls through to Oracle (post-
+    Phase-8; rtie:logic: was retired).
+    """
     fake = _FakeGraphRedis({
         # Only OFSMDM key present, but search names a function not in any schema.
         "graph:OFSMDM:KNOWN_FN": to_msgpack({"function": "KNOWN_FN"}),
     })
 
-    cached = {
-        "source_code": [{"line": 1, "text": "FROM_DISK\n"}],
-        "cached_at": "2026-04-28T00:00:00",
-    }
+    oracle_rows = [(1, "FROM_ORACLE\n")]
     interpreter, schema_tools, cache_client = _make_interpreter(
-        graph_redis=fake, cache_returns=cached
+        graph_redis=fake, oracle_returns=oracle_rows
     )
 
     state = {
@@ -252,5 +277,7 @@ async def test_fetch_multi_logic_falls_back_to_state_schema_when_unresolvable():
     assert "MISSING_FN" in multi
     # Resolution failed, so we fall back to the request schema.
     assert multi["MISSING_FN"]["schema"] == "OFSMDM"
-    # rtie:logic chain ran (got the cached payload).
-    assert multi["MISSING_FN"]["source_code"][0]["text"] == "FROM_DISK\n"
+    # graph:source: miss → Oracle path resolved the body.
+    assert multi["MISSING_FN"]["source_code"][0]["text"] == "FROM_ORACLE\n"
+    # rtie:logic was retired — its async client must not be awaited.
+    assert cache_client.get_json.await_count == 0

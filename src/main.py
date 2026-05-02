@@ -294,6 +294,28 @@ async def lifespan(app: FastAPI):
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
         )
+
+        # Phase 8: legacy ``rtie:logic:*`` key cleanup. The previous source
+        # cache was retired in favour of the loader-managed
+        # ``graph:source:*`` namespace; any ``rtie:logic:*`` keys left over
+        # from earlier deployments are now dead weight and would clutter
+        # KEYS / SCAN output. SCAN + UNLINK in one pass; surviving on a
+        # single Redis hiccup is fine because the keys are dead anyway.
+        try:
+            legacy_keys = list(
+                _graph_redis.scan_iter(match="rtie:logic:*")
+            )
+            if legacy_keys:
+                _graph_redis.unlink(*legacy_keys)
+            logger.info(
+                "Phase 8 legacy cleanup: deleted %d rtie:logic:* key(s)",
+                len(legacy_keys),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Phase 8 legacy cleanup failed (non-fatal): %s", exc
+            )
+
         # Wire the graph Redis client into the logic explainer so it can
         # look up batch/process hierarchy and prepend a one-line context
         # header on streamed explanations.
@@ -310,11 +332,18 @@ async def lifespan(app: FastAPI):
 
         # Phase 3: same client into MetadataInterpreter so source
         # retrieval can read graph:source:<schema>:<fn> (the loader's
-        # canonical source cache) before falling through to rtie:logic /
-        # Oracle / disk. Without this wiring the Phase 1 chain runs
-        # unchanged — fine for OFSMDM but it's why W49 fired for OFSERM.
+        # canonical source cache) before falling through to Oracle /
+        # disk. Without this wiring the Oracle/disk chain still runs
+        # but every source fetch pays the Oracle round-trip.
         if _metadata_interpreter is not None:
             _metadata_interpreter.set_graph_redis_client(_graph_redis)
+
+        # Phase 8: same client into CacheManager so the repointed
+        # ``/cache-list`` and ``/cache-status`` slash commands can SCAN
+        # ``graph:source:*`` and report on the loader cache without
+        # going through the async cache_client.
+        if _cache_manager is not None:
+            _cache_manager.set_graph_redis_client(_graph_redis)
 
         # W38: auto-discover every module folder under db/modules/ that has a
         # functions/ subdirectory. Union with any explicit functions_dirs from
@@ -1093,6 +1122,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         raw_query=request.query,
                         provider=provider,
                         model=model,
+                        # Phase 8: schema-agnostic next-step boilerplate.
+                        # Snapshot the live discovered_schemas list so the
+                        # response always names the schemas RTIE actually
+                        # has indexed.
+                        discovered_schemas=(
+                            discovered_schemas(_graph_redis)
+                            if _graph_redis is not None
+                            else None
+                        ),
                     ):
                         if _first_token:
                             mark_event("llm_first_token", correlation_id, branch="ungrounded")
@@ -1789,8 +1827,9 @@ async def _handle_command(
         return await _cache_manager.refresh_logic_cache(args[0], schema)
     elif command == "refresh-cache-all":
         return await _cache_manager.refresh_all_logic_cache(schema)
-    elif command == "cache-status" and args:
-        return await _cache_manager.get_cache_status(args[0], schema)
+    elif command == "cache-status":
+        target = args[0] if args else None
+        return await _cache_manager.get_cache_status(target, schema)
     elif command == "cache-list":
         return await _cache_manager.list_cached_objects(schema)
     elif command == "cache-clear" and args:

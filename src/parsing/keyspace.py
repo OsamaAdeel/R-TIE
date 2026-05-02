@@ -153,18 +153,6 @@ class SchemaAwareKeyspace:
         return f"graph:literal:{schema}:{identifier}"
 
     @staticmethod
-    def logic_cache_key(schema: str, function_name: str) -> str:
-        """Source-cache key written by `MetadataInterpreter.fetch_logic`.
-
-        e.g. ``rtie:logic:OFSERM:CS_DEFERRED_TAX_...``. The ``rtie`` prefix
-        comes from `CacheClient(key_prefix="rtie")` and is the live convention
-        in `src/tools/cache_tools.py`.
-        """
-        _require_nonempty(schema, "schema")
-        _require_nonempty(function_name, "function_name")
-        return f"rtie:logic:{schema}:{function_name}"
-
-    @staticmethod
     def parse_graph_key(key: str) -> Optional[tuple[str, str]]:
         """Reverse parser for the per-function graph key.
 
