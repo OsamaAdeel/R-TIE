@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import Chat from './pages/Chat';
 import { useSessions } from './hooks/useSessions';
@@ -31,6 +31,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [provider, setProvider] = useState(null);
   const [model, setModel] = useState(null);
+  // Holds the AbortController for the in-flight stream so the user can
+  // cancel mid-response via the Stop button in the composer.
+  const abortRef = useRef(null);
 
   const [starredIds, setStarredIds] = useState(() => {
     try {
@@ -84,82 +87,116 @@ export default function App() {
       });
       setLoading(true);
 
+      // Fresh AbortController per request — Stop button calls abort().
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       let meta = null;
 
-      await streamQuery(text, sid, ENGINEER_ID, provider, model, {
-        onStage: (stageData) => {
-          updateLastMessage(sid, (msg) => ({
-            ...msg,
-            stage: stageData,
-          }));
-        },
+      await streamQuery(
+        text, sid, ENGINEER_ID, provider, model,
+        {
+          onStage: (stageData) => {
+            updateLastMessage(sid, (msg) => ({
+              ...msg,
+              stage: stageData,
+            }));
+          },
 
-        onMeta: (metaData) => {
-          meta = metaData;
-          updateLastMessage(sid, (msg) => ({
-            ...msg,
-            loading: false,
-            meta: metaData,
-          }));
-        },
+          onMeta: (metaData) => {
+            meta = metaData;
+            updateLastMessage(sid, (msg) => ({
+              ...msg,
+              loading: false,
+              meta: metaData,
+            }));
+          },
 
-        onToken: (token) => {
-          updateLastMessage(sid, (msg) => ({
-            ...msg,
-            loading: false,
-            streamedMarkdown: (msg.streamedMarkdown || '') + token,
-          }));
-        },
+          onToken: (token) => {
+            updateLastMessage(sid, (msg) => ({
+              ...msg,
+              loading: false,
+              streamedMarkdown: (msg.streamedMarkdown || '') + token,
+            }));
+          },
 
-        onDone: (finalPayload) => {
-          updateLastMessage(sid, (msg) => {
-            const fullMarkdown = msg.streamedMarkdown || '';
-            return {
+          onDone: (finalPayload) => {
+            updateLastMessage(sid, (msg) => {
+              const fullMarkdown = msg.streamedMarkdown || '';
+              return {
+                ...msg,
+                loading: false,
+                streaming: false,
+                streamedMarkdown: undefined,
+                data: {
+                  ...finalPayload,
+                  ...(meta || {}),
+                  explanation: {
+                    markdown: fullMarkdown,
+                  },
+                },
+              };
+            });
+            setLoading(false);
+          },
+
+          onClarification: (payload) => {
+            updateLastMessage(sid, (msg) => ({
               ...msg,
               loading: false,
               streaming: false,
               streamedMarkdown: undefined,
-              data: {
-                ...finalPayload,
-                ...(meta || {}),
-                explanation: {
-                  markdown: fullMarkdown,
-                },
+              stage: undefined,
+              meta: undefined,
+              data: null,
+              clarification: {
+                message: payload?.message || 'Could you clarify your request?',
               },
-            };
-          });
-          setLoading(false);
-        },
+            }));
+            setLoading(false);
+          },
 
-        onClarification: (payload) => {
-          updateLastMessage(sid, (msg) => ({
-            ...msg,
-            loading: false,
-            streaming: false,
-            streamedMarkdown: undefined,
-            stage: undefined,
-            meta: undefined,
-            data: null,
-            clarification: {
-              message: payload?.message || 'Could you clarify your request?',
-            },
-          }));
-          setLoading(false);
-        },
+          // User hit Stop — keep whatever partial markdown arrived so the
+          // user can still read/copy it, and flag the message as cancelled.
+          onAbort: () => {
+            updateLastMessage(sid, (msg) => {
+              const fullMarkdown = msg.streamedMarkdown || '';
+              return {
+                ...msg,
+                loading: false,
+                streaming: false,
+                streamedMarkdown: undefined,
+                cancelled: true,
+                data: fullMarkdown
+                  ? { ...(meta || {}), explanation: { markdown: fullMarkdown } }
+                  : null,
+              };
+            });
+            setLoading(false);
+          },
 
-        onError: (errorMsg) => {
-          updateLastMessage(sid, (msg) => ({
-            ...msg,
-            loading: false,
-            streaming: false,
-            error: errorMsg,
-          }));
-          setLoading(false);
+          onError: (errorMsg) => {
+            updateLastMessage(sid, (msg) => ({
+              ...msg,
+              loading: false,
+              streaming: false,
+              error: errorMsg,
+            }));
+            setLoading(false);
+          },
         },
-      });
+        { signal: controller.signal },
+      );
+
+      if (abortRef.current === controller) abortRef.current = null;
     },
     [activeSession, addMessage, updateLastMessage, provider, model]
   );
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   return (
     <div className="flex h-screen overflow-hidden bg-ink text-ivory">
@@ -179,6 +216,7 @@ export default function App() {
       <Chat
         session={activeSession}
         onSend={handleSend}
+        onStop={handleStop}
         loading={loading}
         provider={provider}
         model={model}

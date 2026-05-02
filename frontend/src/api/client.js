@@ -33,13 +33,26 @@ export async function sendQuery(query, sessionId, engineerId, provider, model) {
  * @param {string} engineerId
  * @param {string|null} provider
  * @param {string|null} model
- * @param {function} onMeta          - called once with metadata {schema, functions_analyzed, ...}
- * @param {function} onToken         - called for each markdown text chunk
- * @param {function} onDone          - called once with final payload {confidence, validated, ...}
- * @param {function} onClarification - called when backend asks the user for missing input (type: 'clarification')
- * @param {function} onError         - called on error
+ * @param {object} callbacks
+ * @param {function} callbacks.onStage         - per `event: stage` SSE frame
+ * @param {function} callbacks.onMeta          - once with {schema, functions_analyzed, ...}
+ * @param {function} callbacks.onToken         - per markdown text chunk
+ * @param {function} callbacks.onDone          - once with final payload
+ * @param {function} callbacks.onClarification - backend asks for missing input
+ * @param {function} callbacks.onError         - any non-abort failure
+ * @param {function} callbacks.onAbort         - user aborted via AbortController
+ * @param {object} options
+ * @param {AbortSignal} options.signal - aborts the underlying fetch / reader
  */
-export async function streamQuery(query, sessionId, engineerId, provider, model, { onStage, onMeta, onToken, onDone, onClarification, onError }) {
+export async function streamQuery(
+  query,
+  sessionId,
+  engineerId,
+  provider,
+  model,
+  { onStage, onMeta, onToken, onDone, onClarification, onError, onAbort } = {},
+  { signal } = {},
+) {
   const body = {
     query,
     session_id: sessionId,
@@ -53,6 +66,7 @@ export async function streamQuery(query, sessionId, engineerId, provider, model,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!res.ok) {
@@ -65,52 +79,68 @@ export async function streamQuery(query, sessionId, engineerId, provider, model,
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    // Cancel the reader when the AbortSignal fires so any in-flight read
+    // resolves promptly. The fetch itself is already torn down by `signal`,
+    // but cancelling the reader avoids leaking the stream.
+    const onSignalAbort = () => { try { reader.cancel(); } catch { /* ignore */ } };
+    signal?.addEventListener('abort', onSignalAbort);
 
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      // Parse SSE events from buffer
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // keep incomplete line in buffer
+        buffer += decoder.decode(value, { stream: true });
 
-      let currentEvent = null;
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ') && currentEvent) {
-          const data = line.slice(6);
-          try {
-            const parsed = JSON.parse(data);
-            if (currentEvent === 'stage') {
-              onStage?.(parsed);
-            } else if (currentEvent === 'meta') {
-              onMeta?.(parsed);
-            } else if (currentEvent === 'token') {
-              onToken?.(parsed);
-            } else if (currentEvent === 'done') {
-              if (parsed?.type === 'clarification') {
-                onClarification?.(parsed);
-              } else {
-                onDone?.(parsed);
+        // Parse SSE events from buffer
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+        let currentEvent = null;
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && currentEvent) {
+            const data = line.slice(6);
+            try {
+              const parsed = JSON.parse(data);
+              if (currentEvent === 'stage') {
+                onStage?.(parsed);
+              } else if (currentEvent === 'meta') {
+                onMeta?.(parsed);
+              } else if (currentEvent === 'token') {
+                onToken?.(parsed);
+              } else if (currentEvent === 'done') {
+                if (parsed?.type === 'clarification') {
+                  onClarification?.(parsed);
+                } else {
+                  onDone?.(parsed);
+                }
+              } else if (currentEvent === 'error') {
+                onError?.(parsed.error || 'Unknown streaming error');
               }
-            } else if (currentEvent === 'error') {
-              onError?.(parsed.error || 'Unknown streaming error');
+            } catch {
+              // token data might be a plain string
+              if (currentEvent === 'token') {
+                onToken?.(data);
+              }
             }
-          } catch {
-            // token data might be a plain string
-            if (currentEvent === 'token') {
-              onToken?.(data);
-            }
+            currentEvent = null;
+          } else if (line === '') {
+            currentEvent = null;
           }
-          currentEvent = null;
-        } else if (line === '') {
-          currentEvent = null;
         }
       }
+    } finally {
+      signal?.removeEventListener('abort', onSignalAbort);
     }
   } catch (err) {
+    // User-initiated abort — surface as a distinct event so the UI can
+    // keep the partial answer instead of treating it as a hard error.
+    if (err?.name === 'AbortError' || signal?.aborted) {
+      onAbort?.();
+      return;
+    }
     onError?.(err.message);
   }
 }

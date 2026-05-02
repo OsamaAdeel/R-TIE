@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { ArrowUp, Slash, Database, Quote, ChevronDown } from 'lucide-react';
+import { ArrowUp, Slash, Database, Quote, ChevronDown, Square } from 'lucide-react';
 import clsx from 'clsx';
 import { fetchModels } from '../api/client';
 
@@ -49,7 +49,7 @@ const ProviderIcon = ({ name, size = 12 }) => name === 'anthropic'
   ? <ClaudeIcon size={size} />
   : <OpenAIIcon size={size} />;
 
-export default function ChatInput({ onSend, disabled, provider, model, onProviderChange, onModelChange }) {
+export default function ChatInput({ onSend, onStop, disabled, provider, model, onProviderChange, onModelChange }) {
   const [value, setValue] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const textareaRef = useRef(null);
@@ -348,20 +348,33 @@ export default function ChatInput({ onSend, disabled, provider, model, onProvide
                 )}
               </div>
 
-              {/* Send button */}
-              <button
-                type="submit"
-                disabled={!canSend}
-                aria-label="Send message"
-                className={clsx(
-                  'inline-flex items-center justify-center h-7 w-7 rounded-md transition-colors shrink-0',
-                  canSend
-                    ? 'bg-gold text-ink hover:bg-gold-dim'
-                    : 'bg-hover-strong text-ivory-faint cursor-not-allowed'
-                )}
-              >
-                <ArrowUp size={14} strokeWidth={2.5} />
-              </button>
+              {/* Send / Stop button. While streaming, the submit affordance
+                  flips to a Stop button that aborts the in-flight request. */}
+              {disabled && typeof onStop === 'function' ? (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  className="inline-flex items-center justify-center h-7 w-7 rounded-md bg-gold text-ink hover:bg-gold-dim transition-colors shrink-0"
+                >
+                  <Square size={11} strokeWidth={0} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!canSend}
+                  aria-label="Send message"
+                  className={clsx(
+                    'inline-flex items-center justify-center h-7 w-7 rounded-md transition-colors shrink-0',
+                    canSend
+                      ? 'bg-gold text-ink hover:bg-gold-dim'
+                      : 'bg-hover-strong text-ivory-faint cursor-not-allowed'
+                  )}
+                >
+                  <ArrowUp size={14} strokeWidth={2.5} />
+                </button>
+              )}
             </div>
           </div>
 

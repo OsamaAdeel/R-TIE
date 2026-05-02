@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Copy, Check, RotateCcw, Pencil, HelpCircle, AlertCircle } from 'lucide-react';
+import { Copy, Check, RotateCcw, Pencil, HelpCircle, AlertCircle, OctagonX } from 'lucide-react';
 import clsx from 'clsx';
 import TrustBanner from './TrustBanner';
 import AgentActivity from './AgentActivity';
@@ -67,8 +67,9 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
         <CommandResult result={data.result} correlationId={data.correlation_id} />
       ) : (
         <>
-          <TrustBanner data={data} />
-          <Answer data={data} />
+          {!message.cancelled && <TrustBanner data={data} />}
+          {data ? <Answer data={data} /> : null}
+          {message.cancelled && <CancelledNotice />}
         </>
       )}
     </div>
@@ -180,6 +181,18 @@ function StreamingMarkdown({ markdown, meta }) {
       </div>
       <MarkdownBody markdown={markdown} />
       <span className="inline-block w-1.5 h-4 bg-gold animate-pulse rounded-sm ml-0.5 align-text-bottom" />
+    </div>
+  );
+}
+
+// Shown after the user clicks Stop on a streaming response. The partial
+// markdown (if any) is preserved by Answer above this notice; this small
+// row just confirms the cancellation so the page doesn't look broken.
+function CancelledNotice() {
+  return (
+    <div className="mt-3 flex items-center gap-2 text-[12px] text-ivory-faint">
+      <OctagonX size={12} className="shrink-0" />
+      <span>Response stopped</span>
     </div>
   );
 }

@@ -10,6 +10,7 @@ const NEAR_BOTTOM_THRESHOLD = 100;
 export default function Chat({
   session,
   onSend,
+  onStop,
   loading,
   provider,
   model,
@@ -102,6 +103,7 @@ export default function Chat({
 
         <ChatInput
           onSend={onSend}
+          onStop={onStop}
           disabled={loading}
           provider={provider}
           model={model}
@@ -128,56 +130,59 @@ const KIND_GLYPH = { q: HelpCircle, t: GitBranch, s: Slash, c: RotateCw };
 
 function Hero({ onPick }) {
   return (
-    <div className="h-full flex items-center justify-center p-8">
-      <div className="w-full max-w-[640px] flex flex-col items-center text-center">
-        {/* Brand mark — large lineage glyph */}
-        <div className="text-gold mb-5">
-          <BrandMark size={144} />
+    // Compacted so the brand block + 5 suggestion cards fit a typical
+    // viewport without scrolling. `min-h-full` lets it grow on small
+    // screens; on tall viewports the flex centering still feels right.
+    <div className="min-h-full flex items-center justify-center px-8 py-6">
+      <div className="w-full max-w-[600px] flex flex-col items-center text-center">
+        {/* Brand mark — sized down from 144 → 88 */}
+        <div className="text-gold mb-3">
+          <BrandMark size={88} />
         </div>
 
         {/* R-TIE wordmark — hyphen rendered in the brand accent color */}
         <h1
-          className="text-ivory leading-none mb-3"
+          className="text-ivory leading-none mb-2"
           style={{
             fontFamily: 'var(--font-display)',
             fontWeight: 700,
-            fontSize: '72px',
+            fontSize: '52px',
             letterSpacing: '-0.02em',
           }}
         >
           R<span className="text-gold">-</span>TIE
         </h1>
 
-        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-ivory-faint mb-4">
+        <div className="flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.18em] text-ivory-faint mb-3">
           <span>Regulatory</span><span className="text-gold-dim">·</span>
           <span>Trace</span><span className="text-gold-dim">·</span>
           <span>Intelligence</span><span className="text-gold-dim">·</span>
           <span>Engine</span>
         </div>
 
-        <p className="text-[13px] text-ivory-dim leading-relaxed max-w-[480px] mb-10">
+        <p className="text-[12.5px] text-ivory-dim leading-snug max-w-[460px] mb-5">
           Read your Oracle OFSAA system the way an auditor would. Every claim
           grounded in the exact line of PL/SQL it came from.{' '}
           <em className="text-gold-dim not-italic">No hallucinations, no guessing.</em>
         </p>
 
-        <div className="w-full space-y-2 text-left">
+        <div className="w-full space-y-1.5 text-left">
           {SUGGESTIONS.map((s) => {
             const Glyph = KIND_GLYPH[s.kind];
             return (
               <button
                 key={s.label}
                 onClick={() => onPick(s.label)}
-                className="w-full flex items-center gap-3 text-left bg-panel border border-line rounded-[10px] px-4 py-3 hover:border-line-gold hover:bg-panel-2 transition-colors group"
+                className="w-full flex items-center gap-2.5 text-left bg-panel border border-line rounded-[8px] px-3 py-2 hover:border-line-gold hover:bg-panel-2 transition-colors group"
               >
-                <span className="w-6 h-6 grid place-items-center rounded-md bg-gold-soft text-gold shrink-0">
-                  <Glyph size={13} strokeWidth={2.2} />
+                <span className="w-5 h-5 grid place-items-center rounded bg-gold-soft text-gold shrink-0">
+                  <Glyph size={11} strokeWidth={2.2} />
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="block text-[13.5px] font-medium text-ivory truncate">{s.label}</span>
-                  <span className="block text-[11.5px] text-ivory-faint truncate mt-0.5">{s.desc}</span>
+                  <span className="block text-[12.5px] font-medium text-ivory truncate">{s.label}</span>
+                  <span className="block text-[10.5px] text-ivory-faint truncate">{s.desc}</span>
                 </span>
-                <ArrowRight size={14} className="text-ivory-faint group-hover:text-gold group-hover:translate-x-0.5 transition-all shrink-0" />
+                <ArrowRight size={12} className="text-ivory-faint group-hover:text-gold group-hover:translate-x-0.5 transition-all shrink-0" />
               </button>
             );
           })}
