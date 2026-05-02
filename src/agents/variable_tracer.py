@@ -109,16 +109,19 @@ A. State up front that {IDENTIFIER} was not found in any indexed function.
 
 B. Briefly explain why it may not have been found (1–3 sentences).
    Hypotheses to consider include:
-   - it may live in a schema that is only partially indexed (e.g. OFSERM
-     is known to be half-open in the current corpus)
-   - it may be aggregated into a table like FCT_STANDARD_ACCT_HEAD but the
-     specific computation function is not indexed
-   - for CAP-code-style identifiers (e.g. CAP973): it may be a WHERE-clause
-     literal in a function that loads FCT_STANDARD_ACCT_HEAD rather than a
-     named computed variable; check OFSERM schema functions if your
-     deployment includes Basel capital calculations there
-   - it may be a valid identifier in production but outside the loaded
+   - it may be a typo or near-miss for a real identifier — if the
+     candidates below include a similar-looking name, that is the more
+     likely target
+   - it may be aggregated into a table like FCT_STANDARD_ACCT_HEAD via a
+     loader function whose computation logic doesn't carry the identifier
+     as a named variable
+   - for CAP-code-style identifiers (e.g. CAP973): it may be a
+     WHERE-clause literal in a function that loads
+     FCT_STANDARD_ACCT_HEAD rather than a named computed variable
+   - it may live in a schema or batch outside the currently indexed
      corpus
+   - it may be a valid identifier in production but absent from the
+     functions RTIE has loaded
    Frame this as hypotheses, not confident claims.
 
 C. List each retrieved candidate function. For EACH candidate:
@@ -166,7 +169,9 @@ CONCRETE EXAMPLE OF CORRECT OUTPUT:
   ## {IDENTIFIER} — Not Found in Indexed Functions
 
   {IDENTIFIER} was not found in any indexed function. It may belong to a
-  schema that is not yet fully indexed.
+  schema or batch outside the currently indexed corpus, or be a
+  WHERE-clause literal in a loader function rather than a named computed
+  variable.
 
   ### Related functions I searched (none compute {IDENTIFIER}):
 
@@ -179,15 +184,35 @@ CONCRETE EXAMPLE OF CORRECT OUTPUT:
 
 # Deterministic next-step section appended after the LLM finishes streaming.
 # Owns the full heading as well as the boilerplate so the LLM has no
-# opportunity to render whitespace between them. {IDENTIFIER} is substituted
-# at emission time.
+# opportunity to render whitespace between them. {IDENTIFIER} and
+# {DISCOVERED_SCHEMAS} are substituted at emission time. The schema list is
+# enumerated by ``schema_discovery.discovered_schemas`` and rendered via
+# ``_format_schema_list`` so the output is deterministic across calls
+# regardless of Redis SCAN ordering.
 UNGROUNDED_NEXT_STEP_TEMPLATE = (
     "\n\n### Suggested next step\n\n"
-    "If {IDENTIFIER} should exist, check whether your deployment indexes "
-    "OFSERM schema functions (currently partial), or search for {IDENTIFIER} "
-    "as a WHERE-clause literal in functions that populate "
-    "FCT_STANDARD_ACCT_HEAD."
+    "If {IDENTIFIER} should exist, verify the spelling and check whether "
+    "the source function lives in a schema or batch RTIE has indexed. The "
+    "currently indexed schemas are: {DISCOVERED_SCHEMAS}. If the "
+    "identifier appears legitimate but is unfamiliar to RTIE, file a "
+    "manifest gap report."
 )
+
+
+def _format_schema_list(schemas: Optional[List[str]]) -> str:
+    """Render a schema list deterministically.
+
+    Sorted, comma-separated. Sorting in the formatter (not just relying on
+    ``discovered_schemas`` which already sorts) so any caller that builds
+    a list by hand still gets the same output for the same set.
+
+    Falls back to ``"(none discovered)"`` when the list is empty/None —
+    in practice ``discovered_schemas`` never returns empty (it falls
+    through to ``RECOGNIZED_SCHEMAS``), but defensive defaults are cheap.
+    """
+    if not schemas:
+        return "(none discovered)"
+    return ", ".join(sorted(schemas))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -251,12 +276,17 @@ B. Show the metadata that IS available — schema, batch, process path,
    subsection. If a metadata field is "Not specified", render it as
    "Not specified"; do not invent a value.
 
-C. Briefly explain the partial-indexing situation as a hypothesis (1–2
-   sentences). RTIE currently has partial coverage of the {SCHEMA}
-   schema: the graph metadata is loaded but the source body is not yet
-   available to the analysis pipeline. This is being addressed by the
-   multi-schema support work tracked as W35. Frame this as the reason
-   the source is missing, not as a behavior claim.
+C. Briefly explain why a parseable source body might be missing for a
+   function whose metadata is indexed (1–2 sentences). Frame the
+   possible causes as hypotheses, not behavior claims:
+   - the source file referenced by the manifest may not match a real
+     file on disk (manifest gap)
+   - the function body may use a pattern the parser does not yet handle
+     (dynamic SQL / EXECUTE IMMEDIATE / deeply nested wrappers)
+   - the source file may be malformed or truncated
+   Do NOT invoke any phase numbers, work tickets, or "in-progress
+   indexing work" — the remaining cases are genuine parser-coverage or
+   manifest-curation gaps, not transient indexing state.
 
 D. STOP after the "Why this happens" subsection. Do NOT write a
    "Suggested next step" heading or any further content — the code
@@ -281,10 +311,17 @@ to me for line-by-line analysis.
 
 ### Why this happens
 
-RTIE currently has partial coverage of the {SCHEMA} schema. The
-function metadata is loaded, but the function's source body is not yet
-indexed for the analysis pipeline. This is being addressed by the
-multi-schema support work (tracked as W35).
+RTIE has indexed function metadata for this name but cannot retrieve a
+parseable source body. This is unusual; possible causes include:
+
+- the source file referenced by the manifest does not match a real file
+  on disk
+- the function body uses a pattern the parser does not yet handle
+  (dynamic SQL, EXECUTE IMMEDIATE, deeply nested wrappers)
+- the source file is malformed or truncated
+
+File a parser-coverage report if you believe this function should be
+fully analyzable.
 
 (END OF YOUR OUTPUT — stop here.)
 
@@ -308,9 +345,9 @@ to ground the claim.
 PARTIAL_SOURCE_NEXT_STEP_TEMPLATE = (
     "\n\n### Suggested next step\n\n"
     "If you need {FUNCTION_NAME}'s logic now, check the source file "
-    "directly under `db/modules/<batch>/functions/{FUNCTION_NAME}.sql`, "
-    "or wait for the W35 multi-schema fix which will make this function "
-    "fully analyzable through RTIE."
+    "directly under `db/modules/<batch>/functions/{FUNCTION_NAME}.sql`. "
+    "If the file exists and is well-formed, file a parser-coverage "
+    "report so this function can be fully analyzable through RTIE."
 )
 
 
@@ -916,6 +953,7 @@ class VariableTracer:
         raw_query: str,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        discovered_schemas: Optional[List[str]] = None,
     ):
         """Stream a structured "not the answer" response for an ungrounded
         identifier.
@@ -926,9 +964,9 @@ class VariableTracer:
         isn't in any retrieved function's source.
 
         After the LLM finishes streaming, a deterministic "Suggested next
-        step" line is emitted with {identifier} substituted, so the user
-        sees an actionable next step without relying on the LLM to
-        generate one.
+        step" line is emitted with ``{IDENTIFIER}`` and the discovered
+        schema list substituted, so the user sees an actionable next step
+        without relying on the LLM to generate one.
 
         Args:
             identifier: The ungrounded business identifier (e.g. "CAP973").
@@ -937,6 +975,13 @@ class VariableTracer:
             raw_query: The user's original question.
             provider: LLM provider. None uses default.
             model: Model name. None uses default.
+            discovered_schemas: Snapshot of
+                :func:`src.parsing.schema_discovery.discovered_schemas` for
+                this request. The next-step boilerplate enumerates these
+                so the response always points the user at the schemas
+                RTIE actually has indexed. Defaults to ``None`` (renders
+                as ``"(none discovered)"``) so callers without a Redis
+                client can still emit the response.
 
         Yields:
             Markdown token strings for SSE streaming.
@@ -1012,7 +1057,10 @@ class VariableTracer:
             ) from exc
 
         # Deterministic next-step boilerplate — substituted, not LLM-generated.
-        yield UNGROUNDED_NEXT_STEP_TEMPLATE.format(IDENTIFIER=identifier)
+        yield UNGROUNDED_NEXT_STEP_TEMPLATE.format(
+            IDENTIFIER=identifier,
+            DISCOVERED_SCHEMAS=_format_schema_list(discovered_schemas),
+        )
 
     # ──────────────────────────────────────────────────────────
     # 4c. PARTIAL-SOURCE STREAMING (W49) — function known but

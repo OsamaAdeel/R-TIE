@@ -249,7 +249,18 @@ def t11_cap973_ungrounded():
         "labels_similarity_only": "retrieved by name-similarity only" in markdown.lower()
             or "name-similarity only" in markdown,
         "no_post_hoc_caveats_block": "**Caveats:**" not in markdown,
-        "has_next_step_boilerplate": "FCT_STANDARD_ACCT_HEAD" in markdown,
+        # Phase 8: schema-agnostic next-step. The boilerplate exists
+        # ("Suggested next step" heading + manifest gap report mention)
+        # but no longer hardcodes FCT_STANDARD_ACCT_HEAD or OFSERM —
+        # those leads were stale once Phase 3 made graph:source: the
+        # canonical source-of-source for every loaded schema.
+        "has_next_step_heading": "### Suggested next step" in markdown,
+        "next_step_mentions_manifest_gap_report": "manifest gap report" in markdown,
+        "no_stale_phase_8_phrasing": (
+            "W35" not in markdown
+            and "multi-schema work" not in markdown
+            and "OFSMDM-only" not in markdown
+        ),
     }
     passed = all(checks.values())
     failed_checks = [k for k, v in checks.items() if not v]
@@ -348,8 +359,17 @@ def t14_partial_source_pension():
             and "POPULATE_STDACC_FROMGL" not in markdown
         ),
         "no_post_hoc_caveats_block": "**Caveats:**" not in markdown,
+        # Phase 8: boilerplate points at db/modules and asks for a
+        # parser-coverage report. It must NOT mention W35 — the
+        # phase-number reference was stripped in the prompt audit.
         "has_next_step_boilerplate": (
-            "W35" in markdown and "db/modules" in markdown
+            "db/modules" in markdown
+            and "parser-coverage report" in markdown
+        ),
+        "no_stale_phase_8_phrasing": (
+            "W35" not in markdown
+            and "multi-schema work" not in markdown
+            and "currently partial" not in markdown
         ),
     }
     passed = all(checks.values())

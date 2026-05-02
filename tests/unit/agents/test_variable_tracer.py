@@ -26,6 +26,7 @@ from src.agents.variable_tracer import (
     UNGROUNDED_IDENTIFIER_PROMPT,
     UNGROUNDED_NEXT_STEP_TEMPLATE,
     VariableTracer,
+    _format_schema_list,
 )
 
 
@@ -57,16 +58,44 @@ def test_prompt_substitutes_candidate_list_block():
     assert "FN_UPDATE_RATING_CODE" in rendered
 
 
-def test_next_step_boilerplate_substitutes_identifier():
-    text = UNGROUNDED_NEXT_STEP_TEMPLATE.format(IDENTIFIER="CAP973")
+def test_next_step_boilerplate_substitutes_identifier_and_schemas():
+    text = UNGROUNDED_NEXT_STEP_TEMPLATE.format(
+        IDENTIFIER="CAP973",
+        DISCOVERED_SCHEMAS="OFSERM, OFSMDM",
+    )
     assert "CAP973" in text
-    # Deterministic boilerplate — always mentions OFSERM and
-    # FCT_STANDARD_ACCT_HEAD, the two real next-step leads.
-    assert "OFSERM" in text
-    assert "FCT_STANDARD_ACCT_HEAD" in text
+    # Schema-agnostic boilerplate (Phase 8): the schema list is filled in
+    # at emission time from schema_discovery.discovered_schemas. The
+    # response always names the schemas RTIE has actually indexed
+    # rather than the historical OFSMDM-only / FCT_STANDARD_ACCT_HEAD
+    # phrasing.
+    assert "OFSERM, OFSMDM" in text
+    assert "manifest gap report" in text
     # The code owns the full section now (heading + body) so there is no
     # chance for the LLM to render whitespace between them.
     assert "### Suggested next step" in text
+
+
+def test_format_schema_list_is_deterministic_across_input_orders():
+    """Sort + comma-join. ['OFSERM','OFSMDM'] and ['OFSMDM','OFSERM']
+    must render identically — the user-visible Suggested next step
+    cannot depend on Redis SCAN ordering."""
+    a = _format_schema_list(["OFSERM", "OFSMDM"])
+    b = _format_schema_list(["OFSMDM", "OFSERM"])
+    assert a == b == "OFSERM, OFSMDM"
+
+
+def test_format_schema_list_handles_empty_and_none():
+    """Defensive: empty / None still renders without raising."""
+    assert _format_schema_list(None) == "(none discovered)"
+    assert _format_schema_list([]) == "(none discovered)"
+    assert _format_schema_list(["SOLO"]) == "SOLO"
+
+
+def test_format_schema_list_preserves_distinct_schema_names_sorted():
+    """Three+ schemas: alphabetic order, single comma-space separator."""
+    out = _format_schema_list(["ZEBRA", "ALPHA", "MIDDLE"])
+    assert out == "ALPHA, MIDDLE, ZEBRA"
 
 
 def test_prompt_template_does_not_emit_next_step_heading():
@@ -172,6 +201,7 @@ def test_stream_ungrounded_builds_prompt_and_appends_next_step(monkeypatch):
         identifier="CAP973",
         candidates=candidates,
         raw_query="How is CAP973 calculated?",
+        discovered_schemas=["OFSERM", "OFSMDM"],
     ))
 
     # System message should carry the substituted prompt template.
@@ -188,11 +218,31 @@ def test_stream_ungrounded_builds_prompt_and_appends_next_step(monkeypatch):
     assert "=== FUNCTION: FN_UPDATE_RATING_CODE" in human_msg.content
 
     # Yielded chunks: LLM body, then the deterministic next-step boilerplate
-    # with {IDENTIFIER} substituted.
+    # with {IDENTIFIER} and the discovered-schemas list substituted.
     assert chunks[0].startswith("## CAP973")
     assert "CAP973" in chunks[-1]
-    assert "OFSERM" in chunks[-1]
-    assert "FCT_STANDARD_ACCT_HEAD" in chunks[-1]
+    # Schema-agnostic next-step boilerplate (Phase 8): the schemas
+    # passed in are rendered sorted, comma-separated.
+    assert "OFSERM, OFSMDM" in chunks[-1]
+    assert "manifest gap report" in chunks[-1]
+
+
+def test_stream_ungrounded_handles_no_discovered_schemas(monkeypatch):
+    """When no graph_redis is available (or discovered_schemas is None),
+    the next-step boilerplate must still emit without raising — falling
+    back to the '(none discovered)' marker."""
+    stub = _StubLLM(body="body")
+    monkeypatch.setattr(
+        "src.agents.variable_tracer.create_llm", lambda **kw: stub
+    )
+    tracer = VariableTracer()
+    chunks = _drain(tracer.stream_ungrounded(
+        identifier="CAP973",
+        candidates={},
+        raw_query="How is CAP973 calculated?",
+        discovered_schemas=None,
+    ))
+    assert "(none discovered)" in chunks[-1]
 
 
 # ---------------------------------------------------------------------
@@ -239,9 +289,13 @@ def test_partial_source_next_step_substitutes_function_name():
         FUNCTION_NAME="ABL_Def_Pension_Fund_Asset_Net_DTL"
     )
     assert "ABL_Def_Pension_Fund_Asset_Net_DTL" in text
-    # Boilerplate must mention W35 and the suggested file location pattern.
-    assert "W35" in text
+    # Phase 8 audit: the boilerplate must point at the file location
+    # pattern AND ask the user to file a parser-coverage report. It must
+    # NOT reference W35 or any "in-progress multi-schema work" — those
+    # framings became stale after Phase 8.
     assert "db/modules" in text
+    assert "parser-coverage report" in text
+    assert "W35" not in text
     # Heading is owned by the template so the LLM cannot inject whitespace
     # between it and the body.
     assert "### Suggested next step" in text
@@ -295,8 +349,75 @@ def test_stream_partial_source_builds_prompt_and_appends_next_step(monkeypatch):
     # with {FUNCTION_NAME} substituted. Boilerplate is the LAST chunk.
     assert chunks[0].startswith("## ABL_Def_Pension_Fund_Asset_Net_DTL")
     assert "ABL_Def_Pension_Fund_Asset_Net_DTL" in chunks[-1]
-    assert "W35" in chunks[-1]
+    # Phase 8: boilerplate points at the file location and the
+    # parser-coverage feedback channel; W35 wording is gone.
     assert "db/modules" in chunks[-1]
+    assert "parser-coverage report" in chunks[-1]
+    assert "W35" not in chunks[-1]
+
+
+# ---------------------------------------------------------------------
+# Phase 8 stale-phrase regression — the W45/W49 prompt audit removed
+# OFSMDM-only / "multi-schema work in progress" / W35 phase references
+# from both prompts and both next-step templates. These regressions
+# guard against accidental reintroduction.
+# ---------------------------------------------------------------------
+
+_STALE_PHRASES = (
+    "W35",
+    "multi-schema work",
+    "multi-schema fix",
+    "multi-schema support",
+    "OFSMDM-only",
+    "OFSERM is known to be half-open",
+    "OFSERM is half-open",
+    "currently partial",
+    "partially indexed",
+    "partial coverage of the",
+)
+
+
+def _assert_no_stale_phrases(text: str, label: str) -> None:
+    for phrase in _STALE_PHRASES:
+        assert phrase not in text, (
+            f"{label} contains stale Phase-8-removed phrase {phrase!r}; "
+            f"see test_phase8 prompt audit"
+        )
+
+
+def test_w45_prompt_has_no_stale_phase_8_phrases():
+    rendered = UNGROUNDED_IDENTIFIER_PROMPT.format(
+        IDENTIFIER="CAP973",
+        CANDIDATE_LIST="- FN_FOO (similarity score 0.50)",
+    )
+    _assert_no_stale_phrases(rendered, "UNGROUNDED_IDENTIFIER_PROMPT")
+
+
+def test_w45_next_step_has_no_stale_phase_8_phrases():
+    rendered = UNGROUNDED_NEXT_STEP_TEMPLATE.format(
+        IDENTIFIER="CAP973",
+        DISCOVERED_SCHEMAS="OFSERM, OFSMDM",
+    )
+    _assert_no_stale_phrases(rendered, "UNGROUNDED_NEXT_STEP_TEMPLATE")
+
+
+def test_w49_prompt_has_no_stale_phase_8_phrases():
+    rendered = PARTIAL_SOURCE_FUNCTION_PROMPT.format(
+        FUNCTION_NAME="SOME_FN",
+        SCHEMA="OFSERM",
+        BATCH_NAME="OFSERM_RUN",
+        HIERARCHY_PATH="A → B",
+        TASK_ORDER="task #1",
+        DESCRIPTION="Not specified",
+    )
+    _assert_no_stale_phrases(rendered, "PARTIAL_SOURCE_FUNCTION_PROMPT")
+
+
+def test_w49_next_step_has_no_stale_phase_8_phrases():
+    rendered = PARTIAL_SOURCE_NEXT_STEP_TEMPLATE.format(
+        FUNCTION_NAME="SOME_FN"
+    )
+    _assert_no_stale_phrases(rendered, "PARTIAL_SOURCE_NEXT_STEP_TEMPLATE")
 
 
 def test_stream_partial_source_renders_not_specified_for_missing_metadata(monkeypatch):

@@ -1122,6 +1122,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         raw_query=request.query,
                         provider=provider,
                         model=model,
+                        # Phase 8: schema-agnostic next-step boilerplate.
+                        # Snapshot the live discovered_schemas list so the
+                        # response always names the schemas RTIE actually
+                        # has indexed.
+                        discovered_schemas=(
+                            discovered_schemas(_graph_redis)
+                            if _graph_redis is not None
+                            else None
+                        ),
                     ):
                         if _first_token:
                             mark_event("llm_first_token", correlation_id, branch="ungrounded")
