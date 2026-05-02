@@ -240,6 +240,45 @@ def build_update_node(raw_block: dict, node_id: str) -> dict:
 
 
 # ===================================================================
+# 4b. DELETE node
+# ===================================================================
+
+def build_delete_node(raw_block: dict, node_id: str) -> dict:
+    """Build graph node for a DELETE statement.
+
+    DELETE removes rows from a target table; it has no SET clause and
+    no column mappings, so the node shape is intentionally narrower
+    than UPDATE/INSERT/MERGE: ``target_table``, parsed WHERE
+    ``conditions``, the line range, and the ``committed_after`` flag.
+    Pre-Phase-8 DELETE blocks were dispatched to ``build_update_node``
+    and emerged misclassified as ``type="UPDATE"`` with empty
+    ``column_maps``; downstream consumers (Phase 2 ``proof_builder``,
+    ``query_templates``) saw them as no-op updates instead of as a
+    distinct operation.
+    """
+    raw_lines = raw_block.get("cleaned_lines") or raw_block.get("raw_lines", [])
+    block_type = raw_block.get("block_type", "DELETE")
+    tables = extract_table_names(raw_lines, block_type)
+    target_table = tables.get("target_table", "")
+    source_tables = tables.get("source_tables", [])
+    conditions = extract_conditions(raw_lines)
+
+    summary = _summarise_delete(target_table, conditions)
+
+    return {
+        "id": node_id,
+        "type": "DELETE",
+        "line_start": raw_block.get("line_start"),
+        "line_end": raw_block.get("line_end"),
+        "committed_after": raw_block.get("followed_by_commit", False),
+        "target_table": target_table,
+        "source_tables": source_tables,
+        "conditions": conditions,
+        "summary": summary,
+    }
+
+
+# ===================================================================
 # 5. MERGE node
 # ===================================================================
 
@@ -804,7 +843,7 @@ _BUILDER_DISPATCH.update({
     "INSERT": build_insert_node,
     "UPDATE": build_update_node,
     "MERGE": build_merge_node,
-    "DELETE": build_update_node,  # DELETE uses same structure as UPDATE
+    "DELETE": build_delete_node,
     "SCALAR_COMPUTE": build_scalar_compute_node,
     "SELECT_INTO": build_scalar_compute_node,  # SELECT INTO → SCALAR_COMPUTE
     "WHILE": build_while_loop_node,
@@ -1250,6 +1289,19 @@ def _summarise_update(
         if first:
             cond_hint = f" where {_truncate(first, 50)}"
     return f"Updates {col_text}{extra} in {target or 'target table'}{cond_hint}"
+
+
+def _summarise_delete(target: str, conditions: list) -> str:
+    cond_hint = ""
+    if conditions:
+        first = (
+            conditions[0]
+            if isinstance(conditions[0], str)
+            else conditions[0].get("expression", "")
+        )
+        if first:
+            cond_hint = f" where {_truncate(first, 50)}"
+    return f"Deletes rows from {target or 'target table'}{cond_hint}"
 
 
 def _summarise_merge(
