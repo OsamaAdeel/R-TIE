@@ -8,10 +8,8 @@ retried and validated through SQLGuardian.
 """
 
 import glob
-import hashlib
 import os
 import re
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.pipeline.state import LogicState
@@ -64,8 +62,8 @@ def _to_source_dicts(lines: List[Any]) -> List[Dict[str, Any]]:
     shape that ``state["source_code"]`` carries.
 
     The loader writes a list of raw strings (one per source line) under
-    ``graph:source:<schema>:<fn>``. The rtie:logic / Oracle / disk paths
-    return a list of dicts. Downstream consumers (logic_explainer,
+    ``graph:source:<schema>:<fn>``. The Oracle / disk paths return a list
+    of dicts. Downstream consumers (logic_explainer,
     grounding evaluator, partial-source detector) accept either shape but
     settle on the dict shape — match it here so the loader-cache short-
     circuit produces the same payload the rest of the pipeline expects.
@@ -158,7 +156,9 @@ class MetadataInterpreter:
 
         Args:
             schema_tools: Oracle query execution tools.
-            cache_client: Redis cache client for source code caching.
+            cache_client: Async Redis client retained for parity with the
+                rest of the agent surface (schema snapshots, etc.); no
+                longer used by source retrieval after Phase 8.
             default_schema: Schema used when ``state["schema"]`` is empty.
                 Defaults to :data:`DEFAULT_FALLBACK_SCHEMA` (currently
                 ``"OFSMDM"``). Phase 4 will replace this default with
@@ -167,9 +167,8 @@ class MetadataInterpreter:
 
         The graph Redis client (sync) used for ``graph:source:*`` and
         function-schema discovery is wired in separately via
-        :meth:`set_graph_redis_client`. It is optional — when absent, the
-        Phase-1 lookup chain (rtie:logic → Oracle → disk) runs unchanged
-        and Phase 3's loader-cache short-circuit is skipped.
+        :meth:`set_graph_redis_client`. When absent, source retrieval
+        falls through to Oracle → disk.
         """
         self._schema_tools = schema_tools
         self._cache = cache_client
@@ -179,12 +178,10 @@ class MetadataInterpreter:
     def set_graph_redis_client(self, graph_redis_client) -> None:
         """Wire the graph Redis client (sync) used for ``graph:source:*``.
 
-        Phase 3 makes source retrieval read-through from the loader-managed
-        ``graph:source:<schema>:<fn>`` cache before falling back to
-        ``rtie:logic`` → Oracle → disk. The graph Redis client is the only
-        client that holds those keys (the ``cache_client`` is async and
-        owns the ``rtie:logic`` cache; the loader writes to a separate
-        sync client). This setter mirrors
+        Source retrieval is read-through from the loader-managed
+        ``graph:source:<schema>:<fn>`` cache, falling back to Oracle →
+        disk on miss. The graph Redis client is the only client that
+        holds those keys. This setter mirrors
         ``LogicExplainer.set_redis_client`` — the constructor cannot take
         the client directly because ``_graph_redis`` is created later in
         the lifespan than ``_metadata_interpreter``.
@@ -199,7 +196,7 @@ class MetadataInterpreter:
         Returns the raw line list from ``graph:source:<schema>:<fn>`` or
         None when the graph Redis client isn't wired, the key is absent,
         or the read raises. Never raises — a Redis hiccup falls through
-        to the rtie:logic / Oracle / disk pipeline.
+        to Oracle → disk.
         """
         if self._graph_redis is None:
             return None
@@ -302,11 +299,12 @@ class MetadataInterpreter:
         raise ObjectNotFoundError(object_name, schema)
 
     async def fetch_logic(self, state: LogicState) -> LogicState:
-        """Fetch PL/SQL source code from cache, Oracle, or disk.
+        """Fetch PL/SQL source code from the loader cache, Oracle, or disk.
 
-        Priority: loader-managed ``graph:source:<schema>:<fn>`` (Phase 3)
-        → ``rtie:logic`` cache → Oracle ALL_SOURCE → ``db/modules/`` .sql.
-        If Redis is unavailable, falls back gracefully.
+        Priority: loader-managed ``graph:source:<schema>:<fn>`` (Phase 3,
+        primary path for every indexed function) → Oracle ALL_SOURCE →
+        ``db/modules/`` .sql. If Redis is unavailable, falls back to
+        Oracle / disk gracefully.
 
         Args:
             state: Current pipeline state with object_name and schema.
@@ -317,18 +315,17 @@ class MetadataInterpreter:
         correlation_id = get_correlation_id()
         schema = state["schema"]
         object_name = state["object_name"]
-        cache_key_parts = ("logic", schema, object_name)
 
         logger.info(
             f"Fetching logic for {schema}.{object_name} | "
             f"correlation_id={correlation_id}"
         )
 
-        # 0. Phase 3: try the loader-owned source cache first. This is
-        # the canonical source-of-truth for every loaded function and is
-        # populated for both OFSMDM and OFSERM. Pre-Phase-3 this lookup
-        # was skipped, which is why W49 fired for OFSERM functions even
-        # though their bodies were retrievable.
+        # 1. Loader-owned source cache (graph:source:<schema>:<fn>) is the
+        # canonical source-of-truth for every indexed function. Phase 8
+        # retired the legacy rtie:logic: cache; the only fallbacks now are
+        # Oracle and disk, which fire only for functions that aren't in
+        # the loader corpus (admin / off-corpus probes).
         loader_lines = self._fetch_loader_source(schema, object_name)
         if loader_lines is not None:
             source_lines = _to_source_dicts(loader_lines)
@@ -341,22 +338,9 @@ class MetadataInterpreter:
             )
             return state
 
-        # 1. Try Redis cache (rtie:logic: — Oracle/disk fallbacks)
-        cached = await self._cache.get_json(*cache_key_parts)
-        if cached:
-            state["source_code"] = cached["source_code"]
-            state["cache_hit"] = True
-            state["cache_stale"] = False
-            logger.info(
-                f"Cache HIT for {schema}.{object_name} "
-                f"(cached_at={cached.get('cached_at')}) | "
-                f"correlation_id={correlation_id}"
-            )
-            return state
-
         # 2. Try Oracle ALL_SOURCE
         logger.info(
-            f"Cache MISS for {schema}.{object_name} — trying Oracle | "
+            f"Loader-cache MISS for {schema}.{object_name} — trying Oracle | "
             f"correlation_id={correlation_id}"
         )
         rows = await self._schema_tools.execute_query(
@@ -366,9 +350,6 @@ class MetadataInterpreter:
 
         if rows:
             source_lines = [{"line": row[0], "text": row[1]} for row in rows]
-            await self._cache_source(
-                schema, object_name, source_lines, cache_key_parts, correlation_id
-            )
             state["source_code"] = source_lines
             state["cache_hit"] = False
             state["cache_stale"] = False
@@ -387,9 +368,6 @@ class MetadataInterpreter:
 
         if filepath:
             source_lines = _read_sql_file(filepath)
-            await self._cache_source(
-                schema, object_name, source_lines, cache_key_parts, correlation_id
-            )
             state["source_code"] = source_lines
             state["cache_hit"] = False
             state["cache_stale"] = False
@@ -408,41 +386,6 @@ class MetadataInterpreter:
             f"correlation_id={correlation_id}"
         )
         return state
-
-    async def _cache_source(
-        self,
-        schema: str,
-        object_name: str,
-        source_lines: List[Dict[str, Any]],
-        cache_key_parts: tuple,
-        correlation_id: str,
-    ) -> None:
-        """Cache source code in Redis with a version stamp.
-
-        Args:
-            schema: Oracle schema name.
-            object_name: PL/SQL object name.
-            source_lines: List of line dicts to cache.
-            cache_key_parts: Redis key tuple.
-            correlation_id: Request correlation ID for logging.
-        """
-        source_text = "".join(
-            line["text"] if isinstance(line, dict) else str(line)
-            for line in source_lines
-        )
-        version_hash = hashlib.sha256(source_text.encode()).hexdigest()[:16]
-
-        cache_payload = {
-            "source_code": source_lines,
-            "cached_at": datetime.utcnow().isoformat(),
-            "oracle_last_ddl_time": None,
-            "version_hash": version_hash,
-        }
-        await self._cache.set_json(cache_payload, *cache_key_parts)
-        logger.info(
-            f"Cached {len(source_lines)} lines for {schema}.{object_name} "
-            f"(hash={version_hash}) | correlation_id={correlation_id}"
-        )
 
     async def fetch_multi_logic(self, state: LogicState) -> LogicState:
         """Fetch source code for multiple functions from semantic search results.

@@ -1,20 +1,25 @@
 """
 RTIE Cache Manager Agent.
 
-Handles all slash commands for cache operations including refreshing
-individual objects, syncing entire schemas, checking cache status,
-listing cached objects, clearing cache entries, and detecting schema
-DDL changes.
+Handles slash commands for cache inspection (``/cache-list``,
+``/cache-status``) over the Phase-3 loader-managed ``graph:source:*``
+namespace, plus schema DDL-snapshot management (``/refresh-schema``).
+
+The legacy ``rtie:logic:`` source cache was retired in Phase 8: the
+``/refresh-cache``, ``/refresh-cache-all`` and ``/cache-clear`` commands
+now return deprecation messages directing users to FLUSHDB + restart for
+a full corpus rebuild. ``graph:source:`` is loader-managed at startup
+and is the sole source-of-source after Phase 8.
 """
 
-import hashlib
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
+from src.parsing.store import get_raw_source
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
 
@@ -30,8 +35,8 @@ SCHEMAS_DIR = os.path.join(
 class CacheManager:
     """Agent for cache-related slash command operations.
 
-    Provides tools for refreshing, inspecting, listing, clearing, and
-    syncing cached PL/SQL logic objects and schema snapshots.
+    Provides tools for inspecting the Phase-3 loader-managed source
+    cache (``graph:source:*``) and managing schema DDL snapshots.
     """
 
     def __init__(
@@ -43,243 +48,262 @@ class CacheManager:
 
         Args:
             schema_tools: Oracle query execution tools.
-            cache_client: Redis cache client.
+            cache_client: Async Redis client (used for schema-snapshot
+                storage under ``rtie:schema:snapshot:*``; no longer used
+                for source caching after Phase 8).
         """
         self._schema_tools = schema_tools
         self._cache = cache_client
+        self._graph_redis = None
 
-    async def refresh_logic_cache(self, object_name: str, schema: str) -> Dict[str, Any]:
-        """Refresh a single object's cached source from Oracle.
+    def set_graph_redis_client(self, graph_redis_client) -> None:
+        """Wire the sync graph Redis client used to inspect ``graph:source:*``.
 
-        Fetches the latest source from ALL_SOURCE and updates the Redis
-        cache with a new version stamp.
+        Required by ``list_cached_objects`` and ``get_cache_status``
+        post-Phase-8. Mirrors :meth:`MetadataInterpreter.set_graph_redis_client`.
+        """
+        self._graph_redis = graph_redis_client
 
-        Args:
-            object_name: Name of the PL/SQL object.
-            schema: Oracle schema name.
+    async def refresh_logic_cache(
+        self, object_name: str, schema: str
+    ) -> Dict[str, Any]:
+        """Phase 8 deprecation stub: ``/refresh-cache <object>``.
 
-        Returns:
-            Dict with refresh status, version_hash, and cached_at.
+        ``rtie:logic:`` was retired in Phase 8. ``graph:source:`` is rebuilt
+        at startup from the loader corpus, not via per-object refresh —
+        single-object cache invalidation is no longer a meaningful
+        workflow. Returns a structured deprecation payload so the
+        frontend chip surface continues to render rather than 404.
         """
         correlation_id = get_correlation_id()
+        message = (
+            "RTIE rebuilds the source cache at startup. Run "
+            "`docker exec -it rtie-redis redis-cli FLUSHDB` and restart "
+            "the backend to refresh."
+        )
         logger.info(
-            f"/refresh-cache {schema}.{object_name} | "
-            f"correlation_id={correlation_id}"
+            "/refresh-cache deprecated stub invoked for %s.%s | "
+            "correlation_id=%s",
+            schema, object_name, correlation_id,
         )
-
-        # Fetch latest source from Oracle
-        rows = await self._schema_tools.execute_query(
-            "TMPL_FETCH_SOURCE",
-            {"schema": schema, "object_name": object_name},
-        )
-
-        if not rows:
-            logger.warning(
-                f"Object {schema}.{object_name} not found in Oracle | "
-                f"correlation_id={correlation_id}"
-            )
-            return {
-                "status": "not_found",
-                "object_name": object_name,
-                "schema": schema,
-            }
-
-        source_lines = [{"line": row[0], "text": row[1]} for row in rows]
-        source_text = "".join(line["text"] for line in source_lines)
-        version_hash = hashlib.sha256(source_text.encode()).hexdigest()[:16]
-
-        # Get last DDL time
-        obj_rows = await self._schema_tools.execute_query(
-            "TMPL_OBJECT_EXISTS",
-            {"schema": schema, "object_name": object_name},
-        )
-        last_ddl_time = str(obj_rows[0][2]) if obj_rows else None
-
-        cached_at = datetime.utcnow().isoformat()
-
-        # Update Redis
-        cache_payload = {
-            "source_code": source_lines,
-            "cached_at": cached_at,
-            "oracle_last_ddl_time": last_ddl_time,
-            "version_hash": version_hash,
-        }
-        await self._cache.set_json(cache_payload, "logic", schema, object_name)
-
-        result = {
-            "status": "refreshed",
+        return {
+            "status": "deprecated",
             "object_name": object_name,
             "schema": schema,
-            "version_hash": version_hash,
-            "cached_at": cached_at,
-            "line_count": len(source_lines),
+            "message": message,
         }
-
-        logger.info(
-            f"/refresh-cache completed: {json.dumps(result)} | "
-            f"correlation_id={correlation_id}"
-        )
-        return result
 
     async def refresh_all_logic_cache(self, schema: str) -> Dict[str, Any]:
-        """Re-sync all functions and procedures for a schema.
+        """Phase 8 deprecation stub: ``/refresh-cache-all``.
 
-        Queries ALL_OBJECTS for all functions and procedures in the schema,
-        then refreshes each one's cache entry.
-
-        Args:
-            schema: Oracle schema name.
-
-        Returns:
-            Dict with total count and list of refreshed objects.
+        See :meth:`refresh_logic_cache` — same rationale at schema scale.
         """
         correlation_id = get_correlation_id()
+        message = (
+            "RTIE rebuilds the source cache at startup. Run "
+            "`docker exec -it rtie-redis redis-cli FLUSHDB` and restart "
+            "the backend to refresh."
+        )
         logger.info(
-            f"/refresh-cache-all for schema {schema} | "
-            f"correlation_id={correlation_id}"
+            "/refresh-cache-all deprecated stub invoked for schema %s | "
+            "correlation_id=%s",
+            schema, correlation_id,
         )
-
-        # Get all functions and procedures in the schema
-        sql = (
-            "SELECT object_name, object_type "
-            "FROM all_objects "
-            "WHERE owner = :schema "
-            "AND object_type IN ('FUNCTION', 'PROCEDURE')"
-        )
-        rows = await self._schema_tools.execute_raw(sql, {"schema": schema})
-
-        refreshed = []
-        errors = []
-
-        for obj_name, obj_type in rows:
-            try:
-                result = await self.refresh_logic_cache(obj_name, schema)
-                refreshed.append({"name": obj_name, "type": obj_type, "status": result["status"]})
-            except Exception as exc:
-                errors.append({"name": obj_name, "error": str(exc)})
-                logger.error(
-                    f"Failed to refresh {schema}.{obj_name}: {exc} | "
-                    f"correlation_id={correlation_id}"
-                )
-
-        result = {
-            "status": "completed",
+        return {
+            "status": "deprecated",
             "schema": schema,
-            "total_objects": len(rows),
-            "refreshed_count": len(refreshed),
-            "error_count": len(errors),
-            "refreshed": refreshed,
-            "errors": errors,
+            "message": message,
         }
 
-        logger.info(
-            f"/refresh-cache-all completed: {len(refreshed)} refreshed, "
-            f"{len(errors)} errors | correlation_id={correlation_id}"
-        )
-        return result
+    async def get_cache_status(
+        self,
+        object_name: Optional[str],
+        schema: str,
+    ) -> Dict[str, Any]:
+        """Inspect the Phase-3 loader-managed source cache.
 
-    async def get_cache_status(self, object_name: str, schema: str) -> Dict[str, Any]:
-        """Get the cache status for a specific object.
+        - With ``object_name``: report whether
+          ``graph:source:<schema>:<object_name>`` and
+          ``graph:<schema>:<object_name>`` are present, plus the cached
+          source line count.
+        - Without ``object_name``: report aggregate counts of
+          ``graph:source:<schema>:*`` and ``graph:<schema>:*`` keys for
+          the schema.
 
         Args:
-            object_name: Name of the PL/SQL object.
+            object_name: Specific function name to check, or None/empty
+                for aggregate counts.
             schema: Oracle schema name.
 
         Returns:
-            Dict with cached_at, oracle_last_ddl_time, version_hash,
-            and cache_hit status.
+            Dict with presence flags / aggregate counts. Returns a
+            ``redis_unavailable`` status if the sync graph Redis client
+            isn't wired.
         """
         correlation_id = get_correlation_id()
-        logger.info(
-            f"/cache-status {schema}.{object_name} | "
-            f"correlation_id={correlation_id}"
-        )
 
-        cached = await self._cache.get_json("logic", schema, object_name)
-
-        if not cached:
-            result = {
-                "status": "not_cached",
-                "object_name": object_name,
+        if self._graph_redis is None:
+            logger.warning(
+                "/cache-status invoked without graph_redis wired | "
+                "correlation_id=%s",
+                correlation_id,
+            )
+            return {
+                "status": "redis_unavailable",
                 "schema": schema,
-                "cache_hit": False,
-            }
-        else:
-            result = {
-                "status": "cached",
                 "object_name": object_name,
-                "schema": schema,
-                "cache_hit": True,
-                "cached_at": cached.get("cached_at"),
-                "oracle_last_ddl_time": cached.get("oracle_last_ddl_time"),
-                "version_hash": cached.get("version_hash"),
             }
 
-        logger.info(
-            f"/cache-status result: {json.dumps(result)} | "
-            f"correlation_id={correlation_id}"
-        )
-        return result
+        if object_name:
+            normalized = object_name.upper()
+            source_lines = get_raw_source(
+                self._graph_redis, schema, normalized
+            )
+            graph_key = f"graph:{schema}:{normalized}"
+            try:
+                graph_present = bool(self._graph_redis.exists(graph_key))
+            except Exception as exc:
+                logger.warning(
+                    "graph:%s:%s exists() failed: %s | correlation_id=%s",
+                    schema, normalized, exc, correlation_id,
+                )
+                graph_present = False
 
-    async def list_cached_objects(self, schema: str) -> Dict[str, Any]:
-        """List all cached logic objects for a schema.
+            result = {
+                "status": "ok",
+                "schema": schema,
+                "object_name": normalized,
+                "graph_source_present": source_lines is not None,
+                "graph_source_lines": (
+                    len(source_lines) if source_lines is not None else 0
+                ),
+                "graph_present": graph_present,
+            }
+            logger.info(
+                "/cache-status result: %s | correlation_id=%s",
+                json.dumps(result), correlation_id,
+            )
+            return result
 
-        Args:
-            schema: Oracle schema name.
-
-        Returns:
-            Dict with list of cached key names.
-        """
-        correlation_id = get_correlation_id()
-        logger.info(
-            f"/cache-list for schema {schema} | "
-            f"correlation_id={correlation_id}"
-        )
-
-        keys = await self._cache.list_keys(f"logic:{schema}:*")
+        # Aggregate mode — count the two namespaces for the schema.
+        source_pattern = f"graph:source:{schema}:*"
+        graph_pattern = f"graph:{schema}:*"
+        try:
+            source_count = sum(
+                1 for _ in self._graph_redis.scan_iter(match=source_pattern)
+            )
+            graph_count = sum(
+                1 for _ in self._graph_redis.scan_iter(match=graph_pattern)
+            )
+        except Exception as exc:
+            logger.warning(
+                "/cache-status SCAN failed for %s: %s | correlation_id=%s",
+                schema, exc, correlation_id,
+            )
+            return {
+                "status": "scan_failed",
+                "schema": schema,
+                "error": str(exc),
+            }
 
         result = {
             "status": "ok",
             "schema": schema,
-            "count": len(keys),
-            "keys": keys,
+            "graph_source_count": source_count,
+            "graph_count": graph_count,
         }
-
         logger.info(
-            f"/cache-list found {len(keys)} keys | "
-            f"correlation_id={correlation_id}"
+            "/cache-status aggregate: %s | correlation_id=%s",
+            json.dumps(result), correlation_id,
         )
         return result
 
-    async def clear_cache_entry(self, object_name: str, schema: str) -> Dict[str, Any]:
-        """Delete a specific object's cache entry from Redis.
+    async def list_cached_objects(self, schema: str) -> Dict[str, Any]:
+        """Enumerate function names cached under ``graph:source:<schema>:*``.
 
         Args:
-            object_name: Name of the PL/SQL object.
             schema: Oracle schema name.
 
         Returns:
-            Dict with deletion status.
+            Dict with the count and the sorted list of function names.
         """
         correlation_id = get_correlation_id()
         logger.info(
-            f"/cache-clear {schema}.{object_name} | "
-            f"correlation_id={correlation_id}"
+            "/cache-list for schema %s | correlation_id=%s",
+            schema, correlation_id,
         )
 
-        deleted = await self._cache.delete_key("logic", schema, object_name)
+        if self._graph_redis is None:
+            logger.warning(
+                "/cache-list invoked without graph_redis wired | "
+                "correlation_id=%s",
+                correlation_id,
+            )
+            return {
+                "status": "redis_unavailable",
+                "schema": schema,
+                "count": 0,
+                "objects": [],
+            }
+
+        prefix = f"graph:source:{schema}:"
+        pattern = f"{prefix}*"
+        try:
+            names = []
+            for key in self._graph_redis.scan_iter(match=pattern):
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8", errors="replace")
+                if key.startswith(prefix):
+                    names.append(key[len(prefix):])
+            names.sort()
+        except Exception as exc:
+            logger.warning(
+                "/cache-list SCAN failed for %s: %s | correlation_id=%s",
+                schema, exc, correlation_id,
+            )
+            return {
+                "status": "scan_failed",
+                "schema": schema,
+                "error": str(exc),
+            }
 
         result = {
-            "status": "cleared" if deleted else "not_found",
-            "object_name": object_name,
+            "status": "ok",
             "schema": schema,
+            "count": len(names),
+            "objects": names,
         }
-
         logger.info(
-            f"/cache-clear result: {json.dumps(result)} | "
-            f"correlation_id={correlation_id}"
+            "/cache-list found %d entries | correlation_id=%s",
+            len(names), correlation_id,
         )
         return result
+
+    async def clear_cache_entry(
+        self, object_name: str, schema: str
+    ) -> Dict[str, Any]:
+        """Phase 8 deprecation stub: ``/cache-clear <object>``.
+
+        Single-key cache invalidation is no longer supported — the
+        loader corpus is rebuilt atomically at startup.
+        """
+        correlation_id = get_correlation_id()
+        message = (
+            "Single-key cache invalidation is no longer supported. Use "
+            "`docker exec -it rtie-redis redis-cli FLUSHDB` + restart "
+            "for a full rebuild."
+        )
+        logger.info(
+            "/cache-clear deprecated stub invoked for %s.%s | "
+            "correlation_id=%s",
+            schema, object_name, correlation_id,
+        )
+        return {
+            "status": "deprecated",
+            "object_name": object_name,
+            "schema": schema,
+            "message": message,
+        }
 
     async def refresh_schema_snapshot(self, schema: str) -> Dict[str, Any]:
         """Detect and sync DDL changes in the Oracle schema.
