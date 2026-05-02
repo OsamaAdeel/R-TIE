@@ -1,33 +1,11 @@
 import { useState } from 'react';
-import { Copy, Check, Search, Brain, FileCode, ChevronRight, Sparkles, RotateCcw, Pencil, HelpCircle } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import ResponseCard from './ResponseCard';
-import ValidationHeader from './ValidationHeader';
-
-// Code theme — transparent bg, wrapper handles the styling
-const codeTheme = {
-  ...oneLight,
-  'pre[class*="language-"]': {
-    ...oneLight['pre[class*="language-"]'],
-    background: 'transparent',
-    margin: 0,
-  },
-  'code[class*="language-"]': {
-    ...oneLight['code[class*="language-"]'],
-    background: 'transparent',
-  },
-};
+import { Copy, Check, RotateCcw, Pencil, HelpCircle, AlertCircle, OctagonX } from 'lucide-react';
+import clsx from 'clsx';
+import TrustBanner from './TrustBanner';
+import AgentActivity from './AgentActivity';
 import CommandResult from './CommandResult';
-
-const STAGE_CONFIG = {
-  classify: { icon: Brain, label: 'Understanding query', color: 'text-violet-500' },
-  search:   { icon: Search, label: 'Searching functions', color: 'text-blue-500' },
-  fetch:    { icon: FileCode, label: 'Reading source code', color: 'text-emerald-500' },
-  explain:  { icon: Sparkles, label: 'Generating explanation', color: 'text-amber-500' },
-};
+import Answer, { MarkdownBody } from './Answer';
+import { buildPipelineSteps } from '../lib/pipelineSteps';
 
 export default function MessageBubble({ message, onRetry, onEdit }) {
   const isUser = message.role === 'user';
@@ -36,35 +14,64 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
     return <UserMessage content={message.content} onRetry={onRetry} onEdit={onEdit} />;
   }
 
-  // Assistant message
   const data = message.data;
+  const isCommand = data?.type === 'command';
+  const inProgress = !!(message.streaming || message.loading);
+
+  // Pipeline disclosure is only meaningful for logic-pipeline responses;
+  // skip it for slash commands, errors, and clarifications.
+  const pipelineSteps = (!isCommand && !message.error && !message.clarification)
+    ? buildPipelineSteps({
+        stage: message.stage,
+        data,
+        streaming: message.streaming,
+        loading: message.loading,
+      })
+    : null;
+
+  const sourceCount = data?.source_citations?.length || 0;
 
   return (
-    <div>
-      <div className="max-w-4xl">
-        {message.error ? (
-          <ErrorCard error={message.error} />
-        ) : message.clarification ? (
-          <ClarificationCard message={message.clarification.message} />
-        ) : message.streaming ? (
-          message.streamedMarkdown
-            ? <StreamingMarkdown markdown={message.streamedMarkdown} meta={message.meta} stage={message.stage} />
-            : <AgentThinking stage={message.stage} />
-        ) : message.loading ? (
-          <AgentThinking stage={message.stage} />
-        ) : data?.type === 'command' ? (
-          <CommandResult result={data.result} correlationId={data.correlation_id} />
-        ) : (
-          <>
-            <ValidationHeader data={data} />
-            {data?.explanation?.markdown ? (
-              <MarkdownResponse data={data} />
-            ) : (
-              <ResponseCard data={data} />
-            )}
-          </>
+    <div className="max-w-4xl">
+      <div className="mb-2.5 flex items-baseline gap-2">
+        <span
+          className="text-gold font-bold text-[16px] tracking-tight leading-none"
+          style={{ fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}
+        >
+          R-TIE
+        </span>
+        {sourceCount > 0 && (
+          <span className="text-[11px] text-ivory-faint">
+            · {sourceCount} source{sourceCount === 1 ? '' : 's'} cited
+          </span>
         )}
       </div>
+
+      {pipelineSteps && (
+        <AgentActivity
+          steps={pipelineSteps}
+          defaultOpen={inProgress}
+          sourceCount={sourceCount}
+        />
+      )}
+
+      {message.error ? (
+        <ErrorCard error={message.error} />
+      ) : message.clarification ? (
+        <ClarificationCard message={message.clarification.message} />
+      ) : message.streaming ? (
+        message.streamedMarkdown
+          ? <StreamingMarkdown markdown={message.streamedMarkdown} meta={message.meta} />
+          : null
+      ) : message.loading ? null : isCommand ? (
+        <CommandResult result={data.result} correlationId={data.correlation_id} />
+      ) : (
+        <>
+          {!message.cancelled && <TrustBanner data={data} />}
+          {data ? <Answer data={data} /> : null}
+          {message.cancelled && <CancelledNotice />}
+        </>
+      )}
     </div>
   );
 }
@@ -82,9 +89,7 @@ function UserMessage({ content, onRetry, onEdit }) {
 
   const handleSave = () => {
     const trimmed = editText.trim();
-    if (trimmed && trimmed !== content) {
-      onEdit?.(trimmed);
-    }
+    if (trimmed && trimmed !== content) onEdit?.(trimmed);
     setEditing(false);
   };
 
@@ -93,8 +98,6 @@ function UserMessage({ content, onRetry, onEdit }) {
     setEditing(false);
   };
 
-  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
   if (editing) {
     return (
       <div className="flex justify-end">
@@ -102,7 +105,7 @@ function UserMessage({ content, onRetry, onEdit }) {
           <textarea
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
-            className="w-full bg-white border border-[#d0d0d0] rounded-xl px-4 py-3 text-sm text-text-primary resize-none focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30"
+            className="w-full bg-panel border border-line-strong rounded-[10px] px-4 py-3 text-[13.5px] text-ivory resize-none focus:outline-none focus:border-line-gold"
             rows={Math.max(2, editText.split('\n').length)}
             autoFocus
             onKeyDown={(e) => {
@@ -111,10 +114,16 @@ function UserMessage({ content, onRetry, onEdit }) {
             }}
           />
           <div className="flex items-center justify-end gap-2 mt-2">
-            <button onClick={handleCancel} className="px-3 py-1 text-xs font-medium text-[#888] hover:text-[#555] transition-colors">
+            <button
+              onClick={handleCancel}
+              className="px-3 py-1 text-[11px] font-medium text-ivory-faint hover:text-ivory transition-colors"
+            >
               Cancel
             </button>
-            <button onClick={handleSave} className="px-3 py-1 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover transition-colors">
+            <button
+              onClick={handleSave}
+              className="px-3 py-1 text-[11px] font-medium text-ink bg-gold rounded-md hover:bg-gold-dim transition-colors"
+            >
               Send
             </button>
           </div>
@@ -126,20 +135,31 @@ function UserMessage({ content, onRetry, onEdit }) {
   return (
     <div className="flex justify-end group">
       <div className="max-w-2xl">
-        <div className="bg-[#f0f0f0] rounded-2xl rounded-br-sm px-5 py-3">
-          <p className="text-sm text-text-primary whitespace-pre-wrap">{content}</p>
+        <div className="bg-panel border border-line rounded-[10px] px-4 py-2.5">
+          <p className="text-[13.5px] text-ivory whitespace-pre-wrap">{content}</p>
         </div>
-        {/* Action bar — visible on hover */}
-        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-          <span className="text-[11px] text-[#aaa] mr-1">{time}</span>
-          <button onClick={onRetry} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Retry">
+        {/* Hover-revealed action row */}
+        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+          <button
+            onClick={onRetry}
+            className="p-1 rounded hover:bg-hover text-ivory-faint hover:text-ivory transition-colors"
+            title="Retry"
+          >
             <RotateCcw size={13} />
           </button>
-          <button onClick={() => setEditing(true)} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Edit">
+          <button
+            onClick={() => setEditing(true)}
+            className="p-1 rounded hover:bg-hover text-ivory-faint hover:text-ivory transition-colors"
+            title="Edit"
+          >
             <Pencil size={13} />
           </button>
-          <button onClick={handleCopy} className="p-1 rounded hover:bg-[#f0f0f0] text-[#aaa] hover:text-[#555] transition-colors" title="Copy">
-            {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+          <button
+            onClick={handleCopy}
+            className="p-1 rounded hover:bg-hover text-ivory-faint hover:text-ivory transition-colors"
+            title="Copy"
+          >
+            {copied ? <Check size={13} className="text-gold" /> : <Copy size={13} />}
           </button>
         </div>
       </div>
@@ -147,207 +167,60 @@ function UserMessage({ content, onRetry, onEdit }) {
   );
 }
 
-function AgentThinking({ stage }) {
-  const currentStage = stage?.stage || 'classify';
-  const stages = ['classify', 'search', 'fetch', 'explain'];
-  const currentIdx = stages.indexOf(currentStage);
-
+function StreamingMarkdown({ markdown, meta }) {
   return (
-    <div className="space-y-0">
-      {/* Pipeline stages */}
-      <div className="bg-bg-secondary border border-border rounded-xl px-4 py-3 space-y-2">
-        {stages.map((s, i) => {
-          const config = STAGE_CONFIG[s];
-          const Icon = config.icon;
-          const isActive = i === currentIdx;
-          const isDone = i < currentIdx;
-          const isPending = i > currentIdx;
-
-          return (
-            <div key={s} className={`flex items-center gap-2.5 py-1 transition-all duration-300 ${isPending ? 'opacity-30' : ''}`}>
-              {/* Status indicator */}
-              {isDone ? (
-                <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center">
-                  <Check size={11} className="text-green-600" />
-                </div>
-              ) : isActive ? (
-                <div className="w-5 h-5 rounded-full bg-white border-2 border-accent flex items-center justify-center">
-                  <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-                </div>
-              ) : (
-                <div className="w-5 h-5 rounded-full bg-slate-100 border border-slate-200" />
-              )}
-
-              {/* Icon + label */}
-              <Icon size={13} className={isActive ? config.color : isDone ? 'text-green-500' : 'text-slate-300'} />
-              <span className={`text-xs font-medium ${isActive ? 'text-text-primary' : isDone ? 'text-text-muted' : 'text-slate-300'}`}>
-                {isActive ? (stage?.message || config.label) : config.label}
-              </span>
-
-              {/* Spinner for active */}
-              {isActive && (
-                <div className="ml-auto">
-                  <div className="w-3.5 h-3.5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function MarkdownResponse({ data }) {
-  const { explanation, functions_analyzed } = data || {};
-  const markdown = explanation?.markdown || '';
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(markdown);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="group/response">
-      {/* Subtle context line */}
-      {functions_analyzed?.length > 0 && (
-        <div className="flex items-center gap-1.5 text-[11px] text-text-muted mb-3">
-          <ChevronRight size={10} />
-          Investigated {functions_analyzed.join(', ')} systematically
-        </div>
-      )}
-
-      {/* Markdown body */}
-      <MarkdownBody markdown={markdown} />
-
-      {/* Action bar — visible on hover */}
-      <div className="flex items-center gap-1 mt-3 opacity-0 group-hover/response:opacity-100 transition-opacity duration-150">
-        <button
-          onClick={handleCopy}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium text-[#aaa] hover:text-[#555] hover:bg-[#f5f5f5] transition-colors"
-        >
-          {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function StreamingMarkdown({ markdown, meta, stage }) {
-  return (
-    <div>
-      {/* Live indicator */}
-      <div className="flex items-center gap-2 text-[11px] text-text-muted mb-3">
+    <div className="rounded-[10px] border border-line bg-panel/40 p-4">
+      <div className="flex items-center gap-2 text-[11px] text-ivory-faint mb-3">
         <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-gold opacity-75" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-gold" />
         </span>
         {meta?.functions_analyzed?.length > 0
-          ? `Writing explanation across ${meta.functions_analyzed.length} functions...`
-          : 'Generating response...'}
+          ? `Writing explanation across ${meta.functions_analyzed.length} function${meta.functions_analyzed.length === 1 ? '' : 's'}…`
+          : 'Generating response…'}
       </div>
-
-      {/* Streaming body — clean, no card */}
       <MarkdownBody markdown={markdown} />
-      <span className="inline-block w-1.5 h-4 bg-accent animate-pulse rounded-sm ml-0.5 align-text-bottom" />
+      <span className="inline-block w-1.5 h-4 bg-gold animate-pulse rounded-sm ml-0.5 align-text-bottom" />
     </div>
   );
 }
 
-function MarkdownBody({ markdown }) {
+// Shown after the user clicks Stop on a streaming response. The partial
+// markdown (if any) is preserved by Answer above this notice; this small
+// row just confirms the cancellation so the page doesn't look broken.
+function CancelledNotice() {
   return (
-    <div className="rtie-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          code({ node, inline, className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || '');
-            const codeStr = String(children).replace(/\n$/, '');
-            const isBlock = !inline && (match || codeStr.includes('\n'));
-            if (isBlock) {
-              return <CodeBlockWithCopy code={codeStr} language={match ? match[1] : 'sql'} />;
-            }
-            return <code {...props}>{children}</code>;
-          },
-        }}
-      >
-        {markdown}
-      </ReactMarkdown>
+    <div className="mt-3 flex items-center gap-2 text-[12px] text-ivory-faint">
+      <OctagonX size={12} className="shrink-0" />
+      <span>Response stopped</span>
     </div>
   );
-}
-
-function CodeBlockWithCopy({ code, language }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="rtie-codeblock group">
-      {/* Header: language label left, copy icon right */}
-      <div className="rtie-codeblock-header">
-        <span className="rtie-codeblock-lang">{language}</span>
-        <button onClick={handleCopy} className="rtie-codeblock-copy">
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
-      </div>
-      {/* Code body */}
-      <div className="rtie-codeblock-body">
-        <SyntaxHighlighter
-          style={codeTheme}
-          language={language}
-          wrapLongLines
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: '13px',
-            fontFamily: "'Söhne Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace",
-            border: 'none',
-            background: 'transparent',
-            padding: '16px',
-            lineHeight: '1.55',
-          }}
-        >
-          {code}
-        </SyntaxHighlighter>
-      </div>
-    </div>
-  );
-}
-
-function LoadingIndicator() {
-  return <AgentThinking stage={null} />;
 }
 
 function ErrorCard({ error }) {
   return (
-    <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-      <p className="text-xs text-red-600 font-semibold">Error</p>
-      <p className="text-xs text-red-500 mt-1">{error}</p>
+    <div className={clsx(
+      'flex items-start gap-3 rounded-[10px] border px-4 py-3',
+      'border-burgundy/50 bg-burgundy/10'
+    )}>
+      <AlertCircle size={14} className="text-burgundy mt-0.5 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-burgundy">Error</p>
+        <p className="text-[12.5px] text-ivory mt-1 break-words">{error}</p>
+      </div>
     </div>
   );
 }
 
 function ClarificationCard({ message }) {
   return (
-    <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 shadow-sm">
-      <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center shrink-0 mt-0.5">
-        <HelpCircle size={16} className="text-amber-600" />
-      </div>
+    <div className="flex items-start gap-3 rounded-[10px] border border-amber/40 bg-amber/5 px-4 py-3">
+      <HelpCircle size={14} className="text-amber mt-0.5 shrink-0" />
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-1">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-amber">
           More information needed
         </p>
-        <p className="text-sm text-amber-900 leading-relaxed whitespace-pre-wrap">
-          {message}
-        </p>
+        <p className="text-[13px] text-ivory mt-1 leading-relaxed whitespace-pre-wrap">{message}</p>
       </div>
     </div>
   );

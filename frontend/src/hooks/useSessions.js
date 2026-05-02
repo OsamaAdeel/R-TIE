@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 function generateId() {
   return crypto.randomUUID();
@@ -33,20 +33,28 @@ export function useSessions() {
 
   const activeSession = sessions.find((s) => s.id === activeId) || sessions[0];
 
+  // Mirror sessions into a ref so addSession can read fresh state without
+  // relying on the setState updater for side effects.
+  const sessionsRef = useRef(sessions);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+
+  // "New trace" — switch to an existing empty conversation if one exists,
+  // otherwise create a new one and switch. The activeId update lives
+  // outside the setSessions updater because React updater functions must
+  // be pure (under StrictMode they may run twice, dropping side effects).
   const addSession = useCallback(() => {
-    let created = null;
+    const existingEmpty = sessionsRef.current.find((s) => s.messages.length === 0);
+    if (existingEmpty) {
+      setActiveId(existingEmpty.id);
+      return existingEmpty;
+    }
+    const created = createSession();
     setSessions((prev) => {
-      const empty = prev.find((s) => s.messages.length === 0);
-      if (empty) {
-        setActiveId(empty.id);
-        return prev;
-      }
-      created = createSession();
       const next = [created, ...prev];
       persist(next);
       return next;
     });
-    if (created) setActiveId(created.id);
+    setActiveId(created.id);
     return created;
   }, [persist]);
 
@@ -90,6 +98,16 @@ export function useSessions() {
     });
   }, [persist]);
 
+  const renameSession = useCallback((id, title) => {
+    const trimmed = (title || '').trim();
+    if (!trimmed) return;
+    setSessions((prev) => {
+      const next = prev.map((s) => (s.id === id ? { ...s, title: trimmed } : s));
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
   return {
     sessions,
     activeSession,
@@ -99,5 +117,6 @@ export function useSessions() {
     deleteSession,
     addMessage,
     updateLastMessage,
+    renameSession,
   };
 }

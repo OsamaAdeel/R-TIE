@@ -1,12 +1,26 @@
 import { useRef, useEffect, useState } from 'react';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
-import ModelSelector from '../components/ModelSelector';
-import { ArrowRight, ChevronDown } from 'lucide-react';
+import Topbar from '../components/Topbar';
+import BrandMark from '../components/BrandMark';
+import { ChevronDown } from 'lucide-react';
 
 const NEAR_BOTTOM_THRESHOLD = 100;
 
-export default function Chat({ session, onSend, loading, provider, model, onProviderChange, onModelChange }) {
+export default function Chat({
+  session,
+  onSend,
+  onStop,
+  loading,
+  provider,
+  model,
+  onProviderChange,
+  onModelChange,
+  isStarred,
+  onStarActive,
+  onRenameActive,
+  onDeleteActive,
+}) {
   const scrollRef = useRef(null);
   const messagesEndRef = useRef(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -37,104 +51,103 @@ export default function Chat({ session, onSend, loading, provider, model, onProv
 
   const showScrollButton = messageCount > 0 && !isAtBottom;
 
+  const title = session?.messages.length === 0 ? 'New trace' : (session?.title || 'New trace');
+
   return (
-    <div className="flex-1 flex flex-col h-screen bg-bg-primary">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-5 py-2.5 border-b border-border bg-bg-secondary shadow-sm">
-        <span className="text-xs text-text-muted font-medium">
-          {session?.messages.length || 0} messages
-        </span>
-        <ModelSelector
+    <div className="flex-1 flex flex-col h-screen bg-ink text-ivory relative">
+      {/* Subtle gold/burgundy radial wash, lifted from the prototype's
+          `.app::before` so the surface doesn't feel flat. The actual
+          gradient is themed via the `--gradient-chat-wash` CSS var. */}
+      <div className="rtie-chat-wash absolute inset-0 pointer-events-none" />
+
+      <div className="relative flex-1 flex flex-col min-h-0">
+        <Topbar
+          title={title}
+          msgCount={messageCount}
+          isStarred={isStarred}
+          onStar={onStarActive}
+          onRename={onRenameActive}
+          onDelete={onDeleteActive}
+        />
+
+        {/* Messages area */}
+        <div className="relative flex-1 overflow-hidden">
+          <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
+            {session?.messages.length === 0 ? (
+              <Hero />
+            ) : (
+              <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
+                {session.messages.map((msg, i) => (
+                  <MessageBubble
+                    key={i}
+                    message={msg}
+                    onRetry={msg.role === 'user' ? () => onSend(msg.content) : undefined}
+                    onEdit={msg.role === 'user' ? (newText) => onSend(newText) : undefined}
+                  />
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
+          {showScrollButton && (
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              aria-label="Scroll to latest message"
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 inline-flex items-center justify-center h-9 w-9 rounded-full bg-panel-2 border border-line-strong text-ivory-dim hover:text-ivory hover:bg-panel hover:border-line-gold transition-colors"
+            >
+              <ChevronDown size={18} strokeWidth={2.25} />
+            </button>
+          )}
+        </div>
+
+        <ChatInput
+          onSend={onSend}
+          onStop={onStop}
+          disabled={loading}
           provider={provider}
           model={model}
           onProviderChange={onProviderChange}
           onModelChange={onModelChange}
         />
       </div>
-
-      {/* Messages area */}
-      <div className="relative flex-1 overflow-hidden">
-        <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
-          {session?.messages.length === 0 ? (
-            <EmptyState onSend={onSend} />
-          ) : (
-            <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
-              {session.messages.map((msg, i) => (
-                <MessageBubble
-                  key={i}
-                  message={msg}
-                  onRetry={msg.role === 'user' ? () => onSend(msg.content) : undefined}
-                  onEdit={msg.role === 'user' ? (newText) => onSend(newText) : undefined}
-                />
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
-        {showScrollButton && (
-          <button
-            type="button"
-            onClick={scrollToBottom}
-            aria-label="Scroll to latest message"
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 inline-flex items-center justify-center h-9 w-9 rounded-full bg-bg-secondary border border-border shadow-md text-text-secondary hover:text-text-primary hover:bg-bg-tertiary hover:border-border-strong transition-colors"
-          >
-            <ChevronDown size={18} strokeWidth={2.25} />
-          </button>
-        )}
-      </div>
-
-      {/* Input */}
-      <ChatInput onSend={onSend} disabled={loading} />
     </div>
   );
 }
 
-function EmptyState({ onSend }) {
-  const examples = [
-    { text: 'Explain the logic of FN_LOAD_OPS_RISK_DATA', icon: '🔍' },
-    { text: 'What does POPULATE_PP_FROMGL do?', icon: '📊' },
-    { text: '/cache-list', icon: '💾' },
-    { text: '/refresh-schema', icon: '🔄' },
-  ];
-
+function Hero() {
   return (
-    <div className="h-full flex items-center justify-center p-8">
-      <div className="text-center max-w-lg">
-        {/* Wordmark — Tomorrow display */}
+    <div className="min-h-full flex items-center justify-center px-8 py-6">
+      <div className="w-full max-w-[600px] flex flex-col items-center text-center">
+        <div className="text-gold mb-3">
+          <BrandMark size={96} />
+        </div>
+
+        {/* R-TIE wordmark — hyphen rendered in the brand accent color */}
         <h1
-          className="mb-3 text-text-primary"
+          className="text-ivory leading-none mb-2"
           style={{
-            fontFamily: "'Tomorrow', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            fontFamily: 'var(--font-display)',
             fontWeight: 700,
-            fontSize: '76px',
-            lineHeight: 1,
+            fontSize: '56px',
             letterSpacing: '-0.02em',
           }}
         >
-          R-TIE
+          R<span className="text-gold">-</span>TIE
         </h1>
-        <p
-          className="text-sm text-text-secondary mb-10 leading-relaxed max-w-md mx-auto"
-          style={{ fontFamily: "'Tomorrow', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}
-        >
-          Trace, explain, and reason about your Oracle OFSAA system — with
-          cited answers grounded in the source.
-        </p>
 
-        {/* Example cards */}
-        <div className="space-y-2.5 text-left">
-          {examples.map((example) => (
-            <button
-              key={example.text}
-              onClick={() => onSend(example.text)}
-              className="w-full flex items-center gap-3 text-sm text-text-secondary bg-bg-secondary rounded-lg px-4 py-2.5 hover:bg-bg-tertiary hover:text-text-primary cursor-pointer transition-colors duration-150 group"
-            >
-              <span className="text-base">{example.icon}</span>
-              <span className="flex-1 font-medium">{example.text}</span>
-              <ArrowRight size={13} className="text-text-muted group-hover:translate-x-0.5 transition-transform" />
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.18em] text-ivory-faint mb-4">
+          <span>Regulatory</span><span className="text-gold-dim">·</span>
+          <span>Trace</span><span className="text-gold-dim">·</span>
+          <span>Intelligence</span><span className="text-gold-dim">·</span>
+          <span>Engine</span>
         </div>
+
+        <p className="text-[13px] text-ivory-dim leading-relaxed max-w-[460px]">
+          Read your Oracle OFSAA system the way an auditor would. Every claim
+          grounded in the exact line of PL/SQL it came from.{' '}
+          <em className="text-gold-dim not-italic">No hallucinations, no guessing.</em>
+        </p>
       </div>
     </div>
   );
