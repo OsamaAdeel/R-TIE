@@ -73,8 +73,10 @@ def test_resolve_variable_nodes_returns_correct_node_ids():
 # -----------------------------------------------------------------------
 
 def test_assemble_llm_payload_structure():
-    """assemble_llm_payload renders a text payload that contains STEP
-    markers, Operation, and Source labels for each node."""
+    """assemble_llm_payload renders the standard multi-node shape:
+    one STEP block per surviving node, with Operation: and Source:
+    labels on each. Pass-through consolidation and relevance filtering
+    are tested separately."""
     node1 = {
         "function": "FN_A",
         "node": {
@@ -82,7 +84,7 @@ def test_assemble_llm_payload_structure():
             "type": "INSERT",
             "target_table": "TBL_X",
             "source_tables": ["SRC_A"],
-            "column_maps": {"COL1": "SRC_A.COL1"},
+            "column_maps": {"mapping": {"COL1": "UPPER(SRC_A.COL1)"}},
             "calculation": [],
             "conditions": [],
             "committed_after": False,
@@ -96,10 +98,10 @@ def test_assemble_llm_payload_structure():
             "id": "FN_A_N2",
             "type": "UPDATE",
             "target_table": "TBL_X",
-            "source_tables": [],
-            "column_maps": {"COL2": "'FIXED'"},
+            "source_tables": ["SRC_B"],
+            "column_maps": {"mapping": {"COL1": "SRC_B.COL1 || '_SUFFIX'"}},
             "calculation": [],
-            "conditions": ["COL1 IS NOT NULL"],
+            "conditions": ["SRC_B.FLAG = 'Y'"],
             "committed_after": True,
             "line_start": 25,
             "line_end": 30,
@@ -122,6 +124,59 @@ def test_assemble_llm_payload_structure():
     assert "STEP 2" in payload
     assert "Operation:" in payload
     assert "Source:" in payload
+
+
+# -----------------------------------------------------------------------
+# Test 15b: test_assemble_llm_payload_passthrough_consolidates
+# -----------------------------------------------------------------------
+
+def test_assemble_llm_payload_passthrough_consolidates():
+    """Consecutive same-function pass-through nodes (column_maps in flat
+    shape, treated as direct copies by _is_passthrough_node) collapse
+    into a single [PASS-THROUGH] block: no per-node Operation: line,
+    line range spans all merged nodes."""
+    node1 = {
+        "function": "FN_PT",
+        "node": {
+            "id": "FN_PT_N1",
+            "type": "INSERT",
+            "target_table": "TBL_X",
+            "source_tables": ["SRC_A"],
+            "column_maps": {"COL1": "SRC_A.COL1"},
+            "calculation": [],
+            "conditions": [],
+            "committed_after": False,
+            "line_start": 10,
+            "line_end": 20,
+        },
+    }
+    node2 = {
+        "function": "FN_PT",
+        "node": {
+            "id": "FN_PT_N2",
+            "type": "INSERT",
+            "target_table": "TBL_Y",
+            "source_tables": ["SRC_B"],
+            "column_maps": {"COL1": "SRC_B.COL1"},
+            "calculation": [],
+            "conditions": [],
+            "committed_after": True,
+            "line_start": 25,
+            "line_end": 30,
+        },
+    }
+
+    payload = assemble_llm_payload(
+        nodes=[node1, node2],
+        edges=[],
+        target_variable="COL1",
+        user_query="How is COL1 populated?",
+        execution_order=[node1, node2],
+    )
+
+    assert "[PASS-THROUGH]" in payload
+    assert "Operation:" not in payload
+    assert "lines 10-30" in payload
 
 
 # -----------------------------------------------------------------------
