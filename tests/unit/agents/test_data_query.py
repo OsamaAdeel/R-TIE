@@ -392,3 +392,272 @@ def test_G_oracle_error_path_logs_raw_code_and_message(
     full_log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert "ORA-00904" in full_log_text
     assert "V_ACCOUNT_NUMBER" in full_log_text
+
+
+# ---------------------------------------------------------------------
+# W34a — DATA_QUERY progressive streaming
+# ---------------------------------------------------------------------
+#
+# These tests verify that ``answer_stream`` emits ``("stage", ...)``
+# tuples at the TRUE start of each sub-stage, and that the final
+# ``("result", ...)`` payload preserves the pre-W34a return shape
+# regardless of whether the path succeeds, is rejected by Guardian, or
+# fails inside Oracle. The pre-W34a wrapper ``answer()`` must continue
+# to return a plain dict so the existing call sites (and the tests
+# above) keep working.
+
+
+def _make_schema_tools_returning(rows):
+    class _Tools:
+        async def execute_raw(self, sql, params):
+            return rows
+
+    return _Tools()
+
+
+async def _collect_stream(stream) -> list[tuple]:
+    """Drain an async iterator into a list. Used to capture stage +
+    result events from answer_stream() in test order."""
+    out: list[tuple] = []
+    async for ev in stream:
+        out.append(ev)
+    return out
+
+
+def test_w34a_stream_emits_stage_events_in_order(guardian, monkeypatch):
+    """Happy-path AGGREGATE query: answer_stream must emit, in order,
+    the stage events that announce TRUE sub-stage boundaries — search,
+    generating_sql, validating, fetch, explain — followed by the final
+    result. Each stage event must precede the work it announces, and
+    the final result preserves the pre-W34a shape."""
+    agent = DataQueryAgent(
+        schema_tools=_make_schema_tools_returning([(42,)]),
+        redis_client=None,
+        sql_guardian=guardian,
+    )
+    catalog = {
+        "STG_GL_DATA": {"V_GL_CODE", "N_AMOUNT_LCY", "FIC_MIS_DATE"},
+    }
+    monkeypatch.setattr(
+        agent,
+        "_build_schema_catalog",
+        lambda schema, qualify_in_prompt=False: ("(stub catalog)", catalog, {}),
+    )
+
+    sql_generate_called = {"before": [], "value": False}
+
+    async def fake_generate(*args, **kwargs):
+        sql_generate_called["value"] = True
+        # Snapshot which stages had been yielded by the time generation runs.
+        sql_generate_called["before"] = list(events)
+        return {
+            "query_kind": "AGGREGATE",
+            "sql": "SELECT COUNT(*) FROM STG_GL_DATA WHERE V_GL_CODE = :gl",
+            "params": {"gl": "X"},
+            "select_columns": ["COUNT(*)"],
+            "count_sql": None,
+        }
+
+    # Patch _generate_sql AFTER agent is constructed so it can capture
+    # `events` lexically. We also need to capture stage events as they
+    # arrive — easiest is to drain the generator with introspection.
+    monkeypatch.setattr(agent, "_generate_sql", fake_generate)
+
+    events: list[tuple] = []
+
+    async def runner():
+        async for ev in agent.answer_stream(
+            user_query="how many accounts",
+            schema="OFSMDM",
+            filters={"mis_date": "2025-12-31"},
+        ):
+            events.append(ev)
+
+    asyncio.run(runner())
+
+    stage_names = [e[1] for e in events if e[0] == "stage"]
+    # Stage order MUST be: search → generating_sql → validating → fetch
+    # → explain. checking_size is ROW_LIST-only and must NOT appear here.
+    assert stage_names == [
+        "search",
+        "generating_sql",
+        "validating",
+        "fetch",
+        "explain",
+    ], f"unexpected stage order: {stage_names}"
+
+    # generating_sql must precede the actual SQL hop (the W34a fix).
+    assert sql_generate_called["value"] is True
+    pre_gen_stages = [
+        e[1] for e in sql_generate_called["before"] if e[0] == "stage"
+    ]
+    assert "generating_sql" in pre_gen_stages, (
+        "generating_sql stage event must fire BEFORE _generate_sql is called; "
+        f"saw stages={pre_gen_stages}"
+    )
+
+    # Exactly one terminal result, last in the list, with pre-W34a shape.
+    results = [e for e in events if e[0] == "result"]
+    assert len(results) == 1
+    assert events[-1][0] == "result"
+    payload = results[0][1]
+    assert payload["status"] == "answered"
+    assert payload["query_kind"] == "AGGREGATE"
+    assert "explanation" in payload
+    assert payload["row_count"] == 1
+
+
+def test_w34a_stream_emits_validating_before_guardian(guardian, monkeypatch):
+    """Guardian-rejection path: the validating stage event must fire
+    BEFORE the Guardian runs (so the user sees status while the work
+    is happening), and the terminal result must still be the
+    pre-W34a validation_error shape — DECLINED, no rows, no execution."""
+    agent = DataQueryAgent(
+        schema_tools=MagicMock(),
+        redis_client=None,
+        sql_guardian=guardian,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_schema_catalog",
+        lambda schema, qualify_in_prompt=False: ("(stub)", {}, {}),
+    )
+
+    async def fake_generate(*args, **kwargs):
+        # Return SQL that the real Guardian will reject for being a DML.
+        return {
+            "query_kind": "AGGREGATE",
+            "sql": "DELETE FROM STG_GL_DATA WHERE V_GL_CODE = :gl",
+            "params": {"gl": "X"},
+            "select_columns": [],
+            "count_sql": None,
+        }
+
+    monkeypatch.setattr(agent, "_generate_sql", fake_generate)
+
+    events: list[tuple] = []
+
+    async def runner():
+        async for ev in agent.answer_stream(
+            user_query="how many",
+            schema="OFSMDM",
+            filters={"mis_date": "2025-12-31"},
+        ):
+            events.append(ev)
+
+    asyncio.run(runner())
+
+    stage_names = [e[1] for e in events if e[0] == "stage"]
+    # validating must appear, AND must come after generating_sql but
+    # before the terminal result. fetch / explain MUST NOT fire because
+    # the Guardian rejected before execution.
+    assert "validating" in stage_names
+    assert "fetch" not in stage_names
+    assert "explain" not in stage_names
+
+    results = [e[1] for e in events if e[0] == "result"]
+    assert len(results) == 1
+    # Pre-W34a shape preserved: validation_error → DECLINED.
+    assert results[0]["status"] == "validation_error"
+
+
+def test_w34a_stream_oracle_error_still_declines(guardian, monkeypatch):
+    """Oracle ORA- error inside execute: the fetch stage event must
+    have fired (the user got progress feedback), and the terminal
+    result must still be the pre-W34a query_generation_error shape
+    with a sanitized user message."""
+    class _OErr:
+        full_code = "ORA-00904"
+        message = '"V_ACCOUNT_NUMBER": invalid identifier'
+        code = 904
+        offset = 0
+
+    db_err = oracledb.DatabaseError(_OErr())
+    wrapped = _make_retry_error(db_err)
+
+    agent = DataQueryAgent(
+        schema_tools=_make_schema_tools_that_raises(wrapped),
+        redis_client=None,
+        sql_guardian=guardian,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_schema_catalog",
+        lambda schema, qualify_in_prompt=False: ("(stub)", {}, {}),
+    )
+
+    async def fake_generate(*args, **kwargs):
+        return {
+            "query_kind": "AGGREGATE",
+            "sql": (
+                "SELECT COUNT(*) FROM STG_GL_DATA WHERE V_GL_CODE = :gl "
+                "AND FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
+            ),
+            "params": {"gl": "X", "mis_date": "2025-12-31"},
+            "select_columns": ["COUNT(*)"],
+            "count_sql": None,
+        }
+
+    monkeypatch.setattr(agent, "_generate_sql", fake_generate)
+
+    events: list[tuple] = []
+
+    async def runner():
+        async for ev in agent.answer_stream(
+            user_query="how many",
+            schema="OFSMDM",
+            filters={"mis_date": "2025-12-31"},
+        ):
+            events.append(ev)
+
+    asyncio.run(runner())
+
+    stage_names = [e[1] for e in events if e[0] == "stage"]
+    assert "validating" in stage_names
+    assert "fetch" in stage_names  # fired before Oracle was called
+    assert "explain" not in stage_names  # explanation not built on error
+
+    results = [e[1] for e in events if e[0] == "result"]
+    assert len(results) == 1
+    # Pre-W34a shape preserved.
+    assert results[0]["status"] == "query_generation_error"
+    # User-facing message is still sanitized — no ORA codes, no Python
+    # internals.
+    for forbidden in ("RetryError", "Future at 0x", "ORA-"):
+        assert forbidden not in results[0].get("user_message", "")
+
+
+def test_w34a_answer_wrapper_returns_plain_dict(guardian, monkeypatch):
+    """The backward-compat ``answer()`` wrapper must drive the generator
+    to completion and return a plain dict matching the pre-W34a shape.
+    This is what the existing call sites (and tests A–G above) rely on."""
+    agent = DataQueryAgent(
+        schema_tools=_make_schema_tools_returning([(7,)]),
+        redis_client=None,
+        sql_guardian=guardian,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_schema_catalog",
+        lambda schema, qualify_in_prompt=False: ("(stub)", {}, {}),
+    )
+
+    async def fake_generate(*args, **kwargs):
+        return {
+            "query_kind": "AGGREGATE",
+            "sql": "SELECT COUNT(*) FROM STG_GL_DATA",
+            "params": {},
+            "select_columns": ["COUNT(*)"],
+            "count_sql": None,
+        }
+
+    monkeypatch.setattr(agent, "_generate_sql", fake_generate)
+
+    result = asyncio.run(
+        agent.answer(user_query="how many", schema="OFSMDM")
+    )
+
+    assert isinstance(result, dict)
+    assert result["status"] == "answered"
+    assert result["query_kind"] == "AGGREGATE"
+    assert "explanation" in result

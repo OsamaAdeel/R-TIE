@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from tenacity import RetryError
@@ -213,24 +213,67 @@ class DataQueryAgent:
         force: bool = False,
         target_variable: Optional[str] = None,
     ) -> dict:
-        """Generate + execute SQL for a data query. Returns a dict describing
-        the outcome.
+        """Backward-compatible wrapper around :meth:`answer_stream`.
 
-        Parameters
-        ----------
-        user_query:
-            The raw natural-language question.
-        schema:
-            Oracle schema name (used to scope the graph catalog).
-        filters:
-            Orchestrator-extracted filters (mis_date, account_number, etc.).
-            Merged into the LLM prompt to give explicit binding hints.
-        force:
-            When True, bypass the warn threshold confirmation gate and
-            proceed with execution anyway. Used for user-confirmed retries.
-        target_variable:
-            The target column the classifier extracted from the query. Used
-            for identifier-ambiguity detection before SQL generation.
+        Drives the streaming generator to completion and returns the
+        terminal ``("result", payload)`` payload as a plain dict. Stage
+        events are silently discarded here. New SSE callers should
+        consume :meth:`answer_stream` directly.
+        """
+        result: Optional[dict] = None
+        async for event in self.answer_stream(
+            user_query=user_query,
+            schema=schema,
+            filters=filters,
+            provider=provider,
+            model=model,
+            force=force,
+            target_variable=target_variable,
+        ):
+            if event[0] == "result":
+                result = event[1]  # type: ignore[assignment]
+        if result is None:
+            return self._error_result(
+                status="generation_error",
+                user_query=user_query,
+                explanation=(
+                    "Internal error: data_query stream finished without "
+                    "producing a result."
+                ),
+            )
+        return result
+
+    async def answer_stream(
+        self,
+        user_query: str,
+        schema: str,
+        filters: Optional[dict] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        force: bool = False,
+        target_variable: Optional[str] = None,
+    ) -> AsyncIterator[tuple]:
+        """Generate + execute SQL for a data query, yielding progress.
+
+        Yields one of:
+
+        * ``("stage", stage_name, message)`` immediately before each
+          significant sub-stage begins. Stage names mirror existing
+          ``event: stage`` names where the work is analogous (``"search"``,
+          ``"fetch"``, ``"explain"``) so the frontend's stage rendering
+          stays consistent. Other stage names: ``"generating_sql"``
+          (LLM SQL hop), ``"validating"`` (Guardian + residency + CHAR
+          checks), ``"checking_size"`` (ROW_LIST count pre-check only).
+        * ``("result", payload_dict)`` exactly once, as the terminal
+          yield. ``payload_dict`` matches the pre-W34a ``answer()`` return
+          shape — same keys, same semantics. Badge / warnings / sanity
+          flags live in ``payload_dict`` and are the source of truth.
+
+        Behaviour of every sub-stage is identical to the pre-W34a
+        ``answer()``: the only changes are (a) progressive stage events
+        emitted at TRUE sub-stage boundaries, and (b) the terminal
+        return became a yield. SQL generation, Guardian validation,
+        Oracle execution, and result-shape construction are unchanged.
         """
         correlation_id = get_correlation_id()
         filters = dict(filters or {})
@@ -257,11 +300,12 @@ class DataQueryAgent:
                 "DataQuery table ambiguous across schemas | table=%s schemas=%s",
                 ambiguity_info["table"], ambiguity_info["schemas"],
             )
-            return _build_table_ambiguous_response(
+            yield ("result", _build_table_ambiguous_response(
                 table=ambiguity_info["table"],
                 schemas=ambiguity_info["schemas"],
                 user_query=user_query,
-            )
+            ))
+            return
 
         if target_schema != schema:
             logger.info(
@@ -269,6 +313,7 @@ class DataQueryAgent:
                 schema, target_schema,
             )
 
+        yield ("stage", "search", "Building schema catalog...")
         try:
             with stage_timer("data_query_schema_catalog_build", correlation_id):
                 catalog_text, tables_to_columns, column_types = self._build_schema_catalog(
@@ -295,13 +340,15 @@ class DataQueryAgent:
                 target_variable,
                 [c["table"] for c in ambiguity_candidates],
             )
-            return build_identifier_ambiguous_response(
+            yield ("result", build_identifier_ambiguous_response(
                 target_column=(target_variable or "").strip().upper(),
                 filters=filters,
                 user_query=user_query,
                 candidates=ambiguity_candidates,
-            )
+            ))
+            return
 
+        yield ("stage", "generating_sql", "Generating SQL for your question...")
         try:
             with stage_timer("llm_api_sql_generate", correlation_id, provider=(provider or "default")):
                 plan = await self._generate_sql(
@@ -313,7 +360,7 @@ class DataQueryAgent:
                 )
         except Exception as exc:
             logger.error("DataQuery SQL generation failed: %s", exc)
-            return self._error_result(
+            yield ("result", self._error_result(
                 status="generation_error",
                 user_query=user_query,
                 explanation=(
@@ -321,10 +368,11 @@ class DataQueryAgent:
                     f"Reason: {exc}. Try rephrasing with explicit column / "
                     "filter names."
                 ),
-            )
+            ))
+            return
 
         if plan.get("unsupported"):
-            return {
+            yield ("result", {
                 "status": "unsupported",
                 "query_kind": None,
                 "sql": None,
@@ -342,7 +390,8 @@ class DataQueryAgent:
                 "sanity_warnings": [],
                 "verification_sql": None,
                 "correlation_id": correlation_id,
-            }
+            })
+            return
 
         sql = plan["sql"]
         params = plan.get("params") or {}
@@ -350,6 +399,7 @@ class DataQueryAgent:
         count_sql = plan.get("count_sql")
         select_columns = plan.get("select_columns") or []
 
+        yield ("stage", "validating", "Validating the generated SQL...")
         # Guardian validation (hard stop on DML/DDL or interpolation)
         try:
             self._guardian.validate(sql)
@@ -357,7 +407,7 @@ class DataQueryAgent:
                 self._guardian.check_bind_variables(sql, params)
         except GuardianRejectionError as exc:
             logger.error("DataQuery guardian rejected generated SQL: %s", exc)
-            return self._error_result(
+            yield ("result", self._error_result(
                 status="validation_error",
                 user_query=user_query,
                 sql=sql,
@@ -366,7 +416,8 @@ class DataQueryAgent:
                     "The generated SQL was rejected by the SQL Guardian. "
                     f"Reason: {exc.message}. No execution performed."
                 ),
-            )
+            ))
+            return
 
         # Pre-execution column residency check — catches LLM hallucinations
         # where a column is referenced against a table it doesn't live on.
@@ -378,7 +429,7 @@ class DataQueryAgent:
                     "DataQuery column residency rejected | column=%s table=%s sql=%s",
                     exc.column, exc.table, sql,
                 )
-                return self._query_generation_error(
+                yield ("result", self._query_generation_error(
                     reason="column_not_found",
                     user_query=user_query,
                     sql=sql,
@@ -393,7 +444,8 @@ class DataQueryAgent:
                         "Try naming the target table explicitly, or rephrase "
                         "with the column you actually want to see."
                     ),
-                )
+                ))
+                return
 
         # Pre-execution CHAR-padding check — catches Oracle CHAR(n) columns
         # compared against a VARCHAR2 bind without RTRIM, which silently
@@ -410,7 +462,7 @@ class DataQueryAgent:
                     "DataQuery CHAR padding rejected | column=%s table=%s sql=%s",
                     exc.column, exc.table, sql,
                 )
-                return self._query_generation_error(
+                yield ("result", self._query_generation_error(
                     reason="char_padding_mismatch",
                     user_query=user_query,
                     sql=sql,
@@ -427,11 +479,13 @@ class DataQueryAgent:
                         "If you re-ask the same question, the generator will "
                         "wrap the CHAR column in RTRIM automatically."
                     ),
-                )
+                ))
+                return
 
         # Safeguard 1: row count pre-check (skipped for aggregate queries).
         warnings: list[str] = []
         if query_kind == "ROW_LIST" and count_sql:
+            yield ("stage", "checking_size", "Checking how many rows match...")
             try:
                 self._guardian.validate(count_sql)
                 if params:
@@ -446,7 +500,7 @@ class DataQueryAgent:
 
             if total_rows is not None:
                 if total_rows > self._hard_limit:
-                    return {
+                    yield ("result", {
                         "status": "too_many_rows",
                         "query_kind": query_kind,
                         "sql": sql,
@@ -469,9 +523,10 @@ class DataQueryAgent:
                         "sanity_warnings": warnings,
                         "verification_sql": count_sql,
                         "correlation_id": correlation_id,
-                    }
+                    })
+                    return
                 if total_rows > self._warn_limit and not force:
-                    return {
+                    yield ("result", {
                         "status": "confirmation_required",
                         "query_kind": query_kind,
                         "sql": sql,
@@ -494,7 +549,8 @@ class DataQueryAgent:
                         "sanity_warnings": warnings,
                         "verification_sql": count_sql,
                         "correlation_id": correlation_id,
-                    }
+                    })
+                    return
 
         # Safeguard 3: inject display limit for row-listing queries.
         exec_sql = sql
@@ -503,6 +559,7 @@ class DataQueryAgent:
                 sql, limit=self._display_limit
             )
 
+        yield ("stage", "fetch", "Querying Oracle...")
         # Execute
         try:
             with stage_timer("oracle_query_execute", correlation_id, query_kind=query_kind):
@@ -518,7 +575,7 @@ class DataQueryAgent:
                 params,
             )
             reason, user_message, suggestion = _sanitize_oracle_error(ora_code)
-            return self._query_generation_error(
+            yield ("result", self._query_generation_error(
                 reason=reason,
                 user_query=user_query,
                 sql=exec_sql,
@@ -526,7 +583,8 @@ class DataQueryAgent:
                 user_message=user_message,
                 suggestion=suggestion,
                 warnings=warnings,
-            )
+            ))
+            return
 
         columns = select_columns or _column_names_from_sql(exec_sql)
         materialised = _materialise_rows(rows)
@@ -572,6 +630,7 @@ class DataQueryAgent:
                 suspicion_reason, exec_sql, params,
             )
 
+        yield ("stage", "explain", "Formatting the results...")
         explanation = _build_explanation(
             summary=summary,
             sql=exec_sql,
@@ -587,7 +646,7 @@ class DataQueryAgent:
                 f"{suspicion_reason}\n\n" + explanation
             )
 
-        return {
+        yield ("result", {
             "status": "answered",
             "query_kind": query_kind,
             "schema": target_schema,
@@ -605,7 +664,7 @@ class DataQueryAgent:
             "suspicion_reason": suspicion_reason if suspicious else None,
             "verification_sql": count_sql or exec_sql,
             "correlation_id": correlation_id,
-        }
+        })
 
     # -----------------------------------------------------------------
     # Internal helpers

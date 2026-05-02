@@ -1523,19 +1523,32 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
         return
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Building schema catalog + generating SQL...'})}\n\n"
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Executing read-only query against Oracle...'})}\n\n"
+    # W34a: stage events are emitted progressively from inside
+    # answer_stream() at the TRUE start of each sub-stage. The pre-W34a
+    # upfront cluster ("Building schema catalog + generating SQL..." +
+    # "Executing read-only query..." both firing 5+s before either work
+    # actually started) lied about progress and has been removed — the
+    # generator now yields each stage right as that sub-stage begins.
 
+    result = None
     try:
         with stage_timer("data_query_answer", correlation_id):
-            result = await _data_query.answer(
+            async for kind, *payload in _data_query.answer_stream(
                 user_query=user_query,
                 schema=schema,
                 filters=filters,
                 provider=provider,
                 model=model,
                 target_variable=(state.get("target_variable") or None),
-            )
+            ):
+                if kind == "stage":
+                    stage_name, message = payload
+                    yield (
+                        "event: stage\ndata: "
+                        f"{json_mod.dumps({'stage': stage_name, 'message': message})}\n\n"
+                    )
+                elif kind == "result":
+                    result = payload[0]
     except LLMSanitizedError as exc:
         logger.warning(
             "DATA_QUERY sanitized LLM failure | category=%s context=%s "
@@ -1551,6 +1564,18 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         return
     except Exception as exc:
         logger.error(f"DATA_QUERY failed: {exc}\n{traceback.format_exc()}")
+        yield f"event: error\ndata: {json_mod.dumps({'error': GENERIC_LLM_ERROR_MESSAGE, 'correlation_id': correlation_id})}\n\n"
+        return
+
+    if result is None:
+        # Generator exhausted without producing a terminal result. This
+        # should not happen in practice — answer_stream always yields a
+        # ("result", payload) before returning — but guard against it
+        # rather than dereferencing None below.
+        logger.error(
+            "DATA_QUERY generator exhausted without a result | correlation_id=%s",
+            correlation_id,
+        )
         yield f"event: error\ndata: {json_mod.dumps({'error': GENERIC_LLM_ERROR_MESSAGE, 'correlation_id': correlation_id})}\n\n"
         return
 
@@ -1584,7 +1609,9 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Formatting results...'})}\n\n"
+    # W34a: the "explain" stage event was emitted from inside
+    # answer_stream() before _build_explanation ran. The previous redundant
+    # post-result emission has been removed.
 
     explanation = result.get("explanation") or "(no explanation available)"
     mark_event("first_sse_token_emit", correlation_id, branch="data_query_rechunk")

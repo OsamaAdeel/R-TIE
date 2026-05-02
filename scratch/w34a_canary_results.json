@@ -1,0 +1,989 @@
+{
+  "started_at": "2026-05-02T19:10:35+0500",
+  "base_url": "http://localhost:8000",
+  "runs_per_canary": 3,
+  "gap_seconds": 2.0,
+  "canaries": [
+    {
+      "id": "C1",
+      "label": "FUNCTION_LOGIC OFSMDM (FN_LOAD_OPS_RISK_DATA)",
+      "query": "How does FN_LOAD_OPS_RISK_DATA work?",
+      "runs": [
+        {
+          "correlation_id": "964d7bbc-904d-4ef2-9fb4-8f55400b43e5",
+          "total_ms": 11511.5,
+          "ttft_ms": 233.1,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 6334.2,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "FN_LOAD_OPS_RISK_DATA",
+                "TLX_LOB_MAPPING",
+                "CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT",
+                "OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP",
+                "MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2242,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "594e8a56-3332-4827-94a3-351e38b20ded",
+          "total_ms": 10256.2,
+          "ttft_ms": 241.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 5071.4,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "FN_LOAD_OPS_RISK_DATA",
+                "TLX_LOB_MAPPING",
+                "CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT",
+                "OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP",
+                "MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2194,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "af69919b-3591-4475-9848-d9f11ecf7f92",
+          "total_ms": 9154.5,
+          "ttft_ms": 232.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 3766.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "FN_LOAD_OPS_RISK_DATA",
+                "TLX_LOB_MAPPING",
+                "CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT",
+                "OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP",
+                "MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2128,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C2",
+      "label": "DATA_QUERY OFSMDM (N_EOP_BAL ABL on 2025-12-31)",
+      "query": "What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?",
+      "runs": [
+        {
+          "correlation_id": "2cd0cb23-7c64-47ae-b96f-4fcce1617017",
+          "total_ms": 6710.8,
+          "ttft_ms": 230.6,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 6698.0,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            },
+            {
+              "stage": "explain",
+              "message": "Formatting the results..."
+            }
+          ],
+          "char_count": 327,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "84ead31f-0cdb-4d1e-834a-0edfaaec9c7f",
+          "total_ms": 7797.8,
+          "ttft_ms": 239.6,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 7785.4,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            },
+            {
+              "stage": "explain",
+              "message": "Formatting the results..."
+            }
+          ],
+          "char_count": 327,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "87d96100-fe1b-4ceb-8baa-c9819562c5ab",
+          "total_ms": 6494.2,
+          "ttft_ms": 230.2,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 6483.0,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            },
+            {
+              "stage": "explain",
+              "message": "Formatting the results..."
+            }
+          ],
+          "char_count": 327,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C3",
+      "label": "FUNCTION_LOGIC OFSERM via BI routing (CAP973)",
+      "query": "How is CAP973 calculated?",
+      "runs": [
+        {
+          "correlation_id": "5b124463-c544-40e3-8729-c6327e1f6e57",
+          "total_ms": 10880.0,
+          "ttft_ms": 249.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 3910.3,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 3488,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "b72889dc-92b5-425e-8156-da8af36acd9e",
+          "total_ms": 10535.9,
+          "ttft_ms": 253.4,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 3943.7,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2796,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "cadd70f9-ffcf-4812-969a-9397656be549",
+          "total_ms": 11289.7,
+          "ttft_ms": 244.6,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4791.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT",
+                "CS_PHASE_IN_DEDUCTION_AMOUNT",
+                "CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2922,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C4",
+      "label": "FUNCTION_LOGIC OFSERM explicit (Deferred_Tax_Asset)",
+      "query": "How does CS_Deferred_Tax_Asset_Net_of_DTL_Calculation work?",
+      "runs": [
+        {
+          "correlation_id": "2cc5d516-564e-4f5d-9996-b714404964e2",
+          "total_ms": 15175.5,
+          "ttft_ms": 242.2,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 3826.1,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_ARISING_FROM_TEMPORARY_DIFFERENCES_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 4678,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "b930c9fe-06d5-4f52-b329-bf712bdc8b93",
+          "total_ms": 11441.3,
+          "ttft_ms": 237.5,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4389.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_ARISING_FROM_TEMPORARY_DIFFERENCES_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 2998,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "00df2b61-cf33-45d0-a47f-0a301f1ef434",
+          "total_ms": 17946.6,
+          "ttft_ms": 244.1,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 5847.1,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_ARISING_FROM_TEMPORARY_DIFFERENCES_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 4545,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C5",
+      "label": "DATA_QUERY OFSERM (N_STD_ACCT_HEAD_AMT 2025-12-31)",
+      "query": "What is the total N_STD_ACCT_HEAD_AMT in FCT_STANDARD_ACCT_HEAD on 2025-12-31?",
+      "runs": [
+        {
+          "correlation_id": "b96ea8f5-78ce-475e-bb58-530d7fd01feb",
+          "total_ms": 21799.9,
+          "ttft_ms": 233.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 21784.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            }
+          ],
+          "char_count": 465,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "f120d14c-30b3-4cc7-b08a-e4713d689b2e",
+          "total_ms": 31000.2,
+          "ttft_ms": 245.5,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 30986.5,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            }
+          ],
+          "char_count": 463,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "0bbfa3c1-6ecc-47af-ad14-f9c468ad4375",
+          "total_ms": 32393.1,
+          "ttft_ms": 234.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 32379.3,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as DATA_QUERY"
+            },
+            {
+              "stage": "search",
+              "message": "Building schema catalog..."
+            },
+            {
+              "stage": "generating_sql",
+              "message": "Generating SQL for your question..."
+            },
+            {
+              "stage": "validating",
+              "message": "Validating the generated SQL..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Querying Oracle..."
+            }
+          ],
+          "char_count": 465,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C6",
+      "label": "VARIABLE_TRACE OFSMDM (writes N_STD_ACCT_HEAD_AMT)",
+      "query": "What writes N_STD_ACCT_HEAD_AMT?",
+      "runs": [
+        {
+          "correlation_id": "e7025941-8e0c-405c-a439-07e58cb11546",
+          "total_ms": 21596.6,
+          "ttft_ms": 239.3,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 11471.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "INTERNAL_TRANSACTIONS_STANDARD_ACCT_HEAD_DATA_POP",
+                "THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP",
+                "STANDARD_ACCOUNT_HEAD_AMOUNT_POPULATION_FOR_INDIVIDUAL_THRESHOLD_DEDUCTION",
+                "STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP",
+                "CS_NET_AT1_POST_MINORITY_INTEREST_ADJUSTMENT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 4666,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "834297d5-bf09-4dce-b2d6-0e98ba37e7ca",
+          "total_ms": 16258.3,
+          "ttft_ms": 262.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 5694.5,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "INTERNAL_TRANSACTIONS_STANDARD_ACCT_HEAD_DATA_POP",
+                "THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP",
+                "STANDARD_ACCOUNT_HEAD_AMOUNT_POPULATION_FOR_INDIVIDUAL_THRESHOLD_DEDUCTION",
+                "STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP",
+                "CS_NET_AT1_POST_MINORITY_INTEREST_ADJUSTMENT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 4040,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "15e8f818-7082-49dd-899b-0f38e2857216",
+          "total_ms": 14859.1,
+          "ttft_ms": 234.4,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4612.7,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "INTERNAL_TRANSACTIONS_STANDARD_ACCT_HEAD_DATA_POP",
+                "THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP",
+                "STANDARD_ACCOUNT_HEAD_AMOUNT_POPULATION_FOR_INDIVIDUAL_THRESHOLD_DEDUCTION",
+                "STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP",
+                "CS_NET_AT1_POST_MINORITY_INTEREST_ADJUSTMENT"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 3830,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C7",
+      "label": "DECLINED reconciliation",
+      "query": "Why does FCT_PRODUCT_EXPOSURES differ from STG_PRODUCT_PROCESSOR?",
+      "runs": [
+        {
+          "correlation_id": "404c27b0-d6de-46a3-a1b6-59309813e847",
+          "total_ms": 4278.7,
+          "ttft_ms": 238.1,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4262.0,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as UNSUPPORTED"
+            }
+          ],
+          "char_count": 589,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "4197c165-37c8-4739-97e3-30d7da7ae6b7",
+          "total_ms": 4737.3,
+          "ttft_ms": 245.1,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4712.9,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as UNSUPPORTED"
+            }
+          ],
+          "char_count": 589,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "0c569910-b120-4471-aae9-93cf5a64301e",
+          "total_ms": 4021.9,
+          "ttft_ms": 235.2,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 4004.6,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "classify",
+              "message": "Classified as UNSUPPORTED"
+            }
+          ],
+          "char_count": 589,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C8",
+      "label": "FUNCTION_LOGIC OFSERM via BI routing + derivation (CAP943)",
+      "query": "How is CAP943 calculated?",
+      "runs": [
+        {
+          "correlation_id": "8a023221-02e0-4828-bdb7-b139420810bd",
+          "total_ms": 12401.8,
+          "ttft_ms": 273.2,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 6099.4,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_RELATED_TO_TEMPORARY_DIFFERENCES_ABOVE_THE_15_PERCENT_AGGREGATE_THRESHOLD_LIMIT",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 3053,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "f7553a36-c9dc-4c48-916d-a180c7b992a7",
+          "total_ms": 16652.7,
+          "ttft_ms": 238.2,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 5634.9,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_RELATED_TO_TEMPORARY_DIFFERENCES_ABOVE_THE_15_PERCENT_AGGREGATE_THRESHOLD_LIMIT",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 4024,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "4a7a5d38-4063-4f00-b4f2-4efc0824de5f",
+          "total_ms": 16830.1,
+          "ttft_ms": 265.7,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 8438.7,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "CS_OTHER_INTANGIBLE_ASSETS_NET_OF_DTL_CALCULATION",
+                "CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED",
+                "CS_DTA_RELATED_TO_TEMPORARY_DIFFERENCES_ABOVE_THE_15_PERCENT_AGGREGATE_THRESHOLD_LIMIT",
+                "CS_DEFERRED_TAX_ASSET_RELATED_TO_TEMPORARY_DIFFERENCES_CALCULATION"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 3936,
+          "done": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "id": "C9",
+      "label": "W45 ungrounded path (CAP999)",
+      "query": "How is CAP999 calculated?",
+      "runs": [
+        {
+          "correlation_id": "54630b51-5107-477a-a980-6899125dfe79",
+          "total_ms": 11224.5,
+          "ttft_ms": 238.8,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 7587.7,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_CAPITAL_BUFFER_AMOUNT_CALCULATION",
+                "CS_NET_CET1_CAPITAL_POST_DEDUCTION_OF_INSIGNIFICANT_INVESTMENT_IN_NON_REG_CONSL_ENTITIES",
+                "FCT_CAP_CONS_RATIO_POP",
+                "CS_TOTAL_INVESTMENTS_IN_PRIVATE_EQUITY_INVESTMENT_FIRM_CET1",
+                "CS_NET_COMMON_EQUITY_TIER_1_CAPITAL"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 1898,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "6d9183cd-b141-4cd9-b8ad-9c20fe99fcbe",
+          "total_ms": 12397.0,
+          "ttft_ms": 235.8,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 9238.3,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "FCT_CAP_CONS_RATIO_POP",
+                "CS_CAPITAL_BUFFER_AMOUNT_CALCULATION",
+                "CS_REQUIRED_CAPITAL_RATIO_ASSIGNMENT",
+                "CS_NET_CET1_CAPITAL_POST_DEDUCTION_OF_INSIGNIFICANT_INVESTMENT_IN_NON_REG_CONSL_ENTITIES",
+                "CS_MINIMUM_CAPITAL_CONSERVATION_RATIO"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 1718,
+          "done": true,
+          "error": null
+        },
+        {
+          "correlation_id": "86639e98-93d6-4a4c-ae82-d751a6ad839f",
+          "total_ms": 24296.4,
+          "ttft_ms": 241.6,
+          "ttft_first_event_kind": "stage",
+          "ttft_token_ms": 21511.9,
+          "stage_events": [
+            {
+              "stage": "classify",
+              "message": "Understanding your question..."
+            },
+            {
+              "stage": "search",
+              "message": "Searching across database schemas..."
+            },
+            {
+              "stage": "fetch",
+              "message": "Reading source code for 5 functions...",
+              "functions": [
+                "CS_CAPITAL_BUFFER_AMOUNT_CALCULATION",
+                "CS_NET_CET1_CAPITAL_POST_DEDUCTION_OF_INSIGNIFICANT_INVESTMENT_IN_NON_REG_CONSL_ENTITIES",
+                "FCT_CAP_CONS_RATIO_POP",
+                "CS_TOTAL_INVESTMENTS_IN_PRIVATE_EQUITY_INVESTMENT_FIRM_CET1",
+                "CS_NET_COMMON_EQUITY_TIER_1_CAPITAL"
+              ]
+            },
+            {
+              "stage": "explain",
+              "message": "Generating detailed explanation..."
+            }
+          ],
+          "char_count": 1898,
+          "done": true,
+          "error": null
+        }
+      ]
+    }
+  ]
+}
