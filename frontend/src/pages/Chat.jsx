@@ -3,7 +3,7 @@ import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import Topbar from '../components/Topbar';
 import BrandMark from '../components/BrandMark';
-import { ArrowRight, ChevronDown, HelpCircle, GitBranch, Slash, RotateCw } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 
 const NEAR_BOTTOM_THRESHOLD = 100;
 
@@ -74,7 +74,7 @@ export default function Chat({
         <div className="relative flex-1 overflow-hidden">
           <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
             {session?.messages.length === 0 ? (
-              <Hero onPick={onSend} />
+              <Hero />
             ) : (
               <div className="max-w-4xl mx-auto py-6 px-4 space-y-6">
                 {session.messages.map((msg, i) => (
@@ -115,29 +115,12 @@ export default function Chat({
   );
 }
 
-// Suggestions are typed (q = question, t = trace, s = slash, c = command) so
-// each row gets a kind-prefixed glyph. Clicking a suggestion submits it as
-// the user's first message — same path as typing it manually.
-const SUGGESTIONS = [
-  { kind: 'q', label: 'Explain the logic of FN_LOAD_OPS_RISK_DATA', desc: 'Trace 14 PL/SQL functions across 3 packages' },
-  { kind: 'q', label: 'What does POPULATE_PP_FROMGL do?', desc: 'Loads from GL_DATA into FCT_PP_LOSS — Basel III RWA' },
-  { kind: 't', label: 'Trace lineage of column N_ANNUAL_GROSS_INCOME', desc: 'Source → staging → fact → reporting line' },
-  { kind: 's', label: '/cache-list', desc: 'Show cached function indexes & their TTL' },
-  { kind: 'c', label: '/refresh-schema', desc: 'Re-introspect indexed PL/SQL objects' },
-];
-
-const KIND_GLYPH = { q: HelpCircle, t: GitBranch, s: Slash, c: RotateCw };
-
-function Hero({ onPick }) {
+function Hero() {
   return (
-    // Compacted so the brand block + 5 suggestion cards fit a typical
-    // viewport without scrolling. `min-h-full` lets it grow on small
-    // screens; on tall viewports the flex centering still feels right.
     <div className="min-h-full flex items-center justify-center px-8 py-6">
       <div className="w-full max-w-[600px] flex flex-col items-center text-center">
-        {/* Brand mark — sized down from 144 → 88 */}
         <div className="text-gold mb-3">
-          <BrandMark size={88} />
+          <BrandMark size={96} />
         </div>
 
         {/* R-TIE wordmark — hyphen rendered in the brand accent color */}
@@ -146,47 +129,25 @@ function Hero({ onPick }) {
           style={{
             fontFamily: 'var(--font-display)',
             fontWeight: 700,
-            fontSize: '52px',
+            fontSize: '56px',
             letterSpacing: '-0.02em',
           }}
         >
           R<span className="text-gold">-</span>TIE
         </h1>
 
-        <div className="flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.18em] text-ivory-faint mb-3">
+        <div className="flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.18em] text-ivory-faint mb-4">
           <span>Regulatory</span><span className="text-gold-dim">·</span>
           <span>Trace</span><span className="text-gold-dim">·</span>
           <span>Intelligence</span><span className="text-gold-dim">·</span>
           <span>Engine</span>
         </div>
 
-        <p className="text-[12.5px] text-ivory-dim leading-snug max-w-[460px] mb-5">
+        <p className="text-[13px] text-ivory-dim leading-relaxed max-w-[460px]">
           Read your Oracle OFSAA system the way an auditor would. Every claim
           grounded in the exact line of PL/SQL it came from.{' '}
           <em className="text-gold-dim not-italic">No hallucinations, no guessing.</em>
         </p>
-
-        <div className="w-full space-y-1.5 text-left">
-          {SUGGESTIONS.map((s) => {
-            const Glyph = KIND_GLYPH[s.kind];
-            return (
-              <button
-                key={s.label}
-                onClick={() => onPick(s.label)}
-                className="w-full flex items-center gap-2.5 text-left bg-panel border border-line rounded-[8px] px-3 py-2 hover:border-line-gold hover:bg-panel-2 transition-colors group"
-              >
-                <span className="w-5 h-5 grid place-items-center rounded bg-gold-soft text-gold shrink-0">
-                  <Glyph size={11} strokeWidth={2.2} />
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className="block text-[12.5px] font-medium text-ivory truncate">{s.label}</span>
-                  <span className="block text-[10.5px] text-ivory-faint truncate">{s.desc}</span>
-                </span>
-                <ArrowRight size={12} className="text-ivory-faint group-hover:text-gold group-hover:translate-x-0.5 transition-all shrink-0" />
-              </button>
-            );
-          })}
-        </div>
       </div>
     </div>
   );

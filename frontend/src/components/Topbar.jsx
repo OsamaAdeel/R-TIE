@@ -37,43 +37,53 @@ export default function Topbar({ title, msgCount, isStarred, onStar, onRename, o
     onDelete();
   };
 
+  // Empty traces (no messages yet) have nothing meaningful to star,
+  // rename, or delete — render the title as static text and skip the menu.
+  const hasActions = msgCount > 0;
+
   return (
     <div className="flex items-center justify-between px-5 py-2.5 border-b border-line bg-ink">
       <div className="flex items-center gap-3 min-w-0">
-        <div ref={wrapRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((v) => !v)}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            className={clsx(
-              'flex items-center gap-1.5 px-2 py-1 rounded-md text-ivory transition-colors',
-              menuOpen ? 'bg-hover-strong' : 'hover:bg-hover'
-            )}
-          >
-            <span className="text-[14px] font-medium truncate max-w-[480px]">{title}</span>
-            <ChevronDown
-              size={13}
-              className={clsx('text-ivory-faint transition-transform', menuOpen && 'rotate-180')}
-            />
-          </button>
-
-          {menuOpen && (
-            <div
-              role="menu"
-              className="rtie-menu-shadow absolute left-0 top-full mt-1.5 z-20 min-w-[180px] rounded-lg border border-line-strong bg-panel py-1"
+        {hasActions ? (
+          <div ref={wrapRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              className={clsx(
+                'flex items-center gap-1.5 px-2 py-1 rounded-md text-ivory transition-colors',
+                menuOpen ? 'bg-hover-strong' : 'hover:bg-hover'
+              )}
             >
-              <MenuItem icon={<Star size={13} className={isStarred ? 'fill-gold text-gold' : ''} />} onClick={handleStar}>
-                {isStarred ? 'Unstar' : 'Star'}
-              </MenuItem>
-              <MenuItem icon={<Pencil size={13} />} onClick={handleRename}>Rename</MenuItem>
-              <div className="my-1 h-px bg-line" />
-              <MenuItem icon={<Trash2 size={13} />} onClick={handleDelete} danger>Delete</MenuItem>
-            </div>
-          )}
-        </div>
+              <span className="text-[14px] font-medium truncate max-w-[480px]">{title}</span>
+              <ChevronDown
+                size={13}
+                className={clsx('text-ivory-faint transition-transform', menuOpen && 'rotate-180')}
+              />
+            </button>
 
-        {typeof msgCount === 'number' && (
+            {menuOpen && (
+              <div
+                role="menu"
+                className="rtie-menu-shadow absolute left-0 top-full mt-1.5 z-20 min-w-[180px] rounded-lg border border-line-strong bg-panel py-1"
+              >
+                <MenuItem icon={<Star size={13} className={isStarred ? 'fill-gold text-gold' : ''} />} onClick={handleStar}>
+                  {isStarred ? 'Unstar' : 'Star'}
+                </MenuItem>
+                <MenuItem icon={<Pencil size={13} />} onClick={handleRename}>Rename</MenuItem>
+                <div className="my-1 h-px bg-line" />
+                <MenuItem icon={<Trash2 size={13} />} onClick={handleDelete} danger>Delete</MenuItem>
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="px-2 py-1 text-[14px] font-medium text-ivory truncate max-w-[480px]">
+            {title}
+          </span>
+        )}
+
+        {typeof msgCount === 'number' && msgCount > 0 && (
           <span className="text-[11px] text-ivory-faint">
             {msgCount} {msgCount === 1 ? 'message' : 'messages'}
           </span>
