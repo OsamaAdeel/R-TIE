@@ -1,11 +1,16 @@
 """
-LLM Error Sanitization (W42).
+LLM Error Sanitization (W42 OpenAI + Claude SDK extension).
 
-Catches upstream OpenAI SDK exceptions raised through langchain's
-ChatOpenAI / ChatAnthropic wrappers and translates them into user-safe
-DECLINED responses. Mirrors the W21 Oracle sanitization pattern in
-src/agents/data_query.py — the raw exception is always logged with full
-context, but only sanitized text reaches the user-facing response.
+Catches upstream OpenAI and Anthropic SDK exceptions raised through
+langchain's ChatOpenAI / ChatAnthropic wrappers and translates them into
+user-safe DECLINED responses. Mirrors the W21 Oracle sanitization pattern
+in src/agents/data_query.py — the raw exception is always logged with
+full context, but only sanitized text reaches the user-facing response.
+
+Both providers' exception class names align (AuthenticationError,
+RateLimitError, APITimeoutError, etc.), so the user-facing translation
+table is shared. The classification ladder walks both provider hierarchies;
+the user can't tell which provider failed by reading the message.
 
 Use at a non-streaming call site:
 
@@ -34,6 +39,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import anthropic
 import openai
 from tenacity import RetryError
 
@@ -45,7 +51,10 @@ logger = get_logger(__name__, concern="app")
 
 # ---------------------------------------------------------------------------
 # Translation table — exception class name -> user-safe message.
-# Add new entries here when new OpenAI exception types appear upstream.
+# Keys are bare class names (no module qualifier), so OpenAI and Anthropic
+# exceptions with the same name (AuthenticationError, RateLimitError, ...)
+# share an entry. Add provider-specific names (LengthFinishReasonError,
+# AnthropicError) only when they actually differ.
 # ---------------------------------------------------------------------------
 _LLM_ERROR_MESSAGES: dict[str, str] = {
     "AuthenticationError": (
@@ -98,6 +107,9 @@ _LLM_ERROR_MESSAGES: dict[str, str] = {
     "OpenAIError": (
         "LLM service returned an error. Try again or rephrase the query."
     ),
+    "AnthropicError": (
+        "LLM service returned an error. Try again or rephrase the query."
+    ),
 }
 
 GENERIC_LLM_ERROR_MESSAGE = (
@@ -127,11 +139,17 @@ def _unwrap_retry_error(exc: BaseException) -> BaseException:
 
 
 # ---------------------------------------------------------------------------
-# Categorization ladder. Order matters: most specific first.
+# Categorization ladders. Order matters: most specific first.
 # LengthFinishReasonError and ContentFilterFinishReasonError are NOT subclasses
 # of APIError, so they need their own checks. Within the APIError hierarchy,
 # status-specific subclasses must precede APIStatusError, and APIStatusError
 # must precede APIError.
+#
+# OpenAI and Anthropic ship parallel hierarchies: APIError ← APIStatusError ←
+# AuthenticationError/RateLimitError/etc. We walk both ladders so a query
+# using either provider produces an identical user-facing message for the
+# same logical failure (e.g. 401 → "authentication failed" message regardless
+# of which SDK raised).
 # ---------------------------------------------------------------------------
 _OPENAI_EXCEPTION_LADDER: tuple[type[BaseException], ...] = (
     openai.LengthFinishReasonError,
@@ -152,6 +170,31 @@ _OPENAI_EXCEPTION_LADDER: tuple[type[BaseException], ...] = (
     openai.OpenAIError,
 )
 
+# Mirrors the OpenAI ladder. Anthropic does not ship LengthFinishReasonError
+# or ContentFilterFinishReasonError (stop_reason is exposed on the message
+# object, not via exceptions), so those entries are absent here.
+_ANTHROPIC_EXCEPTION_LADDER: tuple[type[BaseException], ...] = (
+    anthropic.APITimeoutError,
+    anthropic.APIConnectionError,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    anthropic.NotFoundError,
+    anthropic.ConflictError,
+    anthropic.UnprocessableEntityError,
+    anthropic.RateLimitError,
+    anthropic.BadRequestError,
+    anthropic.InternalServerError,
+    anthropic.APIResponseValidationError,
+    anthropic.APIStatusError,
+    anthropic.APIError,
+    anthropic.AnthropicError,
+)
+
+_LLM_EXCEPTION_LADDERS: tuple[tuple[type[BaseException], ...], ...] = (
+    _OPENAI_EXCEPTION_LADDER,
+    _ANTHROPIC_EXCEPTION_LADDER,
+)
+
 
 def categorize_llm_exception(exc: BaseException) -> tuple[str, str]:
     """Return ``(category, user_safe_message)`` for an LLM exception.
@@ -159,17 +202,22 @@ def categorize_llm_exception(exc: BaseException) -> tuple[str, str]:
     The category is the exception class name (used in warnings + logs).
     The user-safe message contains no Python internals or stack info.
 
+    Recognizes both OpenAI and Anthropic SDK exception hierarchies; an
+    exception not matching either falls through to ``UnexpectedError``
+    with the generic message.
+
     Callers must still log the raw exception with full traceback at ERROR
     level — this function only produces the user-facing text. Use
     ``sanitize_llm_exception`` to do both in one call.
     """
     inner = _unwrap_retry_error(exc)
-    for cls in _OPENAI_EXCEPTION_LADDER:
-        if isinstance(inner, cls):
-            category = cls.__name__
-            return category, _LLM_ERROR_MESSAGES.get(
-                category, GENERIC_LLM_ERROR_MESSAGE
-            )
+    for ladder in _LLM_EXCEPTION_LADDERS:
+        for cls in ladder:
+            if isinstance(inner, cls):
+                category = cls.__name__
+                return category, _LLM_ERROR_MESSAGES.get(
+                    category, GENERIC_LLM_ERROR_MESSAGE
+                )
     return ("UnexpectedError", GENERIC_LLM_ERROR_MESSAGE)
 
 

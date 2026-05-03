@@ -3,6 +3,8 @@
 Covers:
   - categorize_llm_exception() correctly maps each openai exception type to
     its category and a user-safe message
+  - the same coverage for the parallel anthropic exception types added by
+    the Claude SDK extension (AuthenticationError, RateLimitError, etc.)
   - build_declined_response() produces the W42 DECLINED shape
   - LLMSanitizedError carries the right fields
   - sanitize_llm_exception() logs + categorizes correctly
@@ -11,6 +13,8 @@ Covers:
   - Selected call sites (orchestrator.classify_query, logic_explainer
     .stream_semantic) raise LLMSanitizedError when their LLM raises and
     do not leak the raw exception repr
+  - Cross-provider consistency: identical-category failures produce the
+    same user-facing message regardless of which SDK raised
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic
 import httpx
 import openai
 import pytest
@@ -43,6 +48,14 @@ def _request() -> httpx.Request:
 
 def _response(status: int = 500) -> httpx.Response:
     return httpx.Response(status, request=_request())
+
+
+def _anthropic_request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+def _anthropic_response(status: int = 500) -> httpx.Response:
+    return httpx.Response(status, request=_anthropic_request())
 
 
 # ---------------------------------------------------------------------
@@ -134,6 +147,149 @@ def test_categorize_unknown_exception_falls_through_to_generic():
     category, message = categorize_llm_exception(ValueError("boom"))
     assert category == "UnexpectedError"
     assert message == GENERIC_LLM_ERROR_MESSAGE
+
+
+# ---------------------------------------------------------------------
+# categorize_llm_exception — Anthropic (Claude) SDK ladder
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "exc_factory,expected_category,expected_phrase",
+    [
+        (
+            lambda: anthropic.RateLimitError(message="x", response=_anthropic_response(429), body={}),
+            "RateLimitError",
+            "rate-limited",
+        ),
+        (
+            lambda: anthropic.AuthenticationError(message="x", response=_anthropic_response(401), body={}),
+            "AuthenticationError",
+            "authentication failed",
+        ),
+        (
+            lambda: anthropic.PermissionDeniedError(message="x", response=_anthropic_response(403), body={}),
+            "PermissionDeniedError",
+            "denied",
+        ),
+        (
+            lambda: anthropic.NotFoundError(message="x", response=_anthropic_response(404), body={}),
+            "NotFoundError",
+            "not found",
+        ),
+        (
+            lambda: anthropic.BadRequestError(message="x", response=_anthropic_response(400), body={}),
+            "BadRequestError",
+            "malformed",
+        ),
+        (
+            lambda: anthropic.UnprocessableEntityError(message="x", response=_anthropic_response(422), body={}),
+            "UnprocessableEntityError",
+            "unprocessable",
+        ),
+        (
+            lambda: anthropic.ConflictError(message="x", response=_anthropic_response(409), body={}),
+            "ConflictError",
+            "conflict",
+        ),
+        (
+            lambda: anthropic.InternalServerError(message="x", response=_anthropic_response(500), body={}),
+            "InternalServerError",
+            "server error",
+        ),
+        (
+            lambda: anthropic.APIConnectionError(request=_anthropic_request()),
+            "APIConnectionError",
+            "Could not reach LLM service",
+        ),
+        (
+            lambda: anthropic.APITimeoutError(request=_anthropic_request()),
+            "APITimeoutError",
+            "timed out",
+        ),
+        (
+            lambda: anthropic.AnthropicError("generic"),
+            "AnthropicError",
+            "returned an error",
+        ),
+    ],
+)
+def test_categorize_known_anthropic_exceptions(exc_factory, expected_category, expected_phrase):
+    exc = exc_factory()
+    category, message = categorize_llm_exception(exc)
+    assert category == expected_category
+    assert expected_phrase.lower() in message.lower()
+
+
+def test_categorize_anthropic_user_message_never_contains_python_repr():
+    """The W42 leak symptom — Python repr bleeding into user text — must
+    not appear when the upstream is Anthropic either."""
+    cases = [
+        anthropic.RateLimitError(
+            message="<inner: Foo(arg=1)>",
+            response=_anthropic_response(429),
+            body={},
+        ),
+        anthropic.BadRequestError(
+            message="invalid <Bar(x=2, y=3)>",
+            response=_anthropic_response(400),
+            body={},
+        ),
+        anthropic.AnthropicError("Foo(arg=1, kwarg='leak')"),
+    ]
+    for exc in cases:
+        _category, message = categorize_llm_exception(exc)
+        assert not re.search(r"[A-Z]\w+\([^)]*=", message), (
+            f"User-facing message leaked a Python repr: {message!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "openai_factory,anthropic_factory",
+    [
+        (
+            lambda: openai.AuthenticationError(message="x", response=_response(401), body={}),
+            lambda: anthropic.AuthenticationError(message="x", response=_anthropic_response(401), body={}),
+        ),
+        (
+            lambda: openai.RateLimitError(message="x", response=_response(429), body={}),
+            lambda: anthropic.RateLimitError(message="x", response=_anthropic_response(429), body={}),
+        ),
+        (
+            lambda: openai.APITimeoutError(request=_request()),
+            lambda: anthropic.APITimeoutError(request=_anthropic_request()),
+        ),
+        (
+            lambda: openai.APIConnectionError(request=_request()),
+            lambda: anthropic.APIConnectionError(request=_anthropic_request()),
+        ),
+        (
+            lambda: openai.InternalServerError(message="x", response=_response(500), body={}),
+            lambda: anthropic.InternalServerError(message="x", response=_anthropic_response(500), body={}),
+        ),
+        (
+            lambda: openai.BadRequestError(message="x", response=_response(400), body={}),
+            lambda: anthropic.BadRequestError(message="x", response=_anthropic_response(400), body={}),
+        ),
+        (
+            lambda: openai.NotFoundError(message="x", response=_response(404), body={}),
+            lambda: anthropic.NotFoundError(message="x", response=_anthropic_response(404), body={}),
+        ),
+        (
+            lambda: openai.PermissionDeniedError(message="x", response=_response(403), body={}),
+            lambda: anthropic.PermissionDeniedError(message="x", response=_anthropic_response(403), body={}),
+        ),
+    ],
+)
+def test_cross_provider_messages_are_identical(openai_factory, anthropic_factory):
+    """A failure of equivalent category should produce the same user-facing
+    message regardless of which SDK raised it. The trust property is "the
+    user can't tell which provider failed by reading the message" — this
+    test pins that property so a future translation-table edit can't drift
+    the two providers apart."""
+    o_cat, o_msg = categorize_llm_exception(openai_factory())
+    a_cat, a_msg = categorize_llm_exception(anthropic_factory())
+    assert o_cat == a_cat
+    assert o_msg == a_msg
 
 
 def test_categorize_user_message_never_contains_python_repr():
@@ -296,6 +452,47 @@ async def test_orchestrator_classify_query_raises_sanitized_on_rate_limit():
     assert "RateLimitError(" not in err.user_message
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_classify_query_raises_sanitized_on_anthropic_auth():
+    """Same call site as the OpenAI test above, but with the Anthropic SDK
+    raising an AuthenticationError. Confirms the call site doesn't need
+    provider-specific exception handling — the generic
+    ``except Exception`` catch + sanitize_llm_exception covers both."""
+    from src.agents.orchestrator import Orchestrator
+    from src.pipeline.state import LogicState
+
+    orch = Orchestrator(temperature=0, max_tokens=100)
+    state: LogicState = {
+        "raw_query": "test", "object_name": "", "object_type": "",
+        "schema": "", "query_type": "", "target_variable": "",
+        "warnings": [], "partial_flag": False,
+    }  # type: ignore[typeddict-item]
+
+    fake_llm = MagicMock()
+    fake_llm.ainvoke = AsyncMock(
+        side_effect=anthropic.AuthenticationError(
+            message="bad key", response=_anthropic_response(401), body={}
+        )
+    )
+
+    with patch.object(orch, "_get_llm", return_value=fake_llm):
+        with pytest.raises(LLMSanitizedError) as exc_info:
+            await orch.classify_query("anything", state, provider="anthropic")
+
+    err = exc_info.value
+    assert err.category == "AuthenticationError"
+    assert err.context == "classify_query"
+    # User-facing text contains no Python class repr nor the upstream message.
+    assert "AuthenticationError(" not in err.user_message
+    assert "bad key" not in err.user_message
+    # Cross-provider parity: same message an OpenAI 401 would produce.
+    o_exc = openai.AuthenticationError(
+        message="bad key", response=_response(401), body={}
+    )
+    _ocat, omsg = categorize_llm_exception(o_exc)
+    assert err.user_message == omsg
+
+
 # ---------------------------------------------------------------------
 # Call-site integration: logic_explainer.stream_semantic (streaming)
 # ---------------------------------------------------------------------
@@ -345,3 +542,53 @@ async def test_logic_explainer_stream_semantic_raises_sanitized_on_failure():
     assert "LengthFinishReasonError(" not in err.user_message
     assert "completion=" not in err.user_message
     assert "CompletionUsage" not in err.user_message
+
+
+@pytest.mark.asyncio
+async def test_logic_explainer_stream_semantic_raises_sanitized_on_anthropic_failure():
+    """Streaming Anthropic call that fails partway through. The partial
+    tokens yielded before the failure are preserved; the generator
+    propagates LLMSanitizedError, NOT the raw anthropic exception. The
+    SSE boundary in main.py builds the final DECLINED done event."""
+    from src.agents.logic_explainer import LogicExplainer
+    from src.pipeline.state import LogicState
+
+    explainer = LogicExplainer(temperature=0, max_tokens=100)
+    state: LogicState = {
+        "raw_query": "test", "object_name": "FOO", "object_type": "",
+        "schema": "S", "query_type": "GENERAL", "target_variable": "",
+        "warnings": [], "partial_flag": False,
+        "multi_source": {}, "llm_payload": "", "graph_available": False,
+    }  # type: ignore[typeddict-item]
+
+    fake_llm = MagicMock()
+
+    async def failing_astream(messages):
+        chunk = MagicMock()
+        chunk.content = "first token "
+        yield chunk
+        # Mid-stream rate-limit from Anthropic — what a real overload looks like.
+        raise anthropic.RateLimitError(
+            message="overloaded",
+            response=_anthropic_response(429),
+            body={},
+        )
+
+    fake_llm.astream = failing_astream
+
+    with patch("src.agents.logic_explainer.create_llm", return_value=fake_llm):
+        gen = explainer.stream_semantic(state)
+        tokens: list[str] = []
+        with pytest.raises(LLMSanitizedError) as exc_info:
+            async for token in gen:
+                tokens.append(token)
+
+    # Partial output preserved before the failure
+    assert tokens == ["first token "]
+    err = exc_info.value
+    assert err.category == "RateLimitError"
+    assert err.context == "stream_semantic"
+    # Sanitized text — no Python class repr or upstream message leak
+    assert "RateLimitError(" not in err.user_message
+    assert "overloaded" not in err.user_message
+    assert "rate-limited" in err.user_message.lower()
