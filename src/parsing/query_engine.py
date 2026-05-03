@@ -833,6 +833,11 @@ def _is_passthrough_node(node: dict, target_var_upper: str) -> bool:
                 return True
             return False
 
+    # Note: the catch-all `return True` below relies on production
+    # parser output ALWAYS using a wrapped 'mapping' or 'assignments'
+    # shape. Flat-dict column_maps would be misclassified here, but
+    # is not produced by any current parser path. (W52 — verified
+    # by inventory; revisit if a flat-dict producer is ever added.)
     return True
 
 
