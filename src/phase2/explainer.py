@@ -408,6 +408,7 @@ class Phase2Explainer:
             temperature=self._temperature,
             max_tokens=self._max_tokens,
             json_mode=False,
+            site="phase2.explainer.invoke",
         )
         system = (
             "You are a careful regulatory-compliance analyst. You only state "
