@@ -109,11 +109,17 @@ class SubProcess:
 
 @dataclass
 class Process:
-    """Top-level process under a batch."""
+    """Top-level process under a batch.
+
+    A process may hold either nested ``sub_processes`` or a flat list of
+    leaf ``tasks`` directly, mirroring the optional intermediate layer in
+    the manifest YAML.
+    """
 
     name: str
     description: Optional[str] = None
     sub_processes: list[SubProcess] = field(default_factory=list)
+    tasks: list[TaskEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +169,7 @@ class BatchManifest:
     def _walk_tasks(self) -> Iterator[TaskEntry]:
         """Yield every task in declaration order across all processes."""
         for process in self.processes:
+            yield from process.tasks
             for sub_process in process.sub_processes:
                 yield from _walk_sub_process(sub_process)
 
@@ -364,7 +371,25 @@ def _parse_process(raw: dict, *, manifest_path: str, batch: str, proc_index: int
         )
         for i, sp_raw in enumerate(sub_processes_raw)
     ]
-    return Process(name=name, description=description, sub_processes=sub_processes)
+
+    tasks_raw = raw.get("tasks") or []
+    if not isinstance(tasks_raw, list):
+        raise ManifestValidationError(
+            f"{manifest_path}: process '{name}' has non-list 'tasks'"
+        )
+    tasks = [
+        _parse_task(
+            t_raw,
+            manifest_path=manifest_path,
+            batch=batch,
+            process_name=name,
+            sub_process_path=(),
+            task_index=i,
+        )
+        for i, t_raw in enumerate(tasks_raw)
+    ]
+
+    return Process(name=name, description=description, sub_processes=sub_processes, tasks=tasks)
 
 
 def _parse_sub_process(
@@ -535,41 +560,46 @@ def _validate_and_index(
     """Run cross-task validation (order, uniqueness, source existence,
     function-name match) and populate ``_task_index`` / ``_file_index``.
     """
-    seen_names: dict[str, str] = {}  # UPPER(name) → sub_process label
+    seen_names: dict[str, str] = {}  # UPPER(name) → container label
 
-    def _visit_sub_process(sp: SubProcess) -> None:
-        # --- order contiguity check (direct tasks only, per spec) -----------
-        if sp.tasks:
-            orders = [t.order for t in sp.tasks]
-            expected = list(range(1, len(sp.tasks) + 1))
+    def _validate_task_container(
+        container_name: str,
+        container_label: str,
+        tasks: list[TaskEntry],
+    ) -> None:
+        """Run order, duplicate-name, and per-task validation against a flat
+        list of tasks under either a process or a sub_process.
+        """
+        if tasks:
+            orders = [t.order for t in tasks]
+            expected = list(range(1, len(tasks) + 1))
             if sorted(orders) != expected:
                 raise ManifestValidationError(
-                    f"{manifest_path}: sub_process '{sp.name}' has non-contiguous "
-                    f"task orders {sorted(orders)} (expected {expected})"
+                    f"{manifest_path}: {container_label} '{container_name}' has "
+                    f"non-contiguous task orders {sorted(orders)} (expected {expected})"
                 )
             if len(orders) != len(set(orders)):
                 raise ManifestValidationError(
-                    f"{manifest_path}: sub_process '{sp.name}' has duplicate "
-                    f"task 'order' integers"
+                    f"{manifest_path}: {container_label} '{container_name}' has "
+                    f"duplicate task 'order' integers"
                 )
 
-            # --- per-sub-process duplicate-name check -----------------------
             # Only active tasks must be unique. Inactive entries are audit-only
             # (e.g. the same logical task retired once as TYPE3 and left as a
             # record alongside a never-built replacement) and may repeat.
-            sp_seen: set[str] = set()
-            for t in sp.tasks:
+            local_seen: set[str] = set()
+            for t in tasks:
                 if not t.active:
                     continue
                 name_u = t.name.strip().upper()
-                if name_u in sp_seen:
+                if name_u in local_seen:
                     raise ManifestValidationError(
                         f"{manifest_path}: duplicate task name '{t.name}' "
-                        f"within sub_process '{sp.name}'"
+                        f"within {container_label} '{container_name}'"
                     )
-                sp_seen.add(name_u)
+                local_seen.add(name_u)
 
-        for t in sp.tasks:
+        for t in tasks:
             _validate_task(
                 t,
                 manifest_path=manifest_path,
@@ -577,16 +607,14 @@ def _validate_and_index(
             )
 
             name_u = t.name.strip().upper()
-            # Global-uniqueness check also applies only to active tasks, for
-            # the same reason as the per-sub_process check above.
             if t.active:
                 if name_u in seen_names:
                     raise ManifestValidationError(
                         f"{manifest_path}: task name '{t.name}' appears in both "
-                        f"sub_process '{seen_names[name_u]}' and '{sp.name}' — "
+                        f"'{seen_names[name_u]}' and '{container_name}' — "
                         f"task names must be globally unique"
                     )
-                seen_names[name_u] = sp.name
+                seen_names[name_u] = container_name
             manifest._task_index[name_u] = t
 
             # Inactive tasks may have no source_file (see _parse_task); skip
@@ -600,10 +628,13 @@ def _validate_and_index(
                     )
                 manifest._file_index[file_key] = t
 
+    def _visit_sub_process(sp: SubProcess) -> None:
+        _validate_task_container(sp.name, "sub_process", sp.tasks)
         for child in sp.sub_processes:
             _visit_sub_process(child)
 
     for process in manifest.processes:
+        _validate_task_container(process.name, "process", process.tasks)
         for sp in process.sub_processes:
             _visit_sub_process(sp)
 
