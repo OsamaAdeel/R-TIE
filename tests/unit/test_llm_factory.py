@@ -83,6 +83,27 @@ def test_get_site_model_returns_known_site():
 
 
 # ---------------------------------------------------------------------
+# W34c Phase 2: explicit pinning for the newly promoted site.
+# Duplicates coverage from the parametrized test above, but pins the
+# Phase 2 site by name so an accidental SITE_MODEL_DEFAULTS removal
+# still fails a clearly-named test rather than just dropping a
+# parametrize case silently. classify_query was originally part of
+# Phase 2 but reverted after C14 caught a ClassificationResult
+# ValidationError on gpt-4o-mini reconciliation queries.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "site_key,expected_model",
+    [
+        ("phase2.explainer.invoke", "gpt-4o-mini"),
+    ],
+)
+def test_phase2_sites_resolve_to_gpt_4o_mini(site_key, expected_model):
+    assert SITE_MODEL_DEFAULTS[site_key] == expected_model
+    assert get_site_model(site_key) == expected_model
+
+
+# ---------------------------------------------------------------------
 # Explicit model wins over site=
 # ---------------------------------------------------------------------
 
