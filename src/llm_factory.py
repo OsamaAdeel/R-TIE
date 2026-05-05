@@ -4,8 +4,12 @@ RTIE LLM Factory.
 Provides a factory for creating LLM instances from either OpenAI or
 Anthropic (Claude), selected dynamically at runtime. Supports per-request
 model switching via the provider and model parameters.
+
+W34c Phase 1: per-call-site static model dispatch via SITE_MODEL_DEFAULTS,
+overridable in aggregate by the RTIE_MODEL_OVERRIDES env var (JSON dict).
 """
 
+import json
 import os
 import ssl
 from typing import Optional
@@ -21,6 +25,82 @@ logger = get_logger(__name__, concern="app")
 
 # Supported providers
 PROVIDERS = {"openai", "anthropic"}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# W34c Phase 1: per-call-site model defaults.
+#
+# Phase 1 formalizes what's already shipped — sites #6-#10 were
+# already running gpt-4o-mini; site #5 (variable_tracer.resolve_variables)
+# is normalized here from gpt-4o → gpt-4o-mini.
+#
+# Phase 2/3 sites (orchestrator.classify_query, logic_explainer.*,
+# phase2.explainer, data_query._generate_sql) are intentionally absent —
+# they will be added individually after canary expansion.
+# ──────────────────────────────────────────────────────────────────────
+SITE_MODEL_DEFAULTS: dict[str, str] = {
+    "variable_tracer.resolve_variables":  "gpt-4o-mini",
+    "variable_tracer.explain_chain":      "gpt-4o-mini",
+    "variable_tracer.stream_chain":       "gpt-4o-mini",
+    "variable_tracer.stream_ungrounded":  "gpt-4o-mini",
+    "variable_tracer.stream_partial":     "gpt-4o-mini",
+    "indexer.generate_description":       "gpt-4o-mini",
+}
+
+
+def _load_site_model_overrides() -> dict[str, str]:
+    """Parse RTIE_MODEL_OVERRIDES env var, layer on top of SITE_MODEL_DEFAULTS.
+
+    The env var is a JSON object mapping site keys → model names. Unknown
+    site keys are kept (logged at WARNING) so future-Phase rollouts can
+    use the same mechanism without code change. Malformed JSON is
+    ignored with a warning; the function never raises.
+    """
+    raw = os.getenv("RTIE_MODEL_OVERRIDES")
+    if not raw:
+        return dict(SITE_MODEL_DEFAULTS)
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            f"RTIE_MODEL_OVERRIDES is not valid JSON, ignoring: {exc}. "
+            f"Falling back to SITE_MODEL_DEFAULTS."
+        )
+        return dict(SITE_MODEL_DEFAULTS)
+
+    if not isinstance(parsed, dict):
+        logger.warning(
+            f"RTIE_MODEL_OVERRIDES must be a JSON object, got "
+            f"{type(parsed).__name__}. Ignoring."
+        )
+        return dict(SITE_MODEL_DEFAULTS)
+
+    resolved = dict(SITE_MODEL_DEFAULTS)
+    for key, value in parsed.items():
+        if not isinstance(value, str):
+            logger.warning(
+                f"RTIE_MODEL_OVERRIDES['{key}'] must be a string, "
+                f"got {type(value).__name__}. Skipping."
+            )
+            continue
+        if key not in SITE_MODEL_DEFAULTS:
+            logger.warning(
+                f"RTIE_MODEL_OVERRIDES key '{key}' is not a known site "
+                f"(known: {sorted(SITE_MODEL_DEFAULTS.keys())}). "
+                f"Applying anyway."
+            )
+        resolved[key] = value
+    return resolved
+
+
+# Resolved at import time so the mapping is stable for the process
+# lifetime and grep-able in startup logs.
+_RESOLVED_SITE_MODELS: dict[str, str] = _load_site_model_overrides()
+logger.info(
+    f"W34c Phase 1: resolved per-site model mapping = "
+    f"{json.dumps(_RESOLVED_SITE_MODELS, sort_keys=True)}"
+)
 
 
 def get_default_provider() -> str:
@@ -46,22 +126,39 @@ def get_default_model(provider: str) -> str:
     return os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
 
+def get_site_model(site: str) -> Optional[str]:
+    """Look up the resolved model for a call-site key.
+
+    Returns None if the site is not registered in SITE_MODEL_DEFAULTS
+    (and not added via RTIE_MODEL_OVERRIDES). Callers should fall back
+    to the global default in that case.
+    """
+    return _RESOLVED_SITE_MODELS.get(site)
+
+
 def create_llm(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     temperature: float = 0,
     max_tokens: int = 2000,
     json_mode: bool = False,
+    site: Optional[str] = None,
 ) -> BaseChatModel:
     """Create an LLM instance for the specified provider and model.
 
     Args:
         provider: 'openai' or 'anthropic'. Defaults to DEFAULT_LLM_PROVIDER env var.
-        model: Model name (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Defaults to
-            provider-specific env var.
+        model: Model name (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Explicit
+            value always wins over `site=`. Defaults to provider-specific env var
+            when neither model nor site is supplied.
         temperature: Sampling temperature. Defaults to 0.
         max_tokens: Maximum output tokens. Defaults to 2000.
         json_mode: Whether to force JSON output. Defaults to False.
+        site: W34c dotted call-site key (e.g. "variable_tracer.stream_chain").
+            When supplied and `model` is not, the model is resolved from the
+            site → model mapping (SITE_MODEL_DEFAULTS layered with
+            RTIE_MODEL_OVERRIDES). Unknown sites fall back to the global
+            default with a warning.
 
     Returns:
         A LangChain chat model instance.
@@ -70,6 +167,17 @@ def create_llm(
         ValueError: If the provider is not supported or API key is missing.
     """
     provider = (provider or get_default_provider()).lower()
+
+    if model is None and site is not None:
+        site_model = get_site_model(site)
+        if site_model is None:
+            logger.warning(
+                f"create_llm: site='{site}' is not in SITE_MODEL_DEFAULTS; "
+                f"falling back to global default model."
+            )
+        else:
+            model = site_model
+
     model = model or get_default_model(provider)
 
     if provider not in PROVIDERS:
@@ -78,7 +186,10 @@ def create_llm(
             f"Supported: {', '.join(sorted(PROVIDERS))}"
         )
 
-    logger.info(f"Creating LLM: provider={provider}, model={model}")
+    logger.info(
+        f"Creating LLM: provider={provider}, model={model}"
+        + (f", site={site}" if site else "")
+    )
 
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
