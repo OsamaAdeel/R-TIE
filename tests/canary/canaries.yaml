@@ -1,0 +1,419 @@
+# RTIE canary regression set (18 queries across 3 tiers).
+#
+# Source proposal: Toheed-approved canary expansion. The set was carved out of
+# the existing test_live_stream.py (16 tests), the W34 canary runner (9 typed
+# queries), and the Phase 4 canary set (a-h). 15 of 18 queries here are reused
+# from those suites; 3 are new (C04, C17, plus a re-pinned variant in C16/C18).
+#
+# Tiering:
+#   Tier 1 — must pass before any model swap (W34c phase 2+). Fast, broad.
+#   Tier 2 — must pass before promoting #12 (data_query._generate_sql).
+#            Concentrated DATA_QUERY surface; pinned SQL/SUM semantics.
+#   Tier 3 — manual; needs local Oracle data state to be meaningful.
+#
+# Assertion kinds (see run_canaries.py for the dispatcher):
+#   done_field_eq       — done.<path> == value         (dotted path supported)
+#   done_field_in       — done.<path> in [...values]
+#   done_field_neq      — done.<path> != value
+#   done_field_present  — done.<path> exists and is non-empty
+#   markdown_contains       — substring in collected markdown OR done.explanation.markdown
+#   markdown_not_contains   — substring NOT in markdown
+#   markdown_contains_any   — any-of substrings in markdown
+#   summary_contains_any    — any-of substrings in done.summary
+#   warnings_contain        — any item in done.warnings contains substring
+#   warnings_not_contain    — no item in done.warnings contains substring
+#   min_citations           — len(done.source_citations) >= value
+#   sql_contains            — substring in done.sql (case-insensitive)
+#   sql_not_contains        — substring NOT in done.sql (case-insensitive)
+#   stage_emitted           — at least one `event: stage` with stage == value
+#   stage_message_not_emitted — no `event: stage` whose message contains substring
+#   meta_field_eq           — meta.<path> == value
+#   meta_field_in           — meta.<path> in [...values]
+#
+# `expected` is a shorthand for three common meta/done assertions; the runner
+# expands it into meta_field_eq + warnings/badge checks. Use `expected.query_type:
+# {one_of: [...]}` for canaries with legitimate variability (e.g. BI promotion).
+
+canaries:
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Tier 1 — happy paths + highest-blast-radius routes
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: C01
+    tier: 1
+    query: "How does FN_LOAD_OPS_RISK_DATA work?"
+    expected:
+      query_type: COLUMN_LOGIC
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_neq
+        path: type
+        value: function_not_found
+      - kind: markdown_contains
+        value: "This function runs in"
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: warnings_not_contain
+        value: PARTIAL_SOURCE
+      - kind: min_citations
+        value: 1
+    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact."
+
+  - id: C02
+    tier: 1
+    query: "Explain the function SOME_FAKE_FN_THAT_DOES_NOT_EXIST"
+    expected:
+      badge: DECLINED
+    assertions:
+      - kind: done_field_eq
+        path: type
+        value: function_not_found
+      - kind: done_field_eq
+        path: badge
+        value: DECLINED
+      - kind: markdown_contains
+        value: SOME_FAKE_FN_THAT_DOES_NOT_EXIST
+    protects: "Function-precheck short-circuit — guards against fabricated explanations for non-existent functions."
+
+  - id: C03
+    tier: 1
+    query: "How is N_ANNUAL_GROSS_INCOME calculated?"
+    expected:
+      query_type: VARIABLE_TRACE
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: markdown_not_contains
+        value: "Not Found in Indexed Functions"
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+    protects: "Grounded VARIABLE_TRACE in OFSMDM — W45 detector + alias resolver + chain builder all green."
+
+  - id: C05
+    tier: 1
+    query: "What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?"
+    expected:
+      query_type: DATA_QUERY
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_eq
+        path: type
+        value: data_query
+      - kind: done_field_eq
+        path: status
+        value: answered
+      - kind: summary_contains_any
+        values:
+          - "-24,179,237,139.63"
+          - "-24179237139.63"
+      - kind: done_field_eq
+        path: row_count
+        value: 1
+      - kind: sql_contains
+        value: V_LV_CODE
+      - kind: sql_contains
+        value: FIC_MIS_DATE
+    protects: "DATA_QUERY known-SUM anchor (-24,179,237,139.63). Load-bearing for W34c #12 (_generate_sql model promotion)."
+    notes: |
+      Local OFSMDM data is single-LV ('ABL'), so the filtered SUM equals the
+      no-filter SUM. C19 (no-filter shape) was dropped — C05 covers both shapes
+      under current data state. Revisit if LV diversity is added.
+
+  - id: C09
+    tier: 1
+    query: "How does CS_Deferred_Tax_Asset_Net_of_DTL_Calculation work?"
+    expected:
+      # Classifier picks COLUMN_LOGIC ("explain function X") or VARIABLE_TRACE
+      # (sibling rule "how is X calculated") on this phrasing — both downstream
+      # paths converge to the same logic_explainer route. BI promotion to
+      # FUNCTION_LOGIC also possible if a BI literal happens to match.
+      query_type:
+        one_of: [COLUMN_LOGIC, VARIABLE_TRACE, FUNCTION_LOGIC]
+      # Function-name queries don't pivot schema — Phase 3's cross-schema
+      # vector search retrieves the OFSERM function from the OFSMDM-default
+      # context. Schema pivot mechanism (Phase 4) is per-column / per-table.
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_neq
+        path: type
+        value: function_not_found
+      - kind: markdown_contains
+        value: "This function runs in"
+    protects: "OFSERM function retrieval through graph + multi-schema semantic search (Phase 3 exit criterion). Schema stays OFSMDM-default; cross-schema vector search finds the function."
+
+  - id: C10
+    # Moved to Tier 3 after the initial pinning run found the function not
+    # present in `graph:OFSERM` on current local Redis state. The W49
+    # partial-source path is unreachable when the function is missing
+    # entirely — the function-precheck DECLINEs first with `function_not_found`.
+    # See README §"Tier 3 manual procedure" for resolution options.
+    tier: 3
+    query: "How does ABL_Def_Pension_Fund_Asset_Net_DTL work?"
+    expected:
+      query_type: COLUMN_LOGIC
+      badge: UNVERIFIED
+    assertions:
+      - kind: warnings_contain
+        value: PARTIAL_SOURCE
+      - kind: markdown_contains
+        value: "## ABL_Def_Pension_Fund_Asset_Net_DTL — Source Not Currently Indexed"
+      - kind: markdown_not_contains
+        value: "What this function most likely does"
+      - kind: markdown_not_contains
+        value: "Step 1"
+      - kind: markdown_not_contains
+        value: "This function runs in"
+      - kind: markdown_contains
+        value: "db/modules"
+      - kind: markdown_contains
+        value: "parser-coverage report"
+    protects: "W49 partial-source structured response — strictest assertion set in the suite."
+    needs_local_data:
+      - "ABL_DEF_PENSION_FUND_ASSET_NET_DTL must exist in graph:OFSERM as metadata-only (no source body) — i.e. function indexed but body not loaded into the OFSMDM-only vector store. Currently absent from Redis on local main."
+      - "Resolution: (a) re-index the OFSERM pension file via `python cli.py index --force` if it still exists under db/modules/; or (b) re-pin C10 to a different function that is metadata-only-no-source on current Redis state. Decision deferred."
+
+  - id: C13
+    tier: 1
+    query: "How is CAP943 calculated?"
+    expected:
+      query_type:
+        one_of: [COLUMN_LOGIC, FUNCTION_LOGIC]
+      schema: OFSERM
+      badge: VERIFIED
+    assertions:
+      - kind: markdown_contains
+        value: CAP943
+      - kind: meta_field_eq
+        path: schema
+        value: OFSERM
+    protects: "Phase 7 BI routing — CAP-code-shaped identifier resolves through literal index. Accepts COLUMN_LOGIC or FUNCTION_LOGIC (BI promotion path)."
+
+  - id: C14
+    tier: 1
+    query: "Why does FCT_PRODUCT_EXPOSURES differ from STG_PRODUCT_PROCESSOR for account TF1528012748-T24-COLLBLG on 2025-12-31?"
+    expected:
+      query_type: UNSUPPORTED
+      badge: DECLINED
+    assertions:
+      - kind: done_field_eq
+        path: badge
+        value: DECLINED
+      - kind: stage_message_not_emitted
+        value: "Generating SQL"
+    protects: "UNSUPPORTED reconciliation classifier rule. Highest-leverage regression target for W34c #1 (orchestrator on smaller model)."
+
+  - id: C15
+    tier: 1
+    query: "Which accounts are likely to fail next quarter?"
+    expected:
+      query_type: UNSUPPORTED
+      badge: DECLINED
+    assertions:
+      - kind: done_field_eq
+        path: badge
+        value: DECLINED
+    protects: "UNSUPPORTED forecasting/prediction backstop. Different classifier trigger phrase from C14."
+
+  - id: C16
+    tier: 1
+    # Identifier deliberately has no underscore (bypasses
+    # extract_function_candidates / function-precheck) AND matches the W45
+    # detector regex `[A-Z]{2,}[0-9]{2,}[A-Z0-9]*` (≥2 letters then ≥2 digits).
+    # The original FAKE_COLUMN_999 pin was intercepted by the precheck
+    # because of the underscore. The first re-pin to FAKEXYZ bypassed the
+    # precheck but didn't match the W45 regex (no digits after letters), so
+    # the variable_tracer ran a grounded trace instead of firing W45.
+    # FAKECOL999 satisfies both constraints.
+    query: "How is FAKECOL999 calculated?"
+    expected:
+      # "How is X calculated?" routes to VARIABLE_TRACE per the classifier
+      # prompt rule, same as C03 and C18.
+      query_type: VARIABLE_TRACE
+      badge: UNVERIFIED
+    assertions:
+      - kind: warnings_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: warnings_contain
+        value: FAKECOL999
+      - kind: markdown_contains
+        value: "FAKECOL999 — Not Found in Indexed Functions"
+      - kind: markdown_not_contains
+        value: "This function runs in"
+      - kind: markdown_contains
+        value: "### Suggested next step"
+      - kind: markdown_contains
+        value: "manifest gap report"
+    protects: "W45 truly-ungrounded path stays correct after Phase 4's multi-schema backstop. Identifier shape (no underscore) deliberately bypasses the function-precheck."
+
+  - id: C18
+    tier: 1
+    query: "How is CAP999 calculated?"
+    expected:
+      # Classifier emits VARIABLE_TRACE for "how is X calculated?" per its
+      # prompt rule (matches C03 and C16). CAP999 is not in the BI literal
+      # index, so no FUNCTION_LOGIC promotion happens — VARIABLE_TRACE stays.
+      query_type: VARIABLE_TRACE
+      badge: UNVERIFIED
+    assertions:
+      - kind: warnings_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: markdown_not_contains
+        value: "This function runs in"
+    protects: "W45 BI-shape (3-digit CAP-code) ungrounded handling. Distinct from C16 — exercises business-identifier shape specifically."
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Tier 2 — DATA_QUERY surface, pinned SQL semantics
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: C04
+    tier: 2
+    query: "What writes N_EOP_BAL?"
+    expected:
+      query_type: VARIABLE_TRACE
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: markdown_contains
+        value: FN_LOAD_OPS_RISK_DATA
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: min_citations
+        value: 1
+    protects: "Known-writers VARIABLE_TRACE in OFSMDM. Drops if model regresses on writer enumeration."
+
+  - id: C06
+    tier: 2
+    query: "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
+    expected:
+      query_type: DATA_QUERY
+      schema: OFSMDM
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_eq
+        path: type
+        value: data_query
+      - kind: done_field_eq
+        path: status
+        value: answered
+      # COUNT(*) result set is one row, so done.row_count is always 1 for an
+      # aggregate. The actual count value lives in done.summary — pin there
+      # mirroring C05's anchor pattern. W33 expected count: 669.
+      - kind: summary_contains_any
+        values: ["669"]
+      - kind: sql_contains
+        value: RTRIM
+      - kind: sql_contains
+        value: F_EXPOSURE_ENABLED_IND
+      - kind: stage_emitted
+        value: generating_sql
+      - kind: stage_emitted
+        value: validating
+      - kind: stage_emitted
+        value: fetch
+      - kind: stage_emitted
+        value: explain
+    protects: "W33 CHAR-padding fix (RTRIM in SQL) + W34a progressive stage events. Both regress silently on a wrong model."
+
+  - id: C07
+    tier: 2
+    query: "what's the v_prod_code of 601013101-8604 on 2025-12-31?"
+    # No `expected.badge`: the identifier_ambiguous response is a
+    # CLARIFICATION shape (built by ambiguity.build_identifier_ambiguous_response)
+    # that does not include a `badge` field — distinct from DECLINED. The
+    # type/status assertions below pin the CLARIFICATION shape correctly.
+    assertions:
+      - kind: done_field_eq
+        path: type
+        value: identifier_ambiguous
+      - kind: done_field_eq
+        path: status
+        value: identifier_ambiguous
+      - kind: done_field_present
+        path: message
+      - kind: stage_message_not_emitted
+        value: "Executing"
+    protects: "W22 identifier-ambiguity short-circuit — must fire before any Oracle SELECT. CLARIFICATION shape, not DECLINED."
+
+  - id: C11
+    tier: 2
+    query: "What is the total N_STD_ACCT_HEAD_AMT in FCT_STANDARD_ACCT_HEAD on 2025-12-31?"
+    expected:
+      query_type: DATA_QUERY
+      schema: OFSERM
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_eq
+        path: type
+        value: data_query
+      - kind: done_field_eq
+        path: status
+        value: answered
+      - kind: meta_field_eq
+        path: schema
+        value: OFSERM
+      - kind: sql_contains
+        value: OFSERM.FCT_STANDARD_ACCT_HEAD
+      - kind: sql_not_contains
+        value: STG_STANDARD_ACCT_HEAD
+    protects: "Phase 4 schema pivot — DATA_QUERY routes to OFSERM, schema-qualified SQL, no STG substitution."
+
+  - id: C12
+    tier: 2
+    query: "What writes N_STD_ACCT_HEAD_AMT?"
+    expected:
+      # No schema pin: N_STD_ACCT_HEAD_AMT lives in graph:index for both
+      # OFSMDM and OFSERM, so Phase 4's column-owner pivot is suppressed
+      # ("Multi-schema columns keep the orchestrator's classification" per
+      # docs/w35_phase4_summary.md). The query gets a VERIFIED grounded
+      # answer, just from the orchestrator-default schema context.
+      query_type: VARIABLE_TRACE
+      badge: VERIFIED
+    assertions:
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: min_citations
+        value: 1
+    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (badge=VERIFIED, citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot)."
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Tier 3 — manual; needs local Oracle data state
+  # ──────────────────────────────────────────────────────────────────────
+
+  - id: C08
+    tier: 3
+    query: "Why is N_EOP_BAL negative for account PK00108091TR00PKRGBP-T24-LIVEPOSG on 2025-12-31?"
+    expected:
+      badge: UNVERIFIED
+    assertions:
+      - kind: done_field_in
+        path: type
+        values: [phase2, value_trace]
+      - kind: done_field_present
+        path: origin
+      - kind: done_field_present
+        path: verification_sql
+      - kind: markdown_not_contains
+        value: "likely"
+      - kind: markdown_not_contains
+        value: "probably"
+    protects: "Phase 2 explainer + origin classifier — W34c candidate #11 regression target."
+    needs_local_data:
+      - "Account PK00108091TR00PKRGBP-T24-LIVEPOSG must exist in OFSMDM staging on 2025-12-31."
+
+  - id: C17
+    tier: 3
+    query: "Bank says N_EOP_BAL is 50000000 but system shows 100000000 for account TF1528012748-T24-COLLBLG on 2025-12-31"
+    expected:
+      query_type: DIFFERENCE_EXPLANATION
+    assertions:
+      - kind: done_field_in
+        path: type
+        values: [phase2, difference_explanation, value_trace]
+    protects: "DIFFERENCE_EXPLANATION extraction (expected_value=50M, actual_value=100M) + phase2 reconciliation backstop."
+    needs_local_data:
+      - "Account TF1528012748-T24-COLLBLG must exist in OFSMDM staging on 2025-12-31."
+      - "Bank/system values are synthetic — phase2 declines gracefully if no row matches."
