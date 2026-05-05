@@ -76,8 +76,10 @@ export default function TrustBanner({ data }) {
   const sanity = Array.isArray(data.sanity_warnings) ? data.sanity_warnings : [];
   const flags = [...warnings, ...sanity].map(parseTrustFlag);
 
-  // Hide entirely on a clean Verified-with-no-flags response.
-  if (!badge || (badge === 'VERIFIED' && flags.length === 0)) return null;
+  // Trust contract (W46, principle 2): every response renders an explicit
+  // verdict pill — silence is not the same as Verified. Only suppress when
+  // there is no badge to show at all.
+  if (!badge) return null;
 
   const meta = BADGE_META[badge] || BADGE_META.UNVERIFIED;
   const counts = flags.reduce((a, f) => ({ ...a, [f.severity]: (a[f.severity] || 0) + 1 }), {});
