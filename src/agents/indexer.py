@@ -477,10 +477,14 @@ class IndexerAgent:
         Returns:
             Dict with description, tables_read, tables_written, key_columns.
         """
-        # Use OpenAI for indexing (one-time, fast)
+        # Use OpenAI for indexing (one-time, fast).
+        # W34c: site-default is gpt-4o-mini (SITE_MODEL_DEFAULTS).
+        # OPENAI_MODEL env, when set, still wins (explicit-model arg
+        # > site default), preserving the prior override semantic.
         llm = create_llm(
             provider="openai",
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=os.getenv("OPENAI_MODEL"),
+            site="indexer.generate_description",
             temperature=self._temperature,
             max_tokens=self._max_tokens,
             json_mode=True,

@@ -482,7 +482,8 @@ class VariableTracer:
 
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o",
+            model=model,
+            site="variable_tracer.resolve_variables",
             temperature=0,
             max_tokens=4000,
             json_mode=(provider or "openai") != "anthropic",
@@ -853,7 +854,8 @@ class VariableTracer:
         # Use non-JSON mode for markdown responses
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o-mini",
+            model=model,
+            site="variable_tracer.explain_chain",
             temperature=self._temperature,
             max_tokens=4096,
             json_mode=False,
@@ -912,7 +914,8 @@ class VariableTracer:
         """
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o-mini",
+            model=model,
+            site="variable_tracer.stream_chain",
             temperature=self._temperature,
             max_tokens=4096,
             json_mode=False,
@@ -1035,7 +1038,8 @@ class VariableTracer:
 
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o-mini",
+            model=model,
+            site="variable_tracer.stream_ungrounded",
             temperature=self._temperature,
             max_tokens=4096,
             json_mode=False,
@@ -1141,7 +1145,8 @@ class VariableTracer:
 
         llm = create_llm(
             provider=provider or "openai",
-            model=model or "gpt-4o-mini",
+            model=model,
+            site="variable_tracer.stream_partial",
             temperature=self._temperature,
             max_tokens=2048,
             json_mode=False,
