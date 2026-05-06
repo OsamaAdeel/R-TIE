@@ -20,8 +20,12 @@ MODULE_DIR = PROJECT_ROOT / "db" / "modules" / "ABL_CAR_CSTM_V4"
 # ABL_CAPITAL_STRUCTURE_DATA_PROCESSING (171 nested) = 187 total.
 # 148 active in sub_processes + 9 active flat (7 pre-existing + 2 added in
 # this commit) = 150 active. 37 inactive unchanged.
-EXPECTED_TOTAL = 187
-EXPECTED_ACTIVE = 150
+# Bumped by CAT_8 add (fix/cat8-add-16-functions): +13 under
+# ABL_CAPITAL_STRUCTURE_DATA_POPULATION sub_processes (CR_INPUT_DATA_POPULATION,
+# RW_MAP_SETUP, OPS_RISK_INPUT_POPULATION, CONSOLIDATION_DATA_POPULATION) +3
+# under ABL_CAPITAL_STANDARD_ACCOUNTING_POPULATION = 16 new active tasks.
+EXPECTED_TOTAL = 203
+EXPECTED_ACTIVE = 166
 EXPECTED_INACTIVE = 37
 
 
