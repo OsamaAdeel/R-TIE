@@ -51,6 +51,46 @@ _NAME_STOPWORDS = frozenset({
     "STG_GL_DATA", "V_GL_CODE", "V_PROD_CODE", "V_LOB_CODE", "V_LV_CODE",
 })
 
+# W58.a: Table-prefix exclusions (OFSAA convention). Tables in the Capital
+# Structure / Risk schemas use these multi-letter prefixes and are never
+# function names. Real function names like ABL_CAP_MITIGANT_DATA_POPULATION,
+# CAPITAL_STD_ACCT_HEAD_POP, FN_LOAD_OPS_RISK_DATA, T2T_FCT_CCP_DETAILS_*
+# don't start with any of these prefixes — only their referenced tables do.
+_TABLE_NAME_PREFIXES = (
+    "FCT_",     # fact tables (FCT_OPS_RISK_DATA, FCT_ENTITY_INFO)
+    "DIM_",     # dimension tables (DIM_BASEL_METHODOLOGY, DIM_DATES)
+    "STG_",     # staging tables (STG_OPS_RISK_DATA, STG_GL_DATA)
+    "FSI_",     # framework / setup / interim tables (FSI_CAP_*)
+    "SETUP_",   # setup tables
+    "AAI_",     # OFSAA application infrastructure tables
+)
+
+# W58.b: OFSAA-generated internal alias / CASE-label patterns. These look like
+# function names (uppercase + underscore + length ≥ 6) but are actually local
+# identifiers inside generated MERGE/SELECT bodies — column aliases, CASE
+# labels, MERGE source/target qualifiers — and never name a callable function.
+_INTERNAL_ALIAS_PATTERNS = tuple(re.compile(p) for p in (
+    r"^EXP_\d",     # EXP_10, EXP_11, EXP_1470990981178_10, etc.
+    r"^COND_\d",    # COND_10, COND_1470990981178_10, etc.
+    r"^T_\d",       # T_1470990981178_0, T_5, etc.
+    r"^SS_",        # SS_<...> subquery aliases
+    r"^TT_",        # TT_<...> MERGE target aliases
+))
+
+# W58.c: Column-prefix exclusions (OFSAA Hungarian-style typing). Defense in
+# depth — most of these are already caught by the single-letter regex
+# _COLUMN_TYPE_PREFIX above (e.g. N_X, V_X, F_X), but listing them
+# explicitly covers edge cases like T_<digit> that the regex misses, and
+# documents the intent for future readers.
+_COLUMN_NAME_PREFIXES = (
+    "N_",   # numeric (N_EOP_BAL, N_ANNUAL_GROSS_INCOME, N_SHAREHOLDING_PERCENT)
+    "V_",   # varchar (V_LV_CODE, V_STD_ACCT_HEAD_ID, V_GL_CODE)
+    "F_",   # flag (F_CAP_CONSL_ENTITY_IND, F_REGULATORY_ENTITY_IND)
+    "D_",   # date (D_FINANCIAL_YEAR, D_CALENDAR_DATE)
+    "I_",   # indicator/integer
+    "T_",   # timestamp (also covered by _INTERNAL_ALIAS_PATTERNS for T_<digit>)
+)
+
 # Schemas to check when resolving a function name are now discovered at
 # runtime via src.parsing.schema_discovery.discovered_schemas(redis_client),
 # which scans graph:* keys and falls back to manifest.RECOGNIZED_SCHEMAS
@@ -489,6 +529,13 @@ def extract_function_candidates(query: str) -> List[str]:
       * stopwords (known parameter/column names) are dropped
       * single-letter type-prefixed tokens (``N_...``, ``V_...``, ``F_...``)
         are dropped — OFSAA uses these for column names, never functions
+      * W58.a: table-prefixed tokens (``FCT_``, ``DIM_``, ``STG_``,
+        ``FSI_``, ``SETUP_``, ``AAI_``) are dropped — these name tables
+      * W58.b: OFSAA-generated alias patterns (``EXP_<digit>``,
+        ``COND_<digit>``, ``T_<digit>``, ``SS_*``, ``TT_*``) are dropped
+        — these are local identifiers inside generated SQL bodies
+      * W58.c: multi-character column-prefix tokens are dropped as
+        defense-in-depth alongside the single-letter regex
 
     Case is preserved on the way out so callers can log the original
     spelling.
@@ -506,6 +553,15 @@ def extract_function_candidates(query: str) -> List[str]:
         if cand_upper in _NAME_STOPWORDS:
             continue
         if _COLUMN_TYPE_PREFIX.match(cand_upper):
+            continue
+        # W58.a: OFSAA table-name prefixes.
+        if any(cand_upper.startswith(p) for p in _TABLE_NAME_PREFIXES):
+            continue
+        # W58.c: OFSAA column-name prefixes (defense-in-depth).
+        if any(cand_upper.startswith(p) for p in _COLUMN_NAME_PREFIXES):
+            continue
+        # W58.b: OFSAA-generated internal alias / CASE-label patterns.
+        if any(p.match(cand_upper) for p in _INTERNAL_ALIAS_PATTERNS):
             continue
         out.append(cand)
     return out
