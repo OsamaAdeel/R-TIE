@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Star, Pencil, Trash2 } from 'lucide-react';
+import { ChevronDown, Star, Pencil, Trash2, Download } from 'lucide-react';
 import clsx from 'clsx';
 
 // Topbar — editable trace title with an actions menu (Star/Rename/Delete).
-// The model picker has moved to the Composer per the redesign, so the right
-// side is intentionally empty for now.
-export default function Topbar({ title, msgCount, isStarred, onStar, onRename, onDelete }) {
+// The right side hosts an Export button (markdown dump of the current
+// trace) — useful for offline review while iterating on queries.
+export default function Topbar({ title, msgCount, isStarred, onStar, onRename, onDelete, onExport }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef(null);
 
@@ -90,8 +90,20 @@ export default function Topbar({ title, msgCount, isStarred, onStar, onRename, o
         )}
       </div>
 
-      {/* right side intentionally empty — model picker lives in Composer */}
-      <div />
+      <div className="flex items-center gap-1">
+        {onExport && msgCount > 0 && (
+          <button
+            type="button"
+            onClick={onExport}
+            title="Export chat as Markdown"
+            aria-label="Export chat as Markdown"
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-ivory-dim hover:text-ivory hover:bg-hover transition-colors"
+          >
+            <Download size={13} />
+            <span>Export</span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

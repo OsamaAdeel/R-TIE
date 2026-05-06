@@ -4,6 +4,7 @@ import ChatInput from '../components/ChatInput';
 import Topbar from '../components/Topbar';
 import BrandMark from '../components/BrandMark';
 import { ChevronDown } from 'lucide-react';
+import { downloadSessionAsMarkdown } from '../lib/exportMarkdown';
 
 const NEAR_BOTTOM_THRESHOLD = 100;
 
@@ -68,6 +69,7 @@ export default function Chat({
           onStar={onStarActive}
           onRename={onRenameActive}
           onDelete={onDeleteActive}
+          onExport={session ? () => downloadSessionAsMarkdown(session) : undefined}
         />
 
         {/* Messages area */}
