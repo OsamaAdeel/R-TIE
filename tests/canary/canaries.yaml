@@ -67,8 +67,8 @@ canaries:
       - kind: min_citations
         value: 1
       - kind: warnings_contain
-        value: "GROUNDING:"
-    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact, AND W57 grounding enforcement actively catches the line-198-369 padding fabrication. Regression to badge=VERIFIED with no GROUNDING: warning would mean fabrications are silently rubber-stamping again."
+        value: "GROUNDING-HIGH:"
+    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact, AND W57 grounding enforcement actively catches the line-198-369 padding fabrication PLUS the unsupported pass-through template phrase. Regression to badge=VERIFIED with no GROUNDING-HIGH: warning would mean content-trust fabrications are silently rubber-stamping again. (Note: some runs may emit only GROUNDING-LOW: padding signals without the HIGH template-phrase catch — see severity-tiers PR report for empirical variability.)"
 
   - id: C02
     tier: 1
@@ -403,8 +403,8 @@ canaries:
       - kind: min_citations
         value: 1
       - kind: warnings_contain
-        value: "GROUNDING:"
-    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot). W57 enforcement actively catches the cited-functions-not-in-sources fabrication; regression to badge=VERIFIED with no GROUNDING: warning would mean fabricated step-chains can rubber-stamp again."
+        value: "GROUNDING-HIGH:"
+    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot). W57 enforcement actively catches the chain-of-non-retrieved-functions fabrication via the HIGH-severity chain-coherence check; regression to badge=VERIFIED with no GROUNDING-HIGH: warning would mean fabricated step-chains can rubber-stamp again."
 
   # ──────────────────────────────────────────────────────────────────────
   # Tier 3 — manual; needs local Oracle data state

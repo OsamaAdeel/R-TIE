@@ -254,9 +254,11 @@ def evaluate_grounding(
     # W57: post-generation grounding enforcement. Runs six independent
     # content checks (per-claim binding, citation cap, anchoring, chain
     # coherence, hierarchy/body consistency, template phrases, self-aware
-    # caveat) and appends warnings for any that fire. The existing badge
-    # logic below picks up these warnings and downgrades VERIFIED →
-    # UNVERIFIED automatically.
+    # caveat) and appends warnings for any that fire. Each W57 warning
+    # carries its severity in the prefix: GROUNDING-HIGH: blocks the
+    # badge; GROUNDING-LOW: is advisory only. Pre-existing warnings
+    # (CONTRADICTION, UNGROUNDED_IDENTIFIERS, NAMED_FUNCTION_NOT_RETRIEVED,
+    # CITATIONS, etc.) keep their prior blocking behavior.
     if query_type in _REQUIRES_CITATIONS:
         try:
             w57_warnings = w57_enforce_grounding(
@@ -275,6 +277,15 @@ def evaluate_grounding(
                 "pre-W57 grounding verdict: %s", exc,
             )
 
+    # A warning blocks (forces UNVERIFIED) unless it's a W57 LOW-severity
+    # advisory. Padding-only signals (range-repeat, citation-count cap)
+    # ride along under GROUNDING-LOW: and don't flip the badge — they
+    # surface to the user via the TrustBanner as a citation-hygiene
+    # advisory while VERIFIED stands.
+    blocking_warnings = [
+        w for w in warnings if not w.startswith("GROUNDING-LOW:")
+    ]
+
     if requires_citations and not has_citations:
         badge = "UNVERIFIED"
         confidence = 0.0
@@ -282,7 +293,7 @@ def evaluate_grounding(
             "CITATIONS: response has no line references and no functions were "
             "analyzed — cannot verify grounding"
         )
-    elif warnings:
+    elif blocking_warnings:
         badge = "UNVERIFIED"
         confidence = 0.4 if citations else 0.2
     else:
@@ -673,14 +684,14 @@ def _w57_check_per_claim_binding(
         fn_upper = fn_name.upper()
         if fn_upper not in sources_upper:
             warnings.append(
-                f"GROUNDING: cited function '{fn_name}' not in retrieved "
+                f"GROUNDING-HIGH: cited function '{fn_name}' not in retrieved "
                 f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
             )
             continue
         max_line = sources_upper[fn_upper]
         if max_line and (start > max_line or end > max_line):
             warnings.append(
-                f"GROUNDING: cited range {start}-{end} for '{fn_name}' "
+                f"GROUNDING-HIGH: cited range {start}-{end} for '{fn_name}' "
                 f"exceeds source length ({max_line} lines)"
             )
 
@@ -693,7 +704,7 @@ def _w57_check_per_claim_binding(
         if count > _W57_RANGE_REPEAT_THRESHOLD:
             label = f"Lines {start}-{end}" if end != start else f"Line {start}"
             warnings.append(
-                f"GROUNDING: {label} cited {count} times "
+                f"GROUNDING-LOW: {label} cited {count} times "
                 f"(threshold {_W57_RANGE_REPEAT_THRESHOLD}); likely "
                 f"line-by-line padding rather than per-claim binding"
             )
@@ -735,7 +746,7 @@ def _w57_check_citation_count_cap(markdown: str) -> List[str]:
     citation_events = sum(1 for _ in _LINE_REF_RE.finditer(markdown))
     if citation_events > _W57_CITATION_CAP:
         return [
-            f"GROUNDING: response has {citation_events} line citations "
+            f"GROUNDING-LOW: response has {citation_events} line citations "
             f"(cap {_W57_CITATION_CAP}); likely line-by-line padding "
             f"rather than per-claim binding"
         ]
@@ -798,7 +809,7 @@ def _w57_check_anchoring(
     threshold = max(asked_count, 1) * _W57_PRIMARY_DOMINANCE_RATIO
     if top_other_count > threshold:
         return [
-            f"GROUNDING: user asked about '{asked[0]}' "
+            f"GROUNDING-HIGH: user asked about '{asked[0]}' "
             f"({asked_count} mentions) but response primarily cites "
             f"'{top_other_fn}' ({top_other_count} mentions, "
             f">{_W57_PRIMARY_DOMINANCE_RATIO}x ratio)"
@@ -896,7 +907,7 @@ def _w57_check_chain_coherence(
         a, b = step_fns[i], step_fns[i + 1]
         if a not in fn_tables or b not in fn_tables:
             warnings.append(
-                f"GROUNDING: response presents '{a}' → '{b}' as "
+                f"GROUNDING-HIGH: response presents '{a}' → '{b}' as "
                 f"sequential steps, but at least one is not in "
                 f"retrieved sources"
             )
@@ -904,7 +915,7 @@ def _w57_check_chain_coherence(
         shared = fn_tables[a] & fn_tables[b]
         if not shared:
             warnings.append(
-                f"GROUNDING: response presents '{a}' → '{b}' as "
+                f"GROUNDING-HIGH: response presents '{a}' → '{b}' as "
                 f"sequential steps, but their sources share no table "
                 f"references (no chain support detected)"
             )
@@ -972,7 +983,7 @@ def _w57_check_hierarchy_body_consistency(
         return []  # no batch info anywhere; can't compare
     if banner_batch not in cited_batches:
         return [
-            f"GROUNDING: hierarchy banner names batch "
+            f"GROUNDING-HIGH: hierarchy banner names batch "
             f"'{banner_batch}' but cited functions belong to "
             f"batch(es) {sorted(cited_batches)}; banner and body disagree"
         ]
@@ -1006,7 +1017,7 @@ def _w57_check_template_phrases(
             supported = False
         if not supported:
             warnings.append(
-                f"GROUNDING: response contains template phrase "
+                f"GROUNDING-HIGH: response contains template phrase "
                 f"'{phrase}' but no cited source supports it"
             )
     return warnings
@@ -1026,7 +1037,7 @@ def _w57_check_caveat_vs_badge(markdown: str) -> List[str]:
     for trigger in _W57_CAVEAT_TRIGGERS:
         if trigger in lower:
             return [
-                f"GROUNDING: response contains self-aware caveat "
+                f"GROUNDING-HIGH: response contains self-aware caveat "
                 f"('{trigger}'); badge auto-flipped to UNVERIFIED"
             ]
     return []
@@ -1041,13 +1052,23 @@ def w57_enforce_grounding(
 ) -> List[str]:
     """Run all six W57 grounding checks. Returns combined warnings list.
 
-    An empty return means the response passed every check. Any non-empty
-    return causes the existing badge logic in :func:`evaluate_grounding`
-    to downgrade VERIFIED → UNVERIFIED, and the warnings are surfaced in
-    the SSE done payload for the frontend's TrustBanner to render.
+    Each warning carries its severity in the prefix:
 
-    Each check is independent: their order does not matter, and a
-    failure in one does not affect the others.
+      * ``GROUNDING-HIGH:`` — content trust violation. Hallucinated
+        function references, unbound citation ranges, asked-about-
+        function mismatch, fabricated chains, hierarchy/body
+        contradictions, unsupported template claims, self-flagged
+        caveats. These flip the badge to UNVERIFIED via the badge
+        logic in :func:`evaluate_grounding`.
+      * ``GROUNDING-LOW:`` — citation hygiene only. Range repeated
+        more than the threshold, total citation count above the cap.
+        These signal padding but the cited content may still be
+        correct, so they surface as an advisory in the TrustBanner
+        without flipping the badge.
+
+    An empty return means the response passed every check. Each check
+    is independent: their order does not matter, and a failure in one
+    does not affect the others.
 
     Output is deduplicated by exact message text (order-preserving,
     first occurrence wins). The per-claim-binding check otherwise
