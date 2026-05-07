@@ -16,6 +16,11 @@ const SEVERITY_BY_CODE = {
   HALLUCINATED_FUNCTION: 'error',
   UNKNOWN_FUNCTION: 'error',
   INVENTED_NUMERIC_VALUE: 'error',
+  // W57: post-generation grounding-enforcement flags. All six checks emit
+  // their warnings under this single prefix; the message body identifies
+  // which sub-check fired (citation cap, range repeat, anchoring,
+  // chain coherence, hierarchy/body, template phrase, self-aware caveat).
+  GROUNDING: 'error',
   PARTIAL_SOURCE_INDEXED: 'warn',
   RELEVANCE: 'warn',
   OUTPUT: 'warn',
