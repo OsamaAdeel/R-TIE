@@ -181,12 +181,16 @@ def test_check3b_fail_no_shared_tables():
     """Two functions presented as steps but their sources share no
     table references."""
     md = (
-        "## Step 1: FN_A\n\nDoes things.\n\n"
-        "## Step 2: FN_B\n\nDoes other things."
+        "## Step 1: FN_FOOBAR\n\nDoes things.\n\n"
+        "## Step 2: FN_BARBAZ\n\nDoes other things."
     )
     multi = {
-        "FN_A": {"source_code": [{"line": 1, "text": "INSERT INTO FCT_X"}]},
-        "FN_B": {"source_code": [{"line": 1, "text": "INSERT INTO FCT_Y"}]},
+        "FN_FOOBAR": {"source_code": [
+            {"line": 1, "text": "INSERT INTO FCT_X"}
+        ]},
+        "FN_BARBAZ": {"source_code": [
+            {"line": 1, "text": "INSERT INTO FCT_Y"}
+        ]},
     }
     warnings = _w57_check_chain_coherence(md, multi)
     assert any("share no table references" in w for w in warnings)
@@ -195,12 +199,33 @@ def test_check3b_fail_no_shared_tables():
 def test_check3b_pass_shared_table():
     """Two functions share a table — chain link is supported."""
     md = (
-        "## Step 1: FN_A\n\n## Step 2: FN_B\n\n"
+        "## Step 1: FN_FOOBAR\n\n## Step 2: FN_BARBAZ\n\n"
     )
     multi = {
-        "FN_A": {"source_code": [{"line": 1, "text": "INSERT INTO FCT_SHARED"}]},
-        "FN_B": {"source_code": [{"line": 1, "text": "SELECT FROM FCT_SHARED"}]},
+        "FN_FOOBAR": {"source_code": [
+            {"line": 1, "text": "INSERT INTO FCT_SHARED"}
+        ]},
+        "FN_BARBAZ": {"source_code": [
+            {"line": 1, "text": "SELECT FROM FCT_SHARED"}
+        ]},
     }
+    assert _w57_check_chain_coherence(md, multi) == []
+
+
+def test_check3b_skips_internal_alias_step_labels():
+    """Regression: chain regex used to capture CASE labels like 'EXP_'
+    and SQL keywords like 'MERGE' from generated step headers and then
+    falsely flag them as 'not in retrieved sources'. Real-world hit:
+    C09 in the post-W57 canary run. The check must filter such tokens
+    out before declaring a chain claim exists."""
+    md = (
+        "## Step 1: EXP_\n\nDoes things.\n\n"
+        "## Step 2: MERGE\n\nDoes other things."
+    )
+    multi = {"FN_FOOBAR": {"source_code": [{"line": 1, "text": "x"}]}}
+    # Both step labels are filtered (EXP_ matches internal-alias, MERGE
+    # is < 6 chars and is in the not-real keyword list); after filtering,
+    # fewer than 2 step functions remain and no warning fires.
     assert _w57_check_chain_coherence(md, multi) == []
 
 
@@ -431,3 +456,87 @@ def test_evaluate_grounding_data_query_skips_w57():
     )
     # No W57 warnings should appear for non-explanation query types.
     assert all("GROUNDING:" not in w for w in result["warnings"])
+
+
+# ===========================================================================
+# Warning deduplication (post-canary follow-up)
+# ===========================================================================
+
+def test_w57_dedupes_identical_warnings():
+    """C13 case: 13 (FN_NAME, Lines X-Y) citations to a function not in
+    retrieved sources emit 13 identical warnings from the per-claim
+    binding check. After dedup, the user sees one entry per unique
+    problem."""
+    md = " ".join(
+        f"(REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP, Lines {i}-{i+2})"
+        for i in range(10, 23)
+    )
+    multi = {"CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION": {
+        "source_code": _src(50)
+    }}
+    warnings = w57_enforce_grounding(
+        raw_query="How is CAP943 calculated?",
+        markdown=md,
+        multi_source=multi,
+        functions_analyzed=["CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION"],
+        redis_client=None,
+    )
+    # Each citation has a distinct line range, so the per-claim binding
+    # check fires 13 times — but the warning text is identical for
+    # every "cited function not in retrieved sources" emission. After
+    # dedup the user sees that message exactly once.
+    not_in_sources = [
+        w for w in warnings
+        if "REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP" in w
+        and "not in retrieved sources" in w
+    ]
+    assert len(not_in_sources) == 1
+
+
+def test_w57_dedup_preserves_order():
+    """First-occurrence wins. The order in which checks run determines
+    the order of warnings; dedup must not reshuffle survivors."""
+    # Construct a markdown that triggers (in this order):
+    #   1. range-repeat (per-claim binding, fires first)
+    #   2. citation count cap (Check 2, fires second)
+    md = " ".join(f"(Lines 5-10)." for _ in range(60))
+    warnings = w57_enforce_grounding(
+        raw_query="How does FN_FOO work?",
+        markdown=md,
+        multi_source={"FN_FOO": {"source_code": _src(100)}},
+        functions_analyzed=["FN_FOO"],
+        redis_client=None,
+    )
+    # Both fire; the range-repeat warning comes from Check 1 (first in
+    # the aggregation order) and must precede the cap warning.
+    repeat_idx = next(
+        i for i, w in enumerate(warnings) if "cited 60 times" in w
+    )
+    cap_idx = next(
+        i for i, w in enumerate(warnings) if "60 line citations" in w
+    )
+    assert repeat_idx < cap_idx
+
+
+def test_w57_dedup_keeps_distinct_messages():
+    """Distinct warnings (different message text) survive dedup as
+    separate entries — dedup must not collapse genuine variety."""
+    md = (
+        # Padding fires
+        " ".join(f"(Lines 5-10)." for _ in range(5))
+        # Self-aware caveat fires
+        + " The explanation may describe functions related to FN_FOO."
+    )
+    warnings = w57_enforce_grounding(
+        raw_query="How does FN_FOO work?",
+        markdown=md,
+        multi_source={"FN_FOO": {"source_code": _src(100)}},
+        functions_analyzed=["FN_FOO"],
+        redis_client=None,
+    )
+    # Two distinct warnings, neither collapsed.
+    assert any("cited 5 times" in w for w in warnings)
+    assert any("self-aware caveat" in w for w in warnings)
+    # And total length matches unique message count — no
+    # accidental truncation.
+    assert len(warnings) == len(set(warnings))

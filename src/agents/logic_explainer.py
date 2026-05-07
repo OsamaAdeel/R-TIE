@@ -811,6 +811,16 @@ _W57_STEP_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 
+# Internal-alias / OFSAA-generated identifiers that the step-header regex
+# can match but that are NOT real function names. Mirrors the W58
+# exclusions in src.agents.orchestrator (EXP_<n>, COND_<n>, T_<n>, SS_,
+# TT_) plus a skip for the literal SQL keyword MERGE which is too short
+# to be a real OFSAA function name and shows up as a CASE branch label
+# in generated MERGE INTO bodies.
+_W57_STEP_FN_NOT_REAL_RE = re.compile(
+    r"^(EXP_\d|COND_\d|T_\d|SS_|TT_|MERGE\b|INSERT\b|UPDATE\b|SELECT\b)"
+)
+
 
 def _w57_check_chain_coherence(
     markdown: str,
@@ -830,10 +840,22 @@ def _w57_check_chain_coherence(
         return []
 
     # Preserve order; ignore duplicate function names within steps.
+    # Filter out tokens that aren't function names: too-short tokens,
+    # OFSAA Hungarian column prefixes (N_X, V_X, etc.), and OFSAA
+    # internal aliases (EXP_<n>, COND_<n>, T_<n>, SS_, TT_) plus bare
+    # SQL keywords (MERGE / INSERT / UPDATE / SELECT) the regex picks
+    # up when a step header introduces an inline statement instead of
+    # a function name.
     seen_fns: set[str] = set()
     step_fns: List[str] = []
     for m in matches:
         fn = m.group(2).upper()
+        if len(fn) < 6:
+            continue
+        if _FN_COLUMN_PREFIX_RE.match(fn):
+            continue
+        if _W57_STEP_FN_NOT_REAL_RE.match(fn):
+            continue
         if fn in seen_fns:
             continue
         seen_fns.add(fn)
@@ -1026,6 +1048,14 @@ def w57_enforce_grounding(
 
     Each check is independent: their order does not matter, and a
     failure in one does not affect the others.
+
+    Output is deduplicated by exact message text (order-preserving,
+    first occurrence wins). The per-claim-binding check otherwise
+    emits the same "cited function not in retrieved sources" warning
+    once per matching citation pattern, which would render the same
+    line 13× in the TrustBanner for one fabrication. Dedup at this
+    layer keeps the trust contract intact (each unique problem still
+    flips the badge) while presenting a clean list to the user.
     """
     warnings: List[str] = []
     warnings.extend(_w57_check_per_claim_binding(
@@ -1041,7 +1071,15 @@ def w57_enforce_grounding(
     ))
     warnings.extend(_w57_check_template_phrases(markdown, multi_source))
     warnings.extend(_w57_check_caveat_vs_badge(markdown))
-    return warnings
+
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for w in warnings:
+        if w in seen:
+            continue
+        seen.add(w)
+        deduped.append(w)
+    return deduped
 
 
 EXPLANATION_SYSTEM_PROMPT = """You are an expert PL/SQL analyst for the RTIE system (Regulatory Trace & Intelligence Engine).
