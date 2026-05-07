@@ -16,10 +16,14 @@ const SEVERITY_BY_CODE = {
   HALLUCINATED_FUNCTION: 'error',
   UNKNOWN_FUNCTION: 'error',
   INVENTED_NUMERIC_VALUE: 'error',
-  // W57: post-generation grounding-enforcement flags. All six checks emit
-  // their warnings under this single prefix; the message body identifies
-  // which sub-check fired (citation cap, range repeat, anchoring,
-  // chain coherence, hierarchy/body, template phrase, self-aware caveat).
+  // W57: post-generation grounding-enforcement flags. Severity is
+  // carried in the prefix so the badge logic can gate on HIGH-only:
+  //   GROUNDING-HIGH → content trust violation (badge UNVERIFIED)
+  //   GROUNDING-LOW  → citation hygiene only (badge stays VERIFIED)
+  // The legacy GROUNDING: prefix is kept for one release as a safety
+  // net for any stale build still emitting the un-tiered form.
+  'GROUNDING-HIGH': 'error',
+  'GROUNDING-LOW': 'warn',
   GROUNDING: 'error',
   PARTIAL_SOURCE_INDEXED: 'warn',
   RELEVANCE: 'warn',
@@ -41,8 +45,11 @@ const BADGE_META = {
 };
 
 function parseTrustFlag(raw) {
-  // Match "CODE: detail" / "code: detail" / colonless prose
-  const m = String(raw).match(/^([A-Za-z][A-Za-z0-9_]*):\s*(.+)$/s);
+  // Match "CODE: detail" / "code: detail" / colonless prose. Hyphens
+  // are allowed inside the code so that severity-tiered W57 prefixes
+  // (GROUNDING-HIGH / GROUNDING-LOW) are recognised as distinct codes
+  // rather than collapsing back to "GROUNDING".
+  const m = String(raw).match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.+)$/s);
   if (!m) {
     return { code: 'NOTE', displayCode: 'Note', severity: 'warn', message: String(raw), related: [] };
   }

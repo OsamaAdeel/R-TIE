@@ -420,7 +420,10 @@ def test_evaluate_grounding_a1_clean_remains_verified():
         redis_client=None,
     )
     assert result["badge"] == "VERIFIED"
-    assert all("GROUNDING:" not in w for w in result["warnings"])
+    # No W57 warnings of any tier (HIGH or LOW). The "GROUNDING-"
+    # substring is shared by both tiered prefixes and not produced by
+    # any pre-existing warning code.
+    assert all("GROUNDING-" not in w for w in result["warnings"])
 
 
 def test_evaluate_grounding_d1_caveat_flips_badge():
@@ -455,7 +458,10 @@ def test_evaluate_grounding_data_query_skips_w57():
         redis_client=None,
     )
     # No W57 warnings should appear for non-explanation query types.
-    assert all("GROUNDING:" not in w for w in result["warnings"])
+    # No W57 warnings of any tier (HIGH or LOW). The "GROUNDING-"
+    # substring is shared by both tiered prefixes and not produced by
+    # any pre-existing warning code.
+    assert all("GROUNDING-" not in w for w in result["warnings"])
 
 
 # ===========================================================================
@@ -540,3 +546,103 @@ def test_w57_dedup_keeps_distinct_messages():
     # And total length matches unique message count — no
     # accidental truncation.
     assert len(warnings) == len(set(warnings))
+
+
+# ===========================================================================
+# Severity tiering (W57 follow-up: GROUNDING-HIGH vs GROUNDING-LOW)
+# ===========================================================================
+
+def test_low_severity_does_not_flip_badge():
+    """Padding-only signals (Check 2: total citations >50) are LOW
+    severity. They surface as advisories but the badge stays VERIFIED."""
+    md = " ".join(f"(Lines {10*i}-{10*i+5})." for i in range(1, 60))
+    result = evaluate_grounding(
+        raw_query="How does FN_FOOBAR work?",
+        markdown=md,
+        multi_source={"FN_FOOBAR": {"source_code": _src(700)}},
+        functions_analyzed=["FN_FOOBAR"],
+        query_type="COLUMN_LOGIC",
+        redis_client=None,
+    )
+    assert result["badge"] == "VERIFIED"
+    assert any(w.startswith("GROUNDING-LOW:") for w in result["warnings"])
+    assert not any(w.startswith("GROUNDING-HIGH:") for w in result["warnings"])
+
+
+def test_high_severity_flips_badge():
+    """Content trust violations (Check 6: self-aware caveat) are HIGH
+    severity. Badge flips to UNVERIFIED even when no other signal fires."""
+    md = (
+        "Step 1 (Lines 5-10).\n\n"
+        "The explanation below may describe functions related to FN_FOOBAR."
+    )
+    result = evaluate_grounding(
+        raw_query="How does FN_FOOBAR work?",
+        markdown=md,
+        multi_source={"FN_FOOBAR": {"source_code": _src(100)}},
+        functions_analyzed=["FN_FOOBAR"],
+        query_type="COLUMN_LOGIC",
+        redis_client=None,
+    )
+    assert result["badge"] == "UNVERIFIED"
+    assert any(w.startswith("GROUNDING-HIGH:") for w in result["warnings"])
+
+
+def test_mixed_severity_flips_on_high():
+    """When both LOW and HIGH warnings fire, the HIGH wins — badge
+    UNVERIFIED, both warnings preserved in the list."""
+    # Range repeated 5× → Check 1.3 LOW.
+    # Plus an unsupported "PASS-THROUGH" template phrase → Check 5 HIGH.
+    md = (
+        " ".join("(Lines 5-10)." for _ in range(5))
+        + " The function is a pass-through with no internal gating."
+    )
+    multi = {"FN_FOOBAR": {"source_code": [
+        # Source has MERGE INTO + multiple INSERTs → "pass-through"
+        # claim is unsupported, and IF/CASE present so "no internal
+        # gating" is also unsupported.
+        {"line": i, "text": (
+            "INSERT INTO FCT_X SELECT * FROM STG_X; "
+            "MERGE INTO FCT_Y; IF v_flag THEN ..."
+        )} for i in range(1, 50)
+    ]}}
+    result = evaluate_grounding(
+        raw_query="How does FN_FOOBAR work?",
+        markdown=md,
+        multi_source=multi,
+        functions_analyzed=["FN_FOOBAR"],
+        query_type="COLUMN_LOGIC",
+        redis_client=None,
+    )
+    assert result["badge"] == "UNVERIFIED"
+    has_low = any(w.startswith("GROUNDING-LOW:") for w in result["warnings"])
+    has_high = any(w.startswith("GROUNDING-HIGH:") for w in result["warnings"])
+    assert has_low and has_high
+
+
+def test_b3_style_over_cited_correct_answer_stays_verified():
+    """Manual B3 fixture: 296 citations to one valid line range, content
+    is otherwise correct (no anchoring/template/hierarchy issues). Per
+    the severity-tier design, this is padding-only (Check 1.3 LOW + Check 2
+    LOW) — badge must stay VERIFIED with a citation-hygiene advisory."""
+    md = " ".join(f"Step {i}: explained (Lines 30-40)." for i in range(1, 297))
+    result = evaluate_grounding(
+        raw_query="How does FN_FOOBAR work?",
+        markdown=md,
+        multi_source={"FN_FOOBAR": {"source_code": _src(500)}},
+        functions_analyzed=["FN_FOOBAR"],
+        query_type="COLUMN_LOGIC",
+        redis_client=None,
+    )
+    # Over-cited correct answer: VERIFIED + LOW advisory.
+    assert result["badge"] == "VERIFIED"
+    low_warnings = [
+        w for w in result["warnings"] if w.startswith("GROUNDING-LOW:")
+    ]
+    high_warnings = [
+        w for w in result["warnings"] if w.startswith("GROUNDING-HIGH:")
+    ]
+    assert low_warnings, "expected at least one GROUNDING-LOW: advisory"
+    assert not high_warnings, (
+        f"unexpected HIGH warnings on padding-only fabrication: {high_warnings}"
+    )
