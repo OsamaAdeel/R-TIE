@@ -1025,35 +1025,101 @@ def _w57_check_hierarchy_body_consistency(
     return []
 
 
+def _w57_resolve_primary_function(
+    markdown: str,
+    asked_about_function: Optional[str],
+    multi_source: Dict[str, Any],
+) -> Optional[str]:
+    """Pick the function that a content claim in *markdown* is about.
+
+    Used by content-validation checks (currently Check 5) to decide
+    which retrieved source to validate the claim against. The previous
+    "concatenate every retrieved source" approach was unsound: a
+    response correctly describing function X as pass-through would be
+    flagged when an unrelated sibling Y in multi_source happened to be
+    a multi-INSERT, because the concatenation tripped Y's pattern.
+
+    Priority order (return the first match):
+      1. *asked_about_function* if it appears in *multi_source*
+         (case-insensitive). The user's named target wins.
+      2. The function name in *multi_source* most-cited inside
+         *markdown*. If the response keeps naming function F, the
+         template claim is almost certainly about F.
+      3. The single function in *multi_source* if there is exactly
+         one. Single-function answers are unambiguous.
+
+    Returns ``None`` when none of the above resolves — caller should
+    skip the check rather than guess.
+    """
+    if asked_about_function:
+        target_upper = asked_about_function.upper()
+        for fn in multi_source:
+            if fn.upper() == target_upper:
+                return fn
+
+    body_upper = markdown.upper()
+    counts: List[tuple] = []
+    for fn in multi_source:
+        c = body_upper.count(fn.upper())
+        if c > 0:
+            counts.append((fn, c))
+    if counts:
+        counts.sort(key=lambda x: -x[1])
+        return counts[0][0]
+
+    if len(multi_source) == 1:
+        return next(iter(multi_source))
+
+    return None
+
+
 def _w57_check_template_phrases(
     markdown: str,
     multi_source: Dict[str, Any],
+    asked_about_function: Optional[str] = None,
 ) -> List[str]:
     """W57 Check 5: detect generic template phrases the model produces
     when it hasn't actually read the source.
 
     Each phrase has a validator. The phrase being present is a soft
-    signal; the validator confirms by checking whether ANY cited source
-    actually supports the claim. Mismatch → warning.
+    signal; the validator confirms by checking whether the asked-about
+    function's source actually supports the claim. Mismatch → warning.
+
+    The validator is anchored to a single function (resolved by
+    :func:`_w57_resolve_primary_function`) instead of every retrieved
+    source. The previous "validate against every cited function"
+    approach false-positively flagged correct claims about function X
+    whenever an unrelated sibling Y in multi_source happened to fail
+    the predicate. When the target can't be resolved at all, the
+    check skips rather than guess.
     """
     warnings: List[str] = []
     lower = _w57_ascii_normalize(markdown).lower()
     if not multi_source:
         return warnings
-    # Concatenate all cited sources for the validator. A template claim
-    # is grounded if SOME cited function supports it.
-    full_source = _concat_multi_source(multi_source)
+
+    target_fn = _w57_resolve_primary_function(
+        markdown, asked_about_function, multi_source,
+    )
+    if target_fn is None:
+        return warnings
+
+    # Source for the resolved target only — reuses _concat_multi_source
+    # by passing a single-key view rather than a new helper.
+    target_source = _concat_multi_source({target_fn: multi_source[target_fn]})
+
     for phrase, validator in _W57_TEMPLATE_PHRASES:
         if phrase not in lower:
             continue
         try:
-            supported = validator(full_source)
+            supported = validator(target_source)
         except Exception:
             supported = False
         if not supported:
             warnings.append(
                 f"GROUNDING-HIGH: response contains template phrase "
-                f"'{phrase}' but no cited source supports it"
+                f"'{phrase}' but cited source for '{target_fn}' "
+                f"does not support it"
             )
     return warnings
 
@@ -1113,6 +1179,12 @@ def w57_enforce_grounding(
     layer keeps the trust contract intact (each unique problem still
     flips the badge) while presenting a clean list to the user.
     """
+    # Derive the asked-about function from the query once; reused by
+    # Check 5 (template-phrase scope). Uses the same extractor as
+    # Check 3a so the two checks agree on the user's named target.
+    asked_candidates = _extract_function_candidates_local(raw_query)
+    asked_about_function = asked_candidates[0] if asked_candidates else None
+
     warnings: List[str] = []
     warnings.extend(_w57_check_per_claim_binding(
         markdown, multi_source, functions_analyzed
@@ -1125,7 +1197,9 @@ def w57_enforce_grounding(
     warnings.extend(_w57_check_hierarchy_body_consistency(
         markdown, multi_source, redis_client
     ))
-    warnings.extend(_w57_check_template_phrases(markdown, multi_source))
+    warnings.extend(_w57_check_template_phrases(
+        markdown, multi_source, asked_about_function=asked_about_function,
+    ))
     warnings.extend(_w57_check_caveat_vs_badge(markdown))
 
     seen: set[str] = set()
