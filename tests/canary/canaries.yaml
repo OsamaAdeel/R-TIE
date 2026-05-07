@@ -46,7 +46,14 @@ canaries:
     expected:
       query_type: COLUMN_LOGIC
       schema: OFSMDM
-      badge: VERIFIED
+      # W57 retroactive catch (was VERIFIED pre-W57): the LLM emits an
+      # 18× repeat of "Lines 198-369" plus an unsupported "PASS-THROUGH"
+      # template phrase for FN_LOAD_OPS_RISK_DATA. Pre-W57 this rubber-
+      # stamped as VERIFIED; the new grounding-enforcement layer flags
+      # it as line-by-line padding + unsupported template claim. Until
+      # the LLM stops emitting that pattern (or we plumb the source body
+      # past the size threshold), UNVERIFIED is the correct verdict.
+      badge: UNVERIFIED
     assertions:
       - kind: done_field_neq
         path: type
@@ -59,7 +66,9 @@ canaries:
         value: PARTIAL_SOURCE
       - kind: min_citations
         value: 1
-    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact."
+      - kind: warnings_contain
+        value: "GROUNDING:"
+    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact, AND W57 grounding enforcement actively catches the line-198-369 padding fabrication. Regression to badge=VERIFIED with no GROUNDING: warning would mean fabrications are silently rubber-stamping again."
 
   - id: C02
     tier: 1
@@ -183,7 +192,17 @@ canaries:
       query_type:
         one_of: [COLUMN_LOGIC, FUNCTION_LOGIC]
       schema: OFSERM
-      badge: VERIFIED
+      # NOT pinned to a specific badge: C13 is genuinely flaky on the
+      # generation side. Some runs produce a clean answer that goes
+      # through the FUNCTION_LOGIC branch and lands as VERIFIED with
+      # no warnings; other runs route through COLUMN_LOGIC and the
+      # model fabricates citations to functions not in retrieved
+      # sources, which W57 correctly catches as UNVERIFIED. Pinning
+      # either badge produces a flaky canary. The query_type and
+      # schema assertions plus the markdown-contains-CAP943 check
+      # are stable; badge is left unpinned. (Was tentatively flipped
+      # to UNVERIFIED in the W57 followup PR after one observation
+      # of fabrication; reverted when a second run came back clean.)
     assertions:
       - kind: markdown_contains
         value: CAP943
@@ -368,16 +387,24 @@ canaries:
       # No schema pin: N_STD_ACCT_HEAD_AMT lives in graph:index for both
       # OFSMDM and OFSERM, so Phase 4's column-owner pivot is suppressed
       # ("Multi-schema columns keep the orchestrator's classification" per
-      # docs/w35_phase4_summary.md). The query gets a VERIFIED grounded
-      # answer, just from the orchestrator-default schema context.
+      # docs/w35_phase4_summary.md).
       query_type: VARIABLE_TRACE
-      badge: VERIFIED
+      # W57 retroactive catch (was VERIFIED pre-W57): the model presents
+      # 4 SEC_*_DATA_POP_* functions as a sequential chain even though
+      # none of them are in functions_analyzed (semantic search returned
+      # the *_THRESHOLD_* / MINORITY_INTEREST family instead). Plus
+      # Line 24 cited 4×. Pre-W57 this stamped VERIFIED on a
+      # fabricated chain; W57's chain-coherence + per-claim binding
+      # checks correctly downgrade.
+      badge: UNVERIFIED
     assertions:
       - kind: warnings_not_contain
         value: UNGROUNDED_IDENTIFIERS
       - kind: min_citations
         value: 1
-    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (badge=VERIFIED, citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot)."
+      - kind: warnings_contain
+        value: "GROUNDING:"
+    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot). W57 enforcement actively catches the cited-functions-not-in-sources fabrication; regression to badge=VERIFIED with no GROUNDING: warning would mean fabricated step-chains can rubber-stamp again."
 
   # ──────────────────────────────────────────────────────────────────────
   # Tier 3 — manual; needs local Oracle data state
