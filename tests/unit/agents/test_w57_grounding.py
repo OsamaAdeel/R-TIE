@@ -13,6 +13,7 @@ plus end-to-end fixtures driven by Run 3 benchmark fabrications:
 from src.agents.logic_explainer import (
     evaluate_grounding,
     w57_enforce_grounding,
+    _W57_FUNC_CITATION_RE,
     _w57_check_per_claim_binding,
     _w57_check_citation_count_cap,
     _w57_check_anchoring,
@@ -646,3 +647,169 @@ def test_b3_style_over_cited_correct_answer_stays_verified():
     assert not high_warnings, (
         f"unexpected HIGH warnings on padding-only fabrication: {high_warnings}"
     )
+
+
+# ===========================================================================
+# String-handling defenses (Run 5 / A4 lost-catch regressions)
+# ===========================================================================
+#
+# Run 5 produced VERIFIED with zero warnings on A4 ("How does
+# FN_LOAD_OPS_RISK_DATA work?") because three independent string-handling
+# defects in the W57 helpers all happened to align on that one body:
+#
+#   * _LINE_REF_RE was case-sensitive, so "lines 198-369" (lowercase l)
+#     bypassed Check 1.3 (range repeat) AND Check 2 (citation count cap).
+#   * _w57_check_template_phrases compared with ASCII "pass-through",
+#     but A4 wrote "Pass‑through" with U+2011 NON-BREAKING HYPHEN,
+#     bypassing Check 5.
+#   * _W57_FUNC_CITATION_RE required a comma between the function name
+#     and "Lines", but A4's format was "(FN_X lines 198-369)" with no
+#     comma — disabling Checks 1.1/1.2 on that shape.
+#
+# Each test below pins one of these regressions; the integration test at
+# the end is the non-negotiable design proof — A4's body must produce
+# at least one HIGH warning post-fix.
+
+def test_fix1_lowercase_lines_caught_by_check_1_3():
+    """Bug 1 regression: lowercase "lines X-Y" must contribute to
+    range-repeat counting (Check 1.3)."""
+    md = " ".join(
+        f"Step {i}: explanation (FN_LOAD_OPS_RISK_DATA lines 198-369)."
+        for i in range(1, 11)
+    )
+    multi = {"FN_LOAD_OPS_RISK_DATA": {"source_code": _src(400)}}
+    warnings = _w57_check_per_claim_binding(
+        md, multi, ["FN_LOAD_OPS_RISK_DATA"]
+    )
+    assert any(
+        w.startswith("GROUNDING-LOW:") and "Lines 198-369 cited 10 times" in w
+        for w in warnings
+    ), f"Expected range-repeat LOW on lowercase 'lines'; got: {warnings}"
+
+
+def test_fix1_lowercase_lines_counted_by_citation_cap():
+    """Bug 1 regression: Check 2 must count lowercase "lines" events.
+
+    Build a body with 60 lowercase "lines X-Y" citations to force the
+    cap of 50."""
+    md = " ".join(
+        f"Step {i}: explanation (FN_X lines {i}-{i+1})."
+        for i in range(1, 61)
+    )
+    warnings = _w57_check_citation_count_cap(md)
+    assert any(
+        w.startswith("GROUNDING-LOW:") and "60 line citations" in w
+        for w in warnings
+    ), f"Expected citation-cap LOW on lowercase 'lines'; got: {warnings}"
+
+
+def test_fix2_unicode_dash_in_template_phrase():
+    """Bug 2 regression: "Pass‑through" with U+2011 NON-BREAKING
+    HYPHEN must match the ASCII "pass-through" template phrase after
+    the dash-normalization shim."""
+    md = "The value is Pass‑through (no transformation)."
+    multi = {"FN_X": {"source_code": [
+        # Validator predicate: src has >1 INSERT INTO and no MERGE →
+        # "pass-through" claim is unsupported → HIGH warning.
+        {"line": 1, "text": "INSERT INTO TARGET_A SELECT * FROM STG_A;"},
+        {"line": 2, "text": "INSERT INTO TARGET_B SELECT * FROM STG_B;"},
+        {"line": 3, "text": "INSERT INTO TARGET_C SELECT * FROM STG_C;"},
+    ]}}
+    warnings = _w57_check_template_phrases(md, multi)
+    assert any(
+        w.startswith("GROUNDING-HIGH:") and "pass-through" in w
+        for w in warnings
+    ), (
+        f"Expected template-phrase HIGH on U+2011 hyphen; got: {warnings}"
+    )
+
+
+# Note: _w57_check_caveat_vs_badge also applies _w57_ascii_normalize
+# defensively, but none of the current _W57_CAVEAT_TRIGGERS contain
+# hyphens, so there is no live failure mode to regress against here.
+# The shim is applied for symmetry and to future-proof additions to
+# the trigger list (e.g. "may not be the actual function you asked
+# about" already uses spaces; a future hyphenated trigger would
+# benefit from the normalization).
+
+
+def test_fix3_no_comma_function_citation_parsed():
+    """Bonus regression: "(FN_X lines 198-369)" — no comma between the
+    function name and "Lines" — must be matched by the relaxed
+    _W57_FUNC_CITATION_RE."""
+    body = "(FN_X lines 198-369) discusses the same range repeatedly."
+    matches = list(_W57_FUNC_CITATION_RE.finditer(body))
+    assert len(matches) == 1, f"expected 1 match, got {len(matches)}"
+    assert matches[0].group(1) == "FN_X"
+    assert matches[0].group(2) == "198"
+    assert matches[0].group(3) == "369"
+
+
+def test_fix3_no_comma_routes_to_check_1_1():
+    """Bonus regression: with the relaxed comma-or-whitespace separator,
+    Check 1.1 (cited fn not in retrieved sources) now fires on
+    A4-shaped citations whose function isn't in multi_source."""
+    md = "Step 1 (FN_NOT_RETRIEVED lines 5-10) is the key claim."
+    multi = {"FN_FOO": {"source_code": _src(100)}}
+    warnings = _w57_check_per_claim_binding(md, multi, ["FN_FOO"])
+    assert any(
+        w.startswith("GROUNDING-HIGH:") and
+        "FN_NOT_RETRIEVED" in w and
+        "not in retrieved sources" in w
+        for w in warnings
+    ), f"expected HIGH on no-comma A4-shape format; got: {warnings}"
+
+
+# Synthetic A4-style body covering all three regression vectors:
+#   - 9× lowercase "(FN_LOAD_OPS_RISK_DATA lines 198-369)" + 2× capital
+#     "Lines 198-369" so Check 1.3 sees count=11>3 → LOW
+#   - 60+ events total so Check 2 also fires LOW
+#   - "Pass‑through" with U+2011 in a section header so Check 5
+#     fires HIGH (validator: source has >1 INSERT INTO and no MERGE)
+_A4_INLINE_BODY = (
+    "## FN_LOAD_OPS_RISK_DATA — Overview\n\n"
+    "Execution condition: This function runs whenever called "
+    "(FN_LOAD_OPS_RISK_DATA lines 198-369). The behaviour is described "
+    "below as a Pass‑through with date alignment.\n\n"
+    "```sql\n"
+    "-- FUNCTION: FN_LOAD_OPS_RISK_DATA\n"
+    "-- Lines 198-369\n"
+    "```\n\n"
+    "### Step 1: Pass‑through behaviour (Lines 198-369)\n"
+    + "\n".join(
+        f"- Claim {i}: detail (FN_LOAD_OPS_RISK_DATA lines 198-369)."
+        for i in range(1, 60)
+    )
+)
+
+
+def test_a4_full_body_gets_caught_after_fixes():
+    """End-to-end: an A4-style body that produced VERIFIED in benchmark
+    Run 5 must now produce at least one GROUNDING-HIGH warning. This is
+    the non-negotiable design proof for the three string-handling
+    fixes — the lost catch must not be lost again."""
+    multi_source = {"FN_LOAD_OPS_RISK_DATA": {
+        "source_code": [
+            # Validator for "pass-through": src has >1 INSERT INTO and
+            # no MERGE → claim unsupported → HIGH.
+            {"line": i, "text": "INSERT INTO TARGET_A SELECT * FROM STG_A;"}
+            for i in range(1, 401)
+        ],
+    }}
+    warnings = w57_enforce_grounding(
+        raw_query="How does FN_LOAD_OPS_RISK_DATA work?",
+        markdown=_A4_INLINE_BODY,
+        multi_source=multi_source,
+        functions_analyzed=["FN_LOAD_OPS_RISK_DATA"],
+        redis_client=None,
+    )
+    assert any(w.startswith("GROUNDING-HIGH:") for w in warnings), (
+        f"A4-style body must produce at least one HIGH warning post-fix; "
+        f"got: {warnings}"
+    )
+    # And specifically the pass-through template HIGH for the U+2011
+    # path (the canonical A4 lost-catch signature).
+    assert any(
+        "pass-through" in w and w.startswith("GROUNDING-HIGH:")
+        for w in warnings
+    ), f"expected pass-through HIGH on A4 body; got: {warnings}"
