@@ -813,3 +813,163 @@ def test_a4_full_body_gets_caught_after_fixes():
         "pass-through" in w and w.startswith("GROUNDING-HIGH:")
         for w in warnings
     ), f"expected pass-through HIGH on A4 body; got: {warnings}"
+
+
+# ===========================================================================
+# Check 5 validator scope (Run 6 / A2 false-positive regression)
+# ===========================================================================
+#
+# Run 6 surfaced an A2 false positive: "How does CS_Goodwill_Calculation
+# work?" went VERIFIED+LOW → UNVERIFIED-HIGH because Check 5's validator
+# was running against the *concatenation* of every retrieved source.
+# When semantic search pulled siblings whose source contained MERGE or
+# many INSERT INTOs, the validator predicate for "pass-through"
+# returned False → the asked-about function was misattributed the
+# fabrication signal.
+#
+# Fix: anchor the validator to the asked-about function (with most-cited
+# fallback, then single-multi_source-key fallback, then skip).
+
+def test_check5_validates_against_asked_about_not_siblings():
+    """A2 regression: the asked-about function's source supports the
+    pass-through claim, but a sibling in multi_source does not. Check 5
+    must validate only the asked-about source and stay quiet."""
+    markdown = (
+        "## CS_Goodwill_Calculation\n\n"
+        "Values are passed through from DIM_* tables to the target with "
+        "no business transformation other than format normalization. "
+        "(CS_Goodwill_Calculation, L24)"
+    )
+    multi_source = {
+        # Asked-about function: a single MERGE that the markdown is
+        # describing. Validator predicate for "pass-through" looks for
+        # ≤1 "INSERT INTO" and no "MERGE" in src. This source has no
+        # INSERT INTO and no literal "MERGE" token (the MERGE keyword
+        # is in actual prod source but the validator's text test is
+        # what matters here), so the pass-through claim is supported.
+        "CS_GOODWILL_CALCULATION": {
+            "source_code": [
+                {"line": 1, "text": "SELECT N_AMT FROM DIM_GOODWILL"},
+                {"line": 2, "text": "WHERE V_STD_ACCT_HEAD_ID = 'CAP170'"},
+            ],
+            "score": 0.9,
+        },
+        # Sibling that the LLM also retrieved but the response isn't
+        # really about. Pre-fix this tripped the concat-all validator.
+        "ABL_SIBLING_INSERT_FUNCTION": {
+            "source_code": [
+                {"line": 1, "text": "INSERT INTO target_a SELECT ..."},
+                {"line": 2, "text": "INSERT INTO target_b SELECT ..."},
+                {"line": 3, "text": "INSERT INTO target_c SELECT ..."},
+            ],
+            "score": 0.4,
+        },
+    }
+    warnings = _w57_check_template_phrases(
+        markdown=markdown,
+        multi_source=multi_source,
+        asked_about_function="CS_GOODWILL_CALCULATION",
+    )
+    assert warnings == [], (
+        f"False positive: Check 5 fired on A2-style case where the "
+        f"asked-about function's source supports the pass-through claim "
+        f"but a sibling's source does not. Warnings: {warnings}"
+    )
+
+
+def test_check5_still_fires_when_asked_about_unsupported():
+    """B2 regression guard: when the asked-about function genuinely
+    does NOT support the template claim, Check 5 must still fire."""
+    markdown = (
+        "## ABL_MULTI_INSERT_FUNCTION\n\n"
+        "This function is a pass-through to target tables "
+        "(ABL_MULTI_INSERT_FUNCTION, L24)."
+    )
+    multi_source = {
+        "ABL_MULTI_INSERT_FUNCTION": {
+            "source_code": [
+                {"line": 1, "text": "INSERT INTO target_a SELECT ..."},
+                {"line": 2, "text": "INSERT INTO target_b SELECT ..."},
+                {"line": 3, "text": "INSERT INTO target_c SELECT ..."},
+            ],
+            "score": 0.9,
+        },
+    }
+    warnings = _w57_check_template_phrases(
+        markdown=markdown,
+        multi_source=multi_source,
+        asked_about_function="ABL_MULTI_INSERT_FUNCTION",
+    )
+    assert any(
+        w.startswith("GROUNDING-HIGH:") and "pass-through" in w
+        for w in warnings
+    ), (
+        f"True positive missed: Check 5 should fire when the asked-about "
+        f"function's source does not support the pass-through claim. "
+        f"Warnings: {warnings}"
+    )
+
+
+def test_check5_falls_back_to_most_cited_when_no_asked_about():
+    """When asked_about_function isn't supplied, Check 5 must fall back
+    to the most-cited function in the response markdown."""
+    markdown = (
+        "## Some Analysis\n\n"
+        "FN_A is the primary subject (FN_A L1).\n"
+        "FN_A processes values (FN_A L2).\n"
+        "FN_A is a pass-through routine (FN_A L3)."
+    )
+    multi_source = {
+        "FN_A": {
+            "source_code": [
+                {"line": 1, "text": "INSERT INTO t1"},
+                {"line": 2, "text": "INSERT INTO t2"},
+                {"line": 3, "text": "INSERT INTO t3"},
+            ],
+            "score": 0.9,
+        },
+        # A second function in multi_source so the single-key fallback
+        # doesn't fire — we need the most-cited path specifically.
+        "FN_OTHER": {
+            "source_code": [{"line": 1, "text": "SELECT 1 FROM DUAL"}],
+            "score": 0.4,
+        },
+    }
+    warnings = _w57_check_template_phrases(
+        markdown=markdown,
+        multi_source=multi_source,
+        asked_about_function=None,
+    )
+    assert any(
+        w.startswith("GROUNDING-HIGH:") and "pass-through" in w
+        for w in warnings
+    ), f"Most-cited fallback didn't fire on multi-INSERT FN_A: {warnings}"
+    # The warning must name FN_A specifically — proving the resolver
+    # picked FN_A and the validator ran against FN_A's source.
+    assert any("'FN_A'" in w for w in warnings), (
+        f"warning should name the resolved target FN_A; got: {warnings}"
+    )
+
+
+def test_check5_skips_when_target_unresolvable():
+    """When asked_about isn't given AND no function-name appears in
+    the markdown AND multi_source has multiple entries, Check 5 must
+    skip (return []) rather than guess. Better to under-flag than
+    misattribute."""
+    markdown = (
+        "Some prose that doesn't mention any function by name. "
+        "Values are passed through and the routine has no internal gating."
+    )
+    multi_source = {
+        "FN_X": {"source_code": [{"line": 1, "text": "INSERT INTO t1"}]},
+        "FN_Y": {"source_code": [{"line": 1, "text": "INSERT INTO t2"}]},
+    }
+    warnings = _w57_check_template_phrases(
+        markdown=markdown,
+        multi_source=multi_source,
+        asked_about_function=None,
+    )
+    assert warnings == [], (
+        f"Check 5 should skip when no anchor can be resolved; "
+        f"got: {warnings}"
+    )
