@@ -42,8 +42,14 @@ _FORBIDDEN_CONTRADICTION_PHRASES = (
 _IDENTIFIER_CODE_RE = re.compile(r"\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]*)\b")
 
 # Inline line references in markdown: "Line 203", "Lines 5-10", "L42".
+# Case-insensitive: LLM responses freely mix "(fn lines 5-10)" with
+# "(fn Lines 5-10)" within the same body. Without IGNORECASE the
+# lowercase variant slips past every regex consumer
+# (_extract_line_citations, _w57_extract_ranges, citation-count cap),
+# which is what defeated W57 on benchmark Run 5 / A4.
 _LINE_REF_RE = re.compile(
-    r"\b(?:Lines?|L)\s*(\d+)(?:\s*[-\u2013]\s*(\d+))?\b"
+    r"\b(?:Lines?|L)\s*(\d+)(?:\s*[-\u2013]\s*(\d+))?\b",
+    re.IGNORECASE,
 )
 
 # Query types for which grounded citations are expected. Other types
@@ -560,16 +566,45 @@ def _extract_function_candidates_local(query: str) -> List[str]:
 # Defense-in-depth: false-positives are preferable to false-negatives — the
 # trust contract requires UNVERIFIED whenever a check is uncertain.
 
+# Map common Unicode dash/hyphen codepoints onto ASCII '-'. Some LLM
+# responses contain U+2011 NON-BREAKING HYPHEN in places like
+# "pass-through", "operational-risk", and "December-only". Plain
+# substring containment with ASCII "pass-through" then misses the body,
+# defeating Check 5. NFKC alone does NOT fold U+2011 to U+002D, so the
+# explicit map is required.
+_W57_DASH_REPLACEMENTS = (
+    ("‐", "-"),  # HYPHEN
+    ("‑", "-"),  # NON-BREAKING HYPHEN
+    ("–", "-"),  # EN DASH
+    ("—", "-"),  # EM DASH
+    ("−", "-"),  # MINUS SIGN
+)
+
+
+def _w57_ascii_normalize(s: str) -> str:
+    """Fold the Unicode dash/hyphen variants in *s* onto ASCII '-'.
+
+    Applied before any phrase-substring check so a body that wrote
+    "pass‑through" matches the ASCII template phrase "pass-through".
+    """
+    for src, dst in _W57_DASH_REPLACEMENTS:
+        s = s.replace(src, dst)
+    return s
+
+
 # Citation patterns:
 #   Check 1 uses _LINE_REF_RE (already defined) for "(start, end)" tuples
 #   so we can count repeats and detect padding fabrications. Function-name
 #   binding is enforced against functions_analyzed: a citation is "bound"
 #   when at least one function was actually analyzed (which means the LLM
 #   was given real source). For the per-claim function-name regex pattern
-#   like "(FN_NAME, Lines X-Y)", the parenthesized form below is used.
+#   the parenthesised form below accepts either "(FN_NAME, Lines X-Y)"
+#   or "(FN_NAME Lines X-Y)" (no comma). Case-insensitive so "lines"
+#   matches alongside "Lines".
 _W57_FUNC_CITATION_RE = re.compile(
-    r"\(\s*([A-Za-z][A-Za-z0-9_]+)\s*,\s*Lines?\s+(\d+)"
-    r"(?:\s*[-–]\s*(\d+))?\s*\)"
+    r"\(\s*([A-Za-z][A-Za-z0-9_]+)\s*[,\s]+Lines?\s+(\d+)"
+    r"(?:\s*[-–]\s*(\d+))?\s*\)",
+    re.IGNORECASE,
 )
 
 # Check 1.3 threshold: a single (start,end) range cited more than this
@@ -1002,7 +1037,7 @@ def _w57_check_template_phrases(
     actually supports the claim. Mismatch → warning.
     """
     warnings: List[str] = []
-    lower = markdown.lower()
+    lower = _w57_ascii_normalize(markdown).lower()
     if not multi_source:
         return warnings
     # Concatenate all cited sources for the validator. A template claim
@@ -1033,7 +1068,7 @@ def _w57_check_caveat_vs_badge(markdown: str) -> List[str]:
     Currently that message ships alongside a VERIFIED badge. W57 forces
     UNVERIFIED whenever any caveat trigger appears in the rendered text.
     """
-    lower = markdown.lower()
+    lower = _w57_ascii_normalize(markdown).lower()
     for trigger in _W57_CAVEAT_TRIGGERS:
         if trigger in lower:
             return [
