@@ -631,6 +631,145 @@ _W57_GATING_IF_RE = re.compile(r"\bIF\b", re.IGNORECASE)
 _W57_GATING_WHEN_RE = re.compile(r"\bWHEN\b", re.IGNORECASE)
 _W57_GATING_CASE_RE = re.compile(r"\bCASE\b", re.IGNORECASE)
 
+# W68: 'pass-through' predicate refinement. The pre-W68 predicate flagged
+# any function containing MERGE as not-pass-through, which over-fired on
+# legitimate pass-through descriptions of column-mapping MERGEs (e.g.
+# CS_Goodwill_Calculation, where the MERGE SET clause is a CASE arm
+# selecting between bare aliases and the transformation lives in the
+# USING subquery, not the SET assignment). The refined predicate inspects
+# the WHEN MATCHED THEN UPDATE SET clause itself for transform indicators
+# (arithmetic, aggregates, sub-SELECT) and only rejects when one is
+# present in the SET. Functions where the SET assigns CASE arms of bare
+# columns/aliases or simple sentinels are recognised as pass-through.
+_W57_MERGE_SET_RE = re.compile(
+    r"\bWHEN\s+MATCHED\s+THEN\s+UPDATE\s+SET\b",
+    re.IGNORECASE,
+)
+_W57_SET_SUBQUERY_RE = re.compile(r"\(\s*SELECT\b", re.IGNORECASE)
+_W57_SET_AGGREGATES = ("SUM(", "MAX(", "MIN(", "AVG(", "COUNT(")
+# Spaces around the operator avoid matching identifier characters
+# (Oracle identifiers cannot contain +-*/, but spacing also rules out
+# accidental matches inside hypothetical numeric literals).
+_W57_SET_ARITH_OPS = (" + ", " - ", " * ", " / ")
+
+
+def _w57_find_set_end(src: str, start: int) -> int:
+    """Return the index where the MERGE SET clause beginning at *start* ends.
+
+    Terminators at CASE-nesting depth 0 AND parenthesis depth 0:
+      - ';' (end of the MERGE statement)
+      - 'WHERE' (UPDATE filter)
+      - 'WHEN'  (the next MERGE branch — WHEN MATCHED / WHEN NOT MATCHED)
+      - 'DELETE' (delete sub-clause)
+
+    'WHEN' inside a CASE expression and 'WHERE' inside a sub-SELECT do
+    not terminate, hence the depth tracking.
+    """
+    upper = src.upper()
+    case_depth = 0
+    paren_depth = 0
+    i = start
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "(":
+            paren_depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            if paren_depth > 0:
+                paren_depth -= 1
+            i += 1
+            continue
+        if ch == ";" and case_depth == 0 and paren_depth == 0:
+            return i
+        prev_ok = i == 0 or (not src[i - 1].isalnum() and src[i - 1] != "_")
+        if ch.isalpha() and prev_ok:
+            j = i
+            while j < n and (src[j].isalnum() or src[j] == "_"):
+                j += 1
+            tok = upper[i:j]
+            if tok == "CASE":
+                case_depth += 1
+            elif tok == "END":
+                if case_depth > 0:
+                    case_depth -= 1
+            elif case_depth == 0 and paren_depth == 0:
+                if tok in ("WHERE", "DELETE", "WHEN"):
+                    return i
+            i = j
+            continue
+        i += 1
+    return n
+
+
+def _w57_extract_merge_set_clauses(src: str) -> List[str]:
+    """Return the SET-clause body of every WHEN MATCHED THEN UPDATE SET."""
+    clauses: List[str] = []
+    for match in _W57_MERGE_SET_RE.finditer(src):
+        start = match.end()
+        end = _w57_find_set_end(src, start)
+        clause = src[start:end].strip()
+        if clause:
+            clauses.append(clause)
+    return clauses
+
+
+def _w57_set_has_transform(set_clause: str) -> bool:
+    """True iff *set_clause* contains a transform indicator.
+
+    Indicators that signal the MERGE is doing more than column mapping:
+      - aggregate function call: SUM(, MAX(, MIN(, AVG(, COUNT(
+      - arithmetic operator surrounded by spaces: ' + ', ' - ', ' * ', ' / '
+      - sub-SELECT inside the SET expression
+    """
+    upper = set_clause.upper()
+    for fn in _W57_SET_AGGREGATES:
+        if fn in upper:
+            return True
+    for op in _W57_SET_ARITH_OPS:
+        if op in set_clause:
+            return True
+    if _W57_SET_SUBQUERY_RE.search(set_clause):
+        return True
+    return False
+
+
+def _w57_supports_passthrough(src: str) -> bool:
+    """W57 Check 5 'pass-through' predicate (post-W68).
+
+    Returns True when *src* describes a function whose body is shaped
+    like a pass-through:
+      - Condition A: pure INSERT-only function (≤1 INSERT INTO and no
+        MERGE). Same as the pre-W68 behaviour.
+      - Condition B: function contains MERGE, but every WHEN MATCHED
+        THEN UPDATE SET clause is column-mapping shaped (no arithmetic,
+        aggregate, or sub-SELECT in the SET expression).
+
+    Returns False when neither condition holds, including the case
+    where a MERGE statement contains "WHEN MATCHED THEN UPDATE SET"
+    that the extractor cannot parse — a strict reject preserves the
+    pre-W68 catch.
+    """
+    upper = src.upper()
+    insert_count = upper.count("INSERT INTO")
+    has_merge = "MERGE" in upper
+
+    if insert_count <= 1 and not has_merge:
+        return True
+
+    if has_merge:
+        set_clauses = _w57_extract_merge_set_clauses(src)
+        if not set_clauses:
+            return False
+        for clause in set_clauses:
+            if _w57_set_has_transform(clause):
+                return False
+        return True
+
+    return False
+
+
 # Check 5 template phrases. Each entry is (phrase, validator) where
 # validator(source_text) returns True iff the source actually supports
 # the claim. Phrases that don't appear in any cited source mean the
@@ -659,8 +798,7 @@ _W57_TEMPLATE_PHRASES = (
     ),
     (
         "pass-through",
-        lambda src: src.upper().count("INSERT INTO") <= 1
-                     and "MERGE" not in src.upper(),
+        _w57_supports_passthrough,
     ),
 )
 
