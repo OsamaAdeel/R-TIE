@@ -91,6 +91,38 @@ _COLUMN_NAME_PREFIXES = (
     "T_",   # timestamp (also covered by _INTERNAL_ALIAS_PATTERNS for T_<digit>)
 )
 
+# W58.d: manifest process and sub_process names. Populated by main.py once
+# all batch manifests have been loaded into Redis (see
+# ``set_process_subprocess_names`` / ``refresh_process_subprocess_names``).
+# Empty fallback means W58.d is a no-op until populated, which is the right
+# default for unit tests that don't care about the manifest set and for
+# pre-startup paths.
+_PROCESS_SUBPROCESS_NAMES: frozenset[str] = frozenset()
+
+
+def set_process_subprocess_names(names) -> None:
+    """Replace the W58.d exclusion set with *names* (uppercased).
+
+    Called by main.py once after every batch manifest has been parsed and
+    stored, and by tests that need a known set without depending on a live
+    Redis client. ``names`` may be any iterable of strings.
+    """
+    global _PROCESS_SUBPROCESS_NAMES
+    _PROCESS_SUBPROCESS_NAMES = frozenset(n.upper() for n in names if n)
+
+
+def refresh_process_subprocess_names(redis_client) -> frozenset[str]:
+    """Rebuild the W58.d exclusion set from every stored batch hierarchy.
+
+    Reads from the canonical ``hierarchy:<batch>`` keys via
+    ``store.get_all_process_and_subprocess_names``. Returns the new set so
+    callers can log its size.
+    """
+    from src.parsing.store import get_all_process_and_subprocess_names
+    names = get_all_process_and_subprocess_names(redis_client)
+    set_process_subprocess_names(names)
+    return names
+
 # Schemas to check when resolving a function name are now discovered at
 # runtime via src.parsing.schema_discovery.discovered_schemas(redis_client),
 # which scans graph:* keys and falls back to manifest.RECOGNIZED_SCHEMAS
@@ -536,6 +568,10 @@ def extract_function_candidates(query: str) -> List[str]:
         — these are local identifiers inside generated SQL bodies
       * W58.c: multi-character column-prefix tokens are dropped as
         defense-in-depth alongside the single-letter regex
+      * W58.d: manifest process and sub_process names are dropped — these
+        are workflow labels users mention to scope a question, never
+        callable PL/SQL functions. The set is populated at startup from
+        every loaded batch hierarchy.
 
     Case is preserved on the way out so callers can log the original
     spelling.
@@ -562,6 +598,9 @@ def extract_function_candidates(query: str) -> List[str]:
             continue
         # W58.b: OFSAA-generated internal alias / CASE-label patterns.
         if any(p.match(cand_upper) for p in _INTERNAL_ALIAS_PATTERNS):
+            continue
+        # W58.d: manifest process and sub_process names.
+        if cand_upper in _PROCESS_SUBPROCESS_NAMES:
             continue
         out.append(cand)
     return out

@@ -420,6 +420,21 @@ async def lifespan(app: FastAPI):
                     len(cat.gl_block_list),
                     len(cat.gl_eop_overrides),
                 )
+
+            # W58.d: prime the orchestrator's manifest-name exclusion set
+            # so the function-precheck doesn't decline queries that mention
+            # a process or sub_process name (e.g. "OPS_RISK_PROCESSING").
+            from src.agents.orchestrator import refresh_process_subprocess_names
+            try:
+                proc_names = refresh_process_subprocess_names(_graph_redis)
+                logger.info(
+                    "W58.d exclusion set primed: %d process/sub_process names",
+                    len(proc_names),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "W58.d exclusion set refresh failed (non-fatal): %s", exc
+                )
     except ManifestValidationError as exc:
         # A malformed manifest is a developer error: refuse to start so the
         # broken module is fixed rather than silently loaded from cache.

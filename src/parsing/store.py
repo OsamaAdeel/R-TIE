@@ -312,6 +312,39 @@ def list_batch_names(redis_client) -> list[str]:
         return []
 
 
+def get_all_process_and_subprocess_names(redis_client) -> frozenset[str]:
+    """Return the union of UPPERCASE process and sub_process names across
+    every stored batch hierarchy.
+
+    Used by the W58.d candidate filter to exclude manifest workflow labels
+    (e.g. ``OPS_RISK_PROCESSING``, ``ABL_CAPITAL_STRUCTURE_DATA_POPULATION``)
+    from the function-precheck — those names match the uppercase+underscore
+    heuristic but never name a callable PL/SQL function. Returns an empty
+    frozenset on Redis failure or when no manifests have been loaded.
+    """
+    if redis_client is None:
+        return frozenset()
+    names: set[str] = set()
+    for batch_name in list_batch_names(redis_client):
+        hierarchy = get_batch_hierarchy(redis_client, batch_name)
+        if not hierarchy:
+            continue
+        for proc in hierarchy.get("processes") or []:
+            proc_name = proc.get("name")
+            if proc_name:
+                names.add(proc_name.upper())
+            _walk_sub_process_names(proc.get("sub_processes") or [], names)
+    return frozenset(names)
+
+
+def _walk_sub_process_names(subs, names: set[str]) -> None:
+    for sp in subs:
+        sp_name = sp.get("name")
+        if sp_name:
+            names.add(sp_name.upper())
+        _walk_sub_process_names(sp.get("sub_processes") or [], names)
+
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
