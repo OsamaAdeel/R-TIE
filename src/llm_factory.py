@@ -47,9 +47,18 @@ PROVIDERS = {"openai", "anthropic"}
 # call. Tier 2 canary (5/5 PASS, hand-verified row counts and
 # aggregates) is the load-bearing gate.
 #
-# Remaining Phase 4 sites (orchestrator.classify_query,
-# logic_explainer.*) are intentionally absent — they will be added
-# individually in later PRs.
+# W77 / W34c Phase 4: promote logic_explainer.{stream,explain}_semantic
+# to gpt-4o-mini. Diagnosed in docs/w77_diagnostic.md as the cause of
+# v2 benchmark Run 7 truncation — gpt-5-mini reasoning-token
+# consumption against a 4096 max_tokens cap. gpt-4o-mini is not a
+# reasoning model, so the full max_tokens budget is available for
+# visible output. Wired both call sites to pass site= at the same time
+# (same shape as Phase 3); max_tokens=4096 retained so the new model
+# is measured at the same budget that previously truncated gpt-5-mini.
+#
+# Remaining sites (orchestrator.classify_query) are intentionally
+# absent — see W55. classify_query promotion is gated on structured-
+# output schema work for ClassificationResult on UNSUPPORTED routes.
 # ──────────────────────────────────────────────────────────────────────
 SITE_MODEL_DEFAULTS: dict[str, str] = {
     "variable_tracer.resolve_variables":  "gpt-4o-mini",
@@ -62,6 +71,9 @@ SITE_MODEL_DEFAULTS: dict[str, str] = {
     "phase2.explainer.invoke":            "gpt-4o-mini",
     # W34c Phase 3 addition
     "data_query._generate_sql":           "gpt-4o-mini",
+    # W77 / W34c Phase 4 additions
+    "logic_explainer.stream_semantic":    "gpt-4o-mini",
+    "logic_explainer.explain_semantic":   "gpt-4o-mini",
 }
 
 

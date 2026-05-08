@@ -1616,6 +1616,7 @@ class LogicExplainer:
             temperature=self._temperature,
             max_tokens=4096,
             json_mode=False,
+            site="logic_explainer.explain_semantic",
         )
 
         messages = [
@@ -1715,6 +1716,7 @@ class LogicExplainer:
             temperature=self._temperature,
             max_tokens=4096,
             json_mode=False,
+            site="logic_explainer.stream_semantic",
         )
 
         messages = [
