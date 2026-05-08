@@ -41,9 +41,15 @@ PROVIDERS = {"openai", "anthropic"}
 # fields on reconciliation-style UNSUPPORTED queries. Will return as a
 # separate PR once the classifier schema is hardened.)
 #
-# Phase 3/4 sites (orchestrator.classify_query, logic_explainer.*,
-# data_query._generate_sql) are intentionally absent — they will be
-# added individually in later PRs.
+# W34c Phase 3: promote data_query._generate_sql to gpt-4o-mini. Wired
+# the call site to pass site="data_query._generate_sql" at the same
+# time, since the dispatch was not previously the active path for that
+# call. Tier 2 canary (5/5 PASS, hand-verified row counts and
+# aggregates) is the load-bearing gate.
+#
+# Remaining Phase 4 sites (orchestrator.classify_query,
+# logic_explainer.*) are intentionally absent — they will be added
+# individually in later PRs.
 # ──────────────────────────────────────────────────────────────────────
 SITE_MODEL_DEFAULTS: dict[str, str] = {
     "variable_tracer.resolve_variables":  "gpt-4o-mini",
@@ -54,6 +60,8 @@ SITE_MODEL_DEFAULTS: dict[str, str] = {
     "indexer.generate_description":       "gpt-4o-mini",
     # W34c Phase 2 addition
     "phase2.explainer.invoke":            "gpt-4o-mini",
+    # W34c Phase 3 addition
+    "data_query._generate_sql":           "gpt-4o-mini",
 }
 
 

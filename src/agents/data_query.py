@@ -684,6 +684,7 @@ class DataQueryAgent:
             temperature=self._temperature,
             max_tokens=self._max_tokens,
             json_mode=(provider or "openai") != "anthropic",
+            site="data_query._generate_sql",
         )
 
         non_null_filters = {k: v for k, v in filters.items() if v not in (None, "")}

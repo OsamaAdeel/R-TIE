@@ -104,6 +104,26 @@ def test_phase2_sites_resolve_to_gpt_4o_mini(site_key, expected_model):
 
 
 # ---------------------------------------------------------------------
+# W34c Phase 3: explicit pinning for data_query._generate_sql.
+# Same shape as the Phase 2 pin above so an accidental
+# SITE_MODEL_DEFAULTS removal fails with a clearly-named test rather
+# than silently dropping a parametrize case. Tier 2 canary (5/5,
+# hand-verified row counts and aggregates) is the load-bearing
+# end-to-end gate.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "site_key,expected_model",
+    [
+        ("data_query._generate_sql", "gpt-4o-mini"),
+    ],
+)
+def test_phase3_sites_resolve_to_gpt_4o_mini(site_key, expected_model):
+    assert SITE_MODEL_DEFAULTS[site_key] == expected_model
+    assert get_site_model(site_key) == expected_model
+
+
+# ---------------------------------------------------------------------
 # Explicit model wins over site=
 # ---------------------------------------------------------------------
 
