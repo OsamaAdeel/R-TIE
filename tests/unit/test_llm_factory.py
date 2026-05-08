@@ -124,6 +124,27 @@ def test_phase3_sites_resolve_to_gpt_4o_mini(site_key, expected_model):
 
 
 # ---------------------------------------------------------------------
+# W77 / W34c Phase 4: explicit pinning for logic_explainer call sites.
+# docs/w77_diagnostic.md established the load-bearing gate (manual A3 /
+# C2 canaries against the live backend confirming bodies complete
+# without truncation). The unit pin here just ensures an accidental
+# SITE_MODEL_DEFAULTS removal fails with a clearly-named test rather
+# than silently dropping a parametrize case.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "site_key,expected_model",
+    [
+        ("logic_explainer.stream_semantic",  "gpt-4o-mini"),
+        ("logic_explainer.explain_semantic", "gpt-4o-mini"),
+    ],
+)
+def test_phase4_logic_explainer_resolves_to_gpt_4o_mini(site_key, expected_model):
+    assert SITE_MODEL_DEFAULTS[site_key] == expected_model
+    assert get_site_model(site_key) == expected_model
+
+
+# ---------------------------------------------------------------------
 # Explicit model wins over site=
 # ---------------------------------------------------------------------
 
