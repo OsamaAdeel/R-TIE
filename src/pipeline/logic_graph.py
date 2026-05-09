@@ -93,6 +93,13 @@ def build_logic_graph(
             provider=llm_cfg["provider"],
             model=llm_cfg["model"],
         )
+        # W76: anchor on an explicit "In <FunctionName>, ..." prefix so
+        # CASE-branch alias literals (EXP_11, COND_5, ...) the
+        # classifier may have parked in target_variable cannot win as
+        # the asked-about object. Runs before BI routing because if W76
+        # anchors the query on a real function, BI's own explicit-name
+        # short-circuit will correctly skip CAP-code rewriting.
+        orchestrator.apply_named_function_anchor(state)
         # W35 Phase 7: route business-identifier queries (e.g. "How is
         # CAP943 calculated?") to the function that COMPUTES the
         # identifier instead of letting semantic search rank loaders
