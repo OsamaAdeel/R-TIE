@@ -678,6 +678,75 @@ _W57_FUNC_CITATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# W78: prose-framing function references. gpt-4o-mini (post-W77) cites
+# functions in narrative form — "The function `NAME` performs ..." or
+# "the `NAME` function" — without the gpt-5-mini-style "(NAME, Lines X-Y)"
+# parenthesised binding. The pre-W78 regex above missed those framings,
+# producing a false-negative on Check 1.1 where a fabricated function
+# name slipped past despite not being in functions_analyzed (concrete
+# repro: CAP973 cited REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP
+# while functions_analyzed had different DATA_POP variants).
+#
+# Identifier shape mirrors :data:`_FN_CANDIDATE_RE` so candidates are
+# subsequently passed through the W58 exclusion filter for false-positive
+# safety (table prefixes, alias literals, column prefixes etc.).
+#
+# Forms covered:
+#   "function NAME" / "function `NAME`"                 - keyword first
+#   "function called NAME" / "function named NAME"      - keyword + qualifier
+#   "`NAME` function" / "NAME function"                 - keyword last
+#   Same forms with "procedure" instead of "function".
+_W57_PROSE_FUNCTION_REF_RE = re.compile(
+    r"\b(?:function|procedure)(?:\s+called|\s+named)?\s+`?"
+    r"([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)`?"
+    r"|"
+    r"`([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)`"
+    r"\s+(?:function|procedure)\b",
+    re.IGNORECASE,
+)
+
+
+def _w57_passes_function_name_filters(cand: str) -> bool:
+    """W78: returns True iff *cand* survives all W58 exclusion gates.
+
+    Mirrors the per-candidate gating in
+    :func:`_extract_function_candidates_local` so that body-scanned
+    function-name references reuse the same authoritative
+    "what counts as a function name" classifier as the orchestrator's
+    extraction. Excludes table prefixes (FCT_/DIM_/STG_/FSI_/SETUP_/AAI_),
+    column prefixes (N_/V_/F_/D_/I_/T_), internal alias literals
+    (EXP_<digit>, COND_<digit>, T_<digit>, SS_*, TT_*), manifest process
+    names, stopwords, and tokens shorter than 6 characters.
+
+    Used by :func:`_w57_check_per_claim_binding` (W78 prose-framing pass)
+    to avoid emitting "cited function not retrieved" warnings on table
+    or alias tokens that the body merely names in passing.
+    """
+    from src.agents.orchestrator import (
+        _COLUMN_NAME_PREFIXES,
+        _INTERNAL_ALIAS_PATTERNS,
+        _PROCESS_SUBPROCESS_NAMES,
+        _TABLE_NAME_PREFIXES,
+    )
+
+    cu = cand.upper()
+    if len(cand) < 6:
+        return False
+    if cu in _FN_STOPWORDS:
+        return False
+    if _FN_COLUMN_PREFIX_RE.match(cu):
+        return False
+    if any(cu.startswith(p) for p in _TABLE_NAME_PREFIXES):
+        return False
+    if any(cu.startswith(p) for p in _COLUMN_NAME_PREFIXES):
+        return False
+    if any(p.match(cu) for p in _INTERNAL_ALIAS_PATTERNS):
+        return False
+    if cu in _PROCESS_SUBPROCESS_NAMES:
+        return False
+    return True
+
+
 # Check 1.3 threshold: a single (start,end) range cited more than this
 # many times signals line-by-line padding rather than per-claim binding.
 # Empirically: legitimate answers cite a range 1-3 times; fabricated
@@ -908,7 +977,13 @@ def _w57_check_per_claim_binding(
 ) -> List[str]:
     """W57 Check 1: per-claim citation binding.
 
-    Three sub-checks:
+    Sub-checks:
+      1.0 (W78) Prose-framing function references — "The function `NAME`
+          performs ...", "the `NAME` function", "procedure NAME" — must
+          name a function in retrieved sources. Catches gpt-4o-mini's
+          framing where the function name and line range are decoupled
+          (gpt-5-mini bound them as "(NAME, Lines X-Y)" and was caught
+          by 1.1; gpt-4o-mini does not, and slipped past pre-W78).
       1.1 Each explicit (function_name, line_range) tuple in the markdown
           must reference a function in retrieved sources.
       1.2 Each line range must fit inside that function's source body.
@@ -919,6 +994,30 @@ def _w57_check_per_claim_binding(
     warnings: List[str] = []
     sources_upper = {fn.upper(): _source_line_count(multi_source.get(fn))
                      for fn in multi_source}
+
+    # 1.0 (W78): prose-framing function citations. Reuses the W58 filter
+    # via :func:`_w57_passes_function_name_filters` so table tokens
+    # (FCT_*, DIM_*, ABL_*-when-followed-by-"table"), column names, and
+    # alias literals don't trip the check. Same warning text as 1.1 so
+    # downstream dedup in :func:`w57_enforce_grounding` collapses any
+    # overlap with parenthesised bindings of the same fabricated name.
+    seen_prose: set[str] = set()
+    for match in _W57_PROSE_FUNCTION_REF_RE.finditer(markdown):
+        cand = match.group(1) or match.group(2)
+        if not cand:
+            continue
+        if not _w57_passes_function_name_filters(cand):
+            continue
+        cu = cand.upper()
+        if cu in sources_upper:
+            continue
+        if cu in seen_prose:
+            continue
+        seen_prose.add(cu)
+        warnings.append(
+            f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
+            f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
+        )
 
     # 1.1 + 1.2: function-name-bound citations
     for match in _W57_FUNC_CITATION_RE.finditer(markdown):
