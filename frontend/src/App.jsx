@@ -69,9 +69,13 @@ export default function App() {
   }, [deleteSession]);
 
   const handleSend = useCallback(
-    async (text) => {
+    async (text, options = {}) => {
       if (!activeSession) return;
       const sid = activeSession.id;
+      // W79: ChatInput passes the dropdown's selected scope here. Retry
+      // and edit (which call onSend without options) get the default
+      // "ALL" — fanning out across every discovered schema.
+      const schemaScope = options.schemaScope || 'ALL';
 
       // Add user message
       addMessage(sid, { role: 'user', content: text });
@@ -94,7 +98,7 @@ export default function App() {
       let meta = null;
 
       await streamQuery(
-        text, sid, ENGINEER_ID, provider, model,
+        text, sid, ENGINEER_ID, provider, model, schemaScope,
         {
           onStage: (stageData) => {
             updateLastMessage(sid, (msg) => ({

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, AlertTriangle, XCircle, Info, ChevronRight, ExternalLink } from 'lucide-react';
+import { Check, AlertTriangle, XCircle, Info, ChevronRight, ExternalLink, Database } from 'lucide-react';
 import clsx from 'clsx';
 
 // Severity is inferred client-side from the warning's prefix code, since the
@@ -97,6 +97,13 @@ export default function TrustBanner({ data }) {
   const counts = flags.reduce((a, f) => ({ ...a, [f.severity]: (a[f.severity] || 0) + 1 }), {});
 
   const sources = data?.source_citations || [];
+  // W79: schemas that contributed candidates this turn. The backend
+  // emits a list (possibly empty) on both the meta and done payloads;
+  // the App-level merge spreads meta into data so this prop reads the
+  // same key regardless of which event arrived last.
+  const schemasSearched = Array.isArray(data?.schema_searched)
+    ? data.schema_searched.filter(Boolean)
+    : [];
 
   return (
     <div className={clsx(
@@ -124,6 +131,7 @@ export default function TrustBanner({ data }) {
           <meta.Icon size={13} />
         </span>
         <span className="text-[12.5px] font-semibold text-ivory">{meta.label}</span>
+        {schemasSearched.length > 0 && <SchemaChip schemas={schemasSearched} />}
         {open && flags.length > 0 && (
           <>
             <span className="text-ivory-faint">·</span>
@@ -156,6 +164,26 @@ export default function TrustBanner({ data }) {
         </ul>
       )}
     </div>
+  );
+}
+
+// W79: small inline chip surfacing which schema(s) actually returned
+// candidates for this turn. Sits next to the verdict pill in the trust
+// banner header so users can confirm the answer's provenance at a
+// glance without expanding the panel.
+function SchemaChip({ schemas }) {
+  if (!schemas || schemas.length === 0) return null;
+  const label = schemas.length === 1 ? 'Schema' : 'Schemas';
+  const value = schemas.join(', ');
+  return (
+    <span
+      className="inline-flex items-center gap-1 ml-1.5 px-1.5 py-0.5 rounded text-[10.5px] font-mono border border-line bg-panel-2 text-ivory-dim"
+      title={`Retrieved from ${value}`}
+    >
+      <Database size={10} className="opacity-70" />
+      <span className="uppercase tracking-wider text-[9.5px] text-ivory-faint">{label}</span>
+      <span className="text-ivory">{value}</span>
+    </span>
   );
 }
 
