@@ -28,10 +28,12 @@ from pydantic import BaseModel
 
 from src.agents.orchestrator import (
     Orchestrator,
+    detect_business_identifiers,
     extract_function_candidates,
     function_exists_in_graph,
     find_similar_function_names,
     build_function_not_found_response,
+    resolve_bi_to_function,
 )
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
@@ -578,7 +580,7 @@ app.add_middleware(CorrelationIdMiddleware)
 
 
 class QueryRequest(BaseModel):
-    """Request body for the /v1/query endpoint.
+    """Request body for the /v1/query and /v1/stream endpoints.
 
     Attributes:
         query: The user's natural language query or slash command.
@@ -586,6 +588,12 @@ class QueryRequest(BaseModel):
         engineer_id: Identifier for the requesting engineer.
         provider: LLM provider to use. Optional.
         model: Specific model name to use. Optional.
+        schema_scope: W79 — user-driven schema selection from the UI
+            dropdown. ``"ALL"`` (default) fans retrieval out across
+            every discovered schema with per-schema top-K aggregation.
+            A specific schema name (``"OFSMDM"`` / ``"OFSERM"`` /
+            ``"FSDM"`` / ``"FSAPPS"``) restricts retrieval to that
+            schema and overrides the LLM-inferred schema_name.
     """
 
     model_config = {"strict": True}
@@ -595,6 +603,7 @@ class QueryRequest(BaseModel):
     engineer_id: str
     provider: Optional[str] = None
     model: Optional[str] = None
+    schema_scope: str = "ALL"
 
 
 @app.post("/v1/query")
@@ -657,6 +666,8 @@ async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
             "graph_node_ids": [],
             "graph_available": _graph_available,
             "bi_routing": {},
+            "schema_scope": _normalize_schema_scope(request.schema_scope),
+            "schemas_searched": [],
             "output": {},
             "partial_flag": False,
         }
@@ -740,6 +751,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 return
 
             # Run the pipeline up to (but not including) the LLM explanation
+            schema_scope = _normalize_schema_scope(request.schema_scope)
             initial_state: LogicState = {
                 "session_id": request.session_id,
                 "correlation_id": correlation_id,
@@ -768,6 +780,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "phase2_actual_value": None,
                 "unsupported_reason": "",
                 "bi_routing": {},
+                "schema_scope": schema_scope,
+                "schemas_searched": [],
                 "output": {},
                 "partial_flag": False,
             }
@@ -795,6 +809,24 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             if state.get("partial_flag"):
                 yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
                 return
+
+            # W79: when the user scoped to a specific schema in the UI,
+            # the dropdown wins over the classifier's schema_name. The
+            # LLM-inferred field is left as a soft signal (still on the
+            # classifier output object) but state["schema"] — the value
+            # every downstream call site reads — is rewritten to the user
+            # choice. ALL mode is left alone here; the vector-search and
+            # graph-pipeline branches below decide per-call whether to fan
+            # out across discovered_schemas or constrain.
+            if schema_scope != _SCHEMA_SCOPE_ALL:
+                if state.get("schema") and state["schema"] != schema_scope:
+                    logger.info(
+                        "W79: user scope %s overrides classifier schema %s "
+                        "(query=%r) | correlation_id=%s",
+                        schema_scope, state["schema"],
+                        request.query[:80], correlation_id,
+                    )
+                state["schema"] = schema_scope
 
             # --- Phase 1 schema-from-graph hook: when the classifier did
             # not stamp a schema (LLM error / minimal output) and the user
@@ -855,6 +887,35 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     yield event
                 return
 
+            # --- W79 cross-scope precheck (D2). When the user scoped to a
+            # specific schema but the named function lives in a different
+            # one, decline with a structured "wrong scope" response that
+            # tells the user exactly which schema to switch to. Runs
+            # BEFORE the W37 function-precheck so an exists-elsewhere
+            # function gets the more specific scope-mismatch framing
+            # rather than the generic "not found" framing. Two passes:
+            # the function-name pass catches "How does FN_X work?"
+            # queries; the BI pass catches "How is CAP973 calculated?"
+            # queries before BI routing rewrites state["schema"].
+            if state.get("query_type") in (
+                "COLUMN_LOGIC", "VARIABLE_TRACE", "FUNCTION_LOGIC"
+            ):
+                with stage_timer("scope_mismatch_precheck", correlation_id):
+                    scope_mismatch = _run_scope_mismatch_precheck(
+                        request.query, schema_scope, correlation_id
+                    )
+                if scope_mismatch is None:
+                    with stage_timer(
+                        "scope_mismatch_precheck_bi", correlation_id
+                    ):
+                        scope_mismatch = _run_bi_scope_mismatch_precheck(
+                            state, schema_scope, correlation_id
+                        )
+                if scope_mismatch is not None:
+                    async for event in _stream_declined_response(scope_mismatch):
+                        yield event
+                    return
+
             # --- Function-name pre-check (W37): if the user named a specific
             # PL/SQL function that isn't in the graph, short-circuit with a
             # DECLINED response. This prevents the semantic-search fallback
@@ -881,7 +942,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     _orchestrator.apply_bi_routing(state)
 
             # Stage 2: Semantic search
-            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Searching across database schemas...'})}\n\n"
+            search_stage_msg = (
+                "Searching across all schemas..."
+                if schema_scope == _SCHEMA_SCOPE_ALL
+                else f"Searching {schema_scope}..."
+            )
+            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': search_stage_msg})}\n\n"
             from langchain_openai import OpenAIEmbeddings
             import ssl as _ssl
             import httpx as _httpx
@@ -896,12 +962,33 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             search_query = state.get("object_name", state["raw_query"])
             with stage_timer("embedding_create", correlation_id):
                 query_embedding = await embeddings.aembed_query(search_query)
-            with stage_timer("vector_search", correlation_id):
-                results = await _vector_store.search(query_embedding=query_embedding, top_k=5)
+            # W79: ALL fans out across every discovered schema with
+            # per-schema top-K so a mediocre OFSMDM hit cannot crowd out
+            # a strong OFSERM hit (global top-K would let it). Scoped
+            # mode passes the schema through to the vector store as a
+            # TAG pre-filter on the KNN clause.
+            with stage_timer(
+                "vector_search", correlation_id, schema_scope=schema_scope
+            ):
+                results, schemas_searched = await _run_scoped_vector_search(
+                    query_embedding=query_embedding,
+                    schema_scope=schema_scope,
+                    top_k=5,
+                )
             state["search_results"] = results
-            state["schema"] = state.get("schema") or fallback_to_default_schema(
-                "main.semantic_search", correlation_id,
-            )
+            state["schemas_searched"] = schemas_searched
+            # W79: set state["schema"] for downstream callers that still
+            # treat it as the request's primary schema. Scoped mode
+            # already stamped it; for ALL mode prefer the top-ranked
+            # result's schema, falling back to the legacy default when
+            # nothing matched.
+            if not state.get("schema"):
+                if results and results[0].get("schema"):
+                    state["schema"] = results[0]["schema"]
+                else:
+                    state["schema"] = fallback_to_default_schema(
+                        "main.semantic_search", correlation_id,
+                    )
 
             # Stage 3: Fetch source code
             fn_names = list(dict.fromkeys(r["function_name"] for r in results)) if results else []
@@ -915,6 +1002,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "object_name": state.get("object_name", "")[:100],
                 "query_type": state.get("query_type", ""),
                 "functions_analyzed": list(state.get("multi_source", {}).keys()),
+                # W79: schemas that returned at least one candidate. The UI
+                # renders this as a chip so users can confirm where the
+                # answer came from. Single-element list for scoped queries,
+                # multi-element for ALL fan-out hits.
+                "schema_searched": list(state.get("schemas_searched", []) or []),
+                "schema_scope": schema_scope,
                 "correlation_id": correlation_id,
             }
             yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
@@ -1316,6 +1409,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "source_citations": grounding["source_citations"],
                 "warnings": grounding["warnings"],
                 "functions_analyzed": functions_analyzed,
+                # W79: schemas that contributed candidates this turn.
+                "schema_searched": list(state.get("schemas_searched", []) or []),
+                "schema_scope": schema_scope,
                 "correlation_id": correlation_id,
                 "explanation": {
                     "markdown": final_markdown,
@@ -1459,6 +1555,7 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
     # explanation, sanity_warnings, used_fallback, verification_sql
     origin = result.get("origin") or {}
     row = result.get("row") or {}
+    schemas_searched = [schema] if schema else []
     meta = {
         "schema": schema,
         "query_type": query_type,
@@ -1470,6 +1567,11 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         "origin_value": origin.get("origin_value"),
         "traceable_via_graph": origin.get("traceable_via_graph"),
         "row_found": bool(row),
+        # W79: phase2 routes to a single schema (state["schema"] which
+        # the user-scope override or pivot already settled on), so the
+        # UI chip shows that one schema.
+        "schema_searched": schemas_searched,
+        "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
@@ -1492,6 +1594,8 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         "sanity_warnings": result.get("sanity_warnings") or [],
         "used_fallback": bool(result.get("used_fallback")),
         "badge": "VERIFIED" if not result.get("sanity_warnings") else "REVIEW",
+        "schema_searched": schemas_searched,
+        "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
         "explanation": {"markdown": full_markdown},
         "origin": origin,
@@ -1508,6 +1612,111 @@ def _chunk_text(text: str, chunk_size: int = 4):
         return
     for i in range(0, len(text), chunk_size):
         yield text[i:i + chunk_size]
+
+
+# W79: canonical scope tokens accepted from the request body. The frontend
+# already sends one of these (the "all" UI option maps to "ALL"); this set
+# is the single place where backend-side validation lives. Anything else
+# falls back to "ALL" so a malformed request degrades to the safe default
+# rather than 400ing out.
+_SCHEMA_SCOPE_ALL = "ALL"
+_SCHEMA_SCOPE_VALUES: frozenset[str] = frozenset(
+    {_SCHEMA_SCOPE_ALL, "OFSMDM", "OFSERM", "FSDM", "FSAPPS"}
+)
+
+
+async def _run_scoped_vector_search(
+    *,
+    query_embedding: list,
+    schema_scope: str,
+    top_k: int = 5,
+) -> tuple[list[Dict[str, Any]], list[str]]:
+    """W79 retrieval dispatcher — ALL fan-out vs. single-schema scope.
+
+    Returns a ``(results, schemas_contributed)`` tuple:
+
+    * ``results`` is the list of search hits the rest of the pipeline
+      consumes. Each hit already carries its source schema (the vector
+      store stamps ``schema`` on every doc since Phase 3).
+    * ``schemas_contributed`` is the deduped list of schemas that
+      actually returned at least one hit, used for the meta + done SSE
+      events so the UI can show "Schema: OFSERM" / "Schemas: OFSMDM,
+      OFSERM" / etc.
+
+    For ``schema_scope == "ALL"``: iterate every discovered schema and
+    issue an independent top-K KNN per schema. Aggregating by global
+    cosine score would let one schema's mediocre matches crowd out
+    another schema's good ones — top-K-per-schema preserves the
+    strongest candidates from each side.
+
+    For a specific schema: pass ``schema_filter`` to the vector store so
+    the KNN runs against the pre-filtered ``@schema:{<name>}`` slice
+    only. Identical to the pre-W79 behaviour scoped to one schema.
+    """
+    if schema_scope == _SCHEMA_SCOPE_ALL:
+        # Snapshot the live schema list once. Falls back to the
+        # manifest set when graph-Redis is unavailable.
+        all_schemas = (
+            discovered_schemas(_graph_redis)
+            if _graph_redis is not None
+            else []
+        )
+        if not all_schemas:
+            # Pre-loader / clean-Redis case: degrade to the unfiltered
+            # search so the request still returns something.
+            hits = await _vector_store.search(
+                query_embedding=query_embedding, top_k=top_k
+            )
+            contributed = sorted({h.get("schema") for h in hits if h.get("schema")})
+            return hits, contributed
+
+        aggregated: list[Dict[str, Any]] = []
+        contributed: list[str] = []
+        for schema in all_schemas:
+            try:
+                hits = await _vector_store.search(
+                    query_embedding=query_embedding,
+                    top_k=top_k,
+                    schema_filter=schema,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "W79 ALL fan-out: vector search failed for %s: %s",
+                    schema, exc,
+                )
+                continue
+            if not hits:
+                continue
+            aggregated.extend(hits)
+            contributed.append(schema)
+        return aggregated, contributed
+
+    # Specific-schema mode.
+    hits = await _vector_store.search(
+        query_embedding=query_embedding,
+        top_k=top_k,
+        schema_filter=schema_scope,
+    )
+    contributed = [schema_scope] if hits else []
+    return hits, contributed
+
+
+def _normalize_schema_scope(raw: Optional[str]) -> str:
+    """Coerce an inbound schema_scope value to a canonical token.
+
+    Empty / None / unrecognized values fall back to ``"ALL"``. The
+    comparison is case-insensitive on input but always returns the
+    upper-case canonical form, so downstream code can use ``==`` against
+    the constants in :data:`_SCHEMA_SCOPE_VALUES` without worrying about
+    casing drift between the UI ("all") and Redis-stored schema names
+    ("OFSMDM", "OFSERM").
+    """
+    if not raw:
+        return _SCHEMA_SCOPE_ALL
+    upper = str(raw).strip().upper()
+    if upper in _SCHEMA_SCOPE_VALUES:
+        return upper
+    return _SCHEMA_SCOPE_ALL
 
 
 async def _data_query_stream(state, user_query, correlation_id, provider, model):
@@ -1611,15 +1820,23 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
         return
 
+    # W79: surface the schema DataQueryAgent actually executed against.
+    # When ALL was selected, the agent may have pivoted via Phase 4
+    # `schemas_for_table` — the resolved schema is the source of truth
+    # here, not the orchestrator-classified default.
+    routed_schema = result.get("schema") or schema
+    schemas_searched = [routed_schema] if routed_schema else []
     meta = {
         # Phase 4: prefer the schema DataQueryAgent actually routed to —
         # may differ from the orchestrator-classified `schema` when the
         # user named an OFSERM table on a default-OFSMDM request.
-        "schema": result.get("schema") or schema,
+        "schema": routed_schema,
         "query_type": "DATA_QUERY",
         "status": result.get("status"),
         "query_kind": result.get("query_kind"),
         "row_count": result.get("row_count"),
+        "schema_searched": schemas_searched,
+        "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
@@ -1655,6 +1872,8 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "suspicious": suspicious,
         "suspicion_reason": result.get("suspicion_reason"),
         "summary": result.get("summary"),
+        "schema_searched": schemas_searched,
+        "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
         "explanation": {"markdown": explanation},
         "sql": result.get("sql"),
@@ -1668,6 +1887,229 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     }
     with stage_timer("done_emit", correlation_id, route="data_query"):
         yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
+
+
+def _build_scope_mismatch_response(
+    *,
+    requested_function: str,
+    scoped_schema: str,
+    other_schemas: List[str],
+    correlation_id: str,
+) -> Dict[str, Any]:
+    """W79: assemble a structured "wrong scope" DECLINED response.
+
+    Mirrors the W37/W45 ``function_not_found`` shape so the frontend's
+    DECLINED/UNVERIFIED rendering paths don't need new branching. The
+    body explains the mismatch in user-facing terms and points at the
+    schema the named function actually lives in, plus the dropdown
+    action the user needs to take.
+    """
+    schema_listing = ", ".join(other_schemas) if other_schemas else "another schema"
+    parts = [
+        f"`{requested_function}` is not in **{scoped_schema}**.",
+        "",
+        f"It exists in {schema_listing}. Switch the schema scope in the "
+        "composer (or set it to **All schemas**) and re-run the query.",
+    ]
+    message = "\n".join(parts)
+    return {
+        "type": "scope_mismatch",
+        "status": "declined",
+        "requested_function": requested_function,
+        "requested_schema": scoped_schema,
+        "available_schemas": other_schemas,
+        "validated": False,
+        "badge": "DECLINED",
+        "confidence": 0.0,
+        "source_citations": [],
+        "warnings": [
+            f"SCOPE_MISMATCH: {requested_function} is not indexed in "
+            f"{scoped_schema}; it lives in "
+            f"{schema_listing}."
+        ],
+        "message": message,
+        "explanation": {"markdown": message, "summary": message[:200]},
+        # W79: schemas_searched is empty because nothing matched in
+        # scope. The UI hides the chip when the list is empty.
+        "schema_searched": [],
+        "schema_scope": scoped_schema,
+        "correlation_id": correlation_id,
+    }
+
+
+def _run_scope_mismatch_precheck(
+    query: str, schema_scope: str, correlation_id: str
+) -> Optional[Dict[str, Any]]:
+    """W79 D2 cross-scope detection.
+
+    Fires when:
+      * the user scoped to a specific schema (not ALL)
+      * the query names a PL/SQL function (extract_function_candidates)
+      * the function is NOT indexed in the scoped schema, BUT
+      * it IS indexed in at least one other discovered schema
+
+    In that case the existing pipeline would otherwise either decline
+    via the W37 function-precheck (when graph_redis is None) or
+    silently retrieve nothing useful from the scoped schema's vector
+    slice. Returning a structured response tells the user exactly how
+    to recover (switch scope) instead of returning a confidently-empty
+    answer.
+
+    Returns None when the precondition fails (ALL mode, no graph
+    Redis, no named function, function exists in scope, function
+    exists nowhere — the W37 function-precheck handles the last case).
+    """
+    if schema_scope == _SCHEMA_SCOPE_ALL:
+        return None
+    if _graph_redis is None:
+        return None
+    candidates = extract_function_candidates(query)
+    if not candidates:
+        return None
+
+    # W79: only fire when the named function genuinely lives in another
+    # schema. Iterate candidates so a query naming both an OFSMDM and
+    # an OFSERM function (rare) still fires for the first scope-violating
+    # name.
+    for candidate in candidates:
+        if function_exists_in_graph(
+            candidate, _graph_redis, schemas=[schema_scope]
+        ):
+            continue  # exists in the user's scope — no mismatch
+        # Find every other schema where it does live.
+        other_schemas: list[str] = []
+        for sch in discovered_schemas(_graph_redis):
+            if sch == schema_scope:
+                continue
+            if function_exists_in_graph(candidate, _graph_redis, schemas=[sch]):
+                other_schemas.append(sch)
+        if not other_schemas:
+            # Function exists nowhere — let function_precheck (W37)
+            # handle it with its own response shape so we don't
+            # double-decline.
+            continue
+        logger.info(
+            "W79 scope mismatch: function=%s scoped=%s other=%s | "
+            "correlation_id=%s",
+            candidate, schema_scope, other_schemas, correlation_id,
+        )
+        return _build_scope_mismatch_response(
+            requested_function=candidate,
+            scoped_schema=schema_scope,
+            other_schemas=other_schemas,
+            correlation_id=correlation_id,
+        )
+    return None
+
+
+def _run_bi_scope_mismatch_precheck(
+    state: LogicState, schema_scope: str, correlation_id: str
+) -> Optional[Dict[str, Any]]:
+    """W79 D2 cross-scope detection for business-identifier (BI) queries.
+
+    Companion to :func:`_run_scope_mismatch_precheck` — the function-name
+    detector handles "How does FN_X work?" queries; this one handles
+    "How is CAP973 calculated?" queries where the user names a CAP-code
+    (or other configured business identifier) instead of a function.
+
+    BI routing (W35 Phase 7) normally rewrites ``state["schema"]`` to the
+    schema whose literal index owns the identifier. Under W79 the user's
+    dropdown choice must take priority: when scoped to a specific schema
+    that doesn't own the identifier, return a structured scope-mismatch
+    response pointing at the schema that does, instead of letting BI
+    silently pivot.
+
+    Mirrors the gating in
+    :func:`src.agents.orchestrator.apply_bi_routing`:
+      * fires only for COLUMN_LOGIC / FUNCTION_LOGIC / VARIABLE_TRACE
+      * VARIABLE_TRACE checks the ``target_variable`` field, others
+        scan ``raw_query``
+      * an explicit function-name override in the query short-circuits
+        to None (the user's named function wins, same as BI's own rule)
+
+    Returns None when:
+      * ALL mode (no scope set)
+      * graph Redis unavailable
+      * query type isn't BI-eligible
+      * no BI identifier in the query
+      * the identifier resolves under the scoped schema (BI runs as
+        normal)
+      * the identifier resolves nowhere (let downstream paths handle)
+      * the user named a function that exists under the scoped schema
+        (explicit-name override beats BI scope-mismatch, same as it
+        beats BI itself)
+    """
+    if schema_scope == _SCHEMA_SCOPE_ALL:
+        return None
+    if _graph_redis is None:
+        return None
+
+    qt = state.get("query_type", "") or ""
+    raw_query = state.get("raw_query", "") or ""
+
+    if qt in ("COLUMN_LOGIC", "FUNCTION_LOGIC"):
+        haystack = raw_query
+    elif qt == "VARIABLE_TRACE":
+        haystack = (state.get("target_variable") or "").strip()
+        if not haystack:
+            return None
+    else:
+        return None
+
+    # Explicit-function-name override — when the user names a function
+    # that exists under their chosen scope, that function wins over any
+    # BI identifier also present in the query (same semantics BI itself
+    # uses internally before resolving CAP-codes).
+    candidates = extract_function_candidates(raw_query)
+    for cand in candidates:
+        if function_exists_in_graph(
+            cand, _graph_redis, schemas=[schema_scope]
+        ):
+            return None
+
+    bi_patterns = getattr(_orchestrator, "_bi_patterns", None)
+    identifiers = detect_business_identifiers(haystack, bi_patterns)
+    if not identifiers:
+        return None
+
+    primary = identifiers[0]
+    # Does the identifier resolve under the user's chosen scope? If so,
+    # BI routing is fine — let it run.
+    in_scope = resolve_bi_to_function(
+        primary, _graph_redis, schemas=[schema_scope]
+    )
+    if in_scope is not None:
+        return None
+
+    # Identifier doesn't live in the scoped schema. Find every other
+    # schema where it DOES live so the response can point the user at
+    # the right scope.
+    other_schemas: list[str] = []
+    for sch in discovered_schemas(_graph_redis):
+        if sch == schema_scope:
+            continue
+        resolved = resolve_bi_to_function(
+            primary, _graph_redis, schemas=[sch]
+        )
+        if resolved is not None:
+            other_schemas.append(sch)
+    if not other_schemas:
+        # Identifier is configured (matched a BI pattern) but doesn't
+        # live anywhere. Let the normal flow run — semantic search will
+        # produce its usual W45 / empty-retrieval response.
+        return None
+
+    logger.info(
+        "W79 BI scope mismatch: identifier=%s scoped=%s other=%s | "
+        "correlation_id=%s",
+        primary, schema_scope, other_schemas, correlation_id,
+    )
+    return _build_scope_mismatch_response(
+        requested_function=primary,
+        scoped_schema=schema_scope,
+        other_schemas=other_schemas,
+        correlation_id=correlation_id,
+    )
 
 
 def _run_function_precheck(query: str, correlation_id: str) -> Optional[Dict[str, Any]]:
@@ -1793,15 +2235,32 @@ def _detect_partial_source_for_query(
 
 
 async def _stream_declined_response(payload: Dict[str, Any]):
-    """Yield a DECLINED response as SSE tokens + meta + done events."""
+    """Yield a DECLINED response as SSE tokens + meta + done events.
+
+    Shared by the W37 ``function_not_found`` and the W79 ``scope_mismatch``
+    branches — both produce the same SSE event sequence (stage → meta →
+    tokens → done) but describe a different problem.
+    """
+    response_type = payload.get("type", "function_not_found")
+    if response_type == "scope_mismatch":
+        stage_message = "Named function lives in a different schema"
+    else:
+        stage_message = "Named function not found in graph"
     meta = {
-        "type": payload.get("type", "function_not_found"),
+        "type": response_type,
         "status": "declined",
         "requested_function": payload.get("requested_function"),
         "similar_functions": payload.get("similar_functions") or [],
+        # W79: scope_mismatch carries a list of schemas where the named
+        # function actually lives; surface those so the UI can render
+        # them in the same "schema indicator" chip path the normal flow
+        # uses for schemas_searched.
+        "available_schemas": payload.get("available_schemas") or [],
+        "schema_searched": payload.get("schema_searched") or [],
+        "schema_scope": payload.get("schema_scope") or "",
         "correlation_id": payload.get("correlation_id"),
     }
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Named function not found in graph'})}\n\n"
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': stage_message})}\n\n"
     yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
     message = payload.get("message") or ""
     for chunk in _chunk_text(message):

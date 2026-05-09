@@ -75,6 +75,16 @@ class LogicState(TypedDict):
     # routing did not fire — the existing classification + retrieval path
     # runs unchanged.
     bi_routing: dict
+    # W79: user-driven schema selection. "ALL" fans retrieval out across
+    # every discovered schema with per-schema top-K. Any other value
+    # ("OFSMDM" / "OFSERM" / "FSDM" / "FSAPPS") restricts retrieval to
+    # that schema and overrides the LLM-inferred schema_name.
+    schema_scope: str
+    # W79: schemas that actually contributed candidates during this
+    # request — emitted on the done SSE event so the UI can show where
+    # the answer came from. List of schema names; empty when nothing was
+    # retrieved (DECLINED / scope-mismatch case).
+    schemas_searched: list
     # Final output
     output: dict
     partial_flag: bool

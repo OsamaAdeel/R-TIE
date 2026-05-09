@@ -1,6 +1,6 @@
 const API_BASE = '';
 
-export async function sendQuery(query, sessionId, engineerId, provider, model) {
+export async function sendQuery(query, sessionId, engineerId, provider, model, schemaScope) {
   const body = {
     query,
     session_id: sessionId,
@@ -8,6 +8,7 @@ export async function sendQuery(query, sessionId, engineerId, provider, model) {
   };
   if (provider) body.provider = provider;
   if (model) body.model = model;
+  if (schemaScope) body.schema_scope = schemaScope;
 
   const res = await fetch(`${API_BASE}/v1/query`, {
     method: 'POST',
@@ -33,6 +34,9 @@ export async function sendQuery(query, sessionId, engineerId, provider, model) {
  * @param {string} engineerId
  * @param {string|null} provider
  * @param {string|null} model
+ * @param {string|null} schemaScope - W79: "ALL" or one of {OFSMDM, OFSERM,
+ *                                    FSDM, FSAPPS}. Omitted/null falls
+ *                                    back to backend default ("ALL").
  * @param {object} callbacks
  * @param {function} callbacks.onStage         - per `event: stage` SSE frame
  * @param {function} callbacks.onMeta          - once with {schema, functions_analyzed, ...}
@@ -50,6 +54,7 @@ export async function streamQuery(
   engineerId,
   provider,
   model,
+  schemaScope,
   { onStage, onMeta, onToken, onDone, onClarification, onError, onAbort } = {},
   { signal } = {},
 ) {
@@ -60,6 +65,7 @@ export async function streamQuery(
   };
   if (provider) body.provider = provider;
   if (model) body.model = model;
+  if (schemaScope) body.schema_scope = schemaScope;
 
   try {
     const res = await fetch(`${API_BASE}/v1/stream`, {

@@ -10,10 +10,10 @@ const SLASH_COMMANDS = [
   { cmd: '/refresh-schema', hint: 'Re-introspect DB schema' },
 ];
 
-// Schema scope chip is cosmetic — backend's QueryRequest does not currently
-// accept a `schema` filter (TODO(backend): add schema to /v1/query +
-// /v1/stream and forward to the orchestrator). Kept in the UI to match the
-// design, but no value is sent.
+// W79: the dropdown is the source of truth for which schema(s) the
+// backend retrieves from. The selected id is forwarded as `schema_scope`
+// in the /v1/stream payload; "all" maps to the wire value "ALL" and
+// fans out across every discovered schema with per-schema top-K.
 const SCHEMA_OPTIONS = [
   { id: 'all', label: 'All schemas', desc: 'Search across every indexed schema' },
   { id: 'OFSMDM', label: 'OFSMDM', desc: 'Master data model' },
@@ -54,8 +54,8 @@ export default function ChatInput({ onSend, onStop, disabled, provider, model, o
   const [activeIndex, setActiveIndex] = useState(0);
   const textareaRef = useRef(null);
 
-  // Cosmetic state — schema scope + citations toggle don't reach the backend
-  // yet (see SCHEMA_OPTIONS comment above and TODO in api/client.js).
+  // W79: schema dropdown drives the backend `schema_scope` field.
+  // Citations toggle is still cosmetic / client-side only.
   const [schema, setSchema] = useState(SCHEMA_OPTIONS[0]);
   const [citationsOn, setCitationsOn] = useState(true);
   const [schemaOpen, setSchemaOpen] = useState(false);
@@ -134,7 +134,11 @@ export default function ChatInput({ onSend, onStop, disabled, provider, model, o
   const submit = () => {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;
-    onSend(trimmed);
+    // W79: forward dropdown selection as schema_scope. The "all"
+    // sentinel maps to the wire value "ALL" so the backend can dispatch
+    // on a single canonical token.
+    const schemaScope = schema.id === 'all' ? 'ALL' : schema.id;
+    onSend(trimmed, { schemaScope });
     setValue('');
     setActiveIndex(0);
   };
@@ -240,7 +244,7 @@ export default function ChatInput({ onSend, onStop, disabled, provider, model, o
               {/* Commands chip */}
               <Chip onClick={insertSlash} icon={<Slash size={12} />}>Commands</Chip>
 
-              {/* Schema scope chip — cosmetic until backend support */}
+              {/* Schema scope chip — drives backend `schema_scope` (W79) */}
               <div className="relative" ref={schemaRef}>
                 <Chip
                   onClick={() => setSchemaOpen((v) => !v)}
