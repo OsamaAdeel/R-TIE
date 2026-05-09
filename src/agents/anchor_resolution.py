@@ -1,0 +1,233 @@
+"""W70 — explainer anchor resolution.
+
+Determines the user's primary function via a confidence-tiered cascade
+(W76 anchor → clean classifier object_name → BI routing → semantic
+top-1) and produces a prompt block prepended to
+``SEMANTIC_EXPLANATION_PROMPT`` in
+:meth:`logic_explainer.LogicExplainer.stream_semantic` and
+:meth:`logic_explainer.LogicExplainer.explain_semantic`.
+
+Goal: prevent the explainer LLM from anchoring its body on the wrong
+function within the retrieved set. v2 benchmark Run 7 surfaced two
+flavors of anchor drift:
+
+  Flavor 1 — body anchors on a function NOT in retrieval (CAP973
+  citing ``REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP``).
+
+  Flavor 2 — body anchors on a real-but-wrong function FROM retrieval
+  (the ``OPS_RISK_DATA_POPULATION_CSTM`` query whose body drifted to
+  the upstream ``CAP_CONSL_EFFECTIVE_SHAREHOLDING_PERCENT``).
+
+W70 fixes anchor selection given retrieval; it does NOT change what
+gets retrieved. For CAP-code queries where retrieval doesn't include
+the actual computer function, W70 prevents fabricating a name but
+cannot produce the right answer — that's W35 Phase 5-7 territory.
+
+Asymmetric design: false positives (anchoring on the wrong function
+despite correct primary identification) are NOT tolerable; the
+high-confidence MUST language enforces this. False negatives (overly
+rigid output when the primary's source genuinely doesn't answer the
+user's question) are tolerable — the "say so explicitly" clause lets
+the LLM honestly decline rather than anchor on a sibling.
+"""
+
+from typing import Any, Dict, Optional
+
+from src.agents.orchestrator import extract_function_candidates
+from src.logger import get_logger
+from src.pipeline.state import LogicState
+
+logger = get_logger(__name__, concern="app")
+
+
+def _is_clean_function_name(s: str) -> bool:
+    """True iff *s* is a single PL/SQL-looking identifier and nothing else.
+
+    Distinguishes the orchestrator's clean-anchor ``object_name`` (set
+    by ``apply_named_function_anchor`` or ``apply_bi_routing``) from
+    the classifier's enriched search blob ("How does FN_X work? Explain
+    ..."). Also rejects W58-flagged tokens (table prefixes, alias
+    literals, column prefixes, manifest names) by reusing
+    :func:`extract_function_candidates`' filtering — those are never
+    callable function names.
+    """
+    if not s:
+        return False
+    s = s.strip()
+    if not s or any(ch.isspace() for ch in s):
+        return False
+    candidates = extract_function_candidates(s)
+    return len(candidates) == 1 and candidates[0] == s
+
+
+def determine_primary_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
+    """Cascade the strongest available anchor signal in *state*.
+
+    Order of evaluation:
+
+      1. ``state["w76_anchor"]["function"]`` — explicit
+         ``"In <FunctionName>, ..."`` prefix or alias-literal recovery
+         (high confidence). Source is ``"w76_<sub>"`` where ``<sub>``
+         is whatever the orchestrator stamped (typically ``prefix`` or
+         ``alias_fallback``).
+
+      2. ``state["object_name"]`` when it's a clean function name AND
+         BI routing did NOT rewrite it (high confidence — preserved
+         for the day the classifier produces clean function names
+         directly; today the classifier always emits an enriched
+         search blob, so this layer is reached primarily after a
+         future classifier change or after w76 promotion which
+         layer 1 already handled).
+
+      3. ``state["bi_routing"]["function"]`` — CAP-code or other
+         business identifier resolved to a function (medium
+         confidence). Distinct from layer 2 because the user named a
+         business identifier rather than a function, so the framing
+         and confidence differ.
+
+      4. Lowest-score entry in ``state["multi_source"]`` — semantic
+         top-1 (low confidence). Cosine distance: smaller is closer.
+
+    Returns ``None`` only when none of the four layers can produce a
+    candidate (e.g. ``multi_source`` is empty, a DECLINED-shaped
+    state). The caller then skips anchor injection and emits the
+    existing prompt unchanged.
+    """
+    w76 = state.get("w76_anchor") or {}
+    w76_fn = (w76.get("function") or "").strip()
+    if w76_fn:
+        sub = w76.get("source") or "prefix"
+        return {
+            "function": w76_fn,
+            "source": f"w76_{sub}",
+            "confidence": "high",
+        }
+
+    bi = state.get("bi_routing") or {}
+    bi_fn = (bi.get("function") or "").strip()
+
+    # Layer 2 is gated on "BI didn't fire". When BI rewrote
+    # object_name, the same function is reachable as either a clean
+    # object_name (high confidence) or a bi_routing record (medium).
+    # The medium framing is the right one — the user typed a business
+    # identifier, not a clean function name — so let layer 3 own it.
+    obj = (state.get("object_name") or "").strip()
+    if not bi_fn and _is_clean_function_name(obj):
+        return {
+            "function": obj,
+            "source": "classifier_object",
+            "confidence": "high",
+        }
+
+    if bi_fn:
+        return {
+            "function": bi_fn,
+            "source": "bi_routing",
+            "confidence": "medium",
+        }
+
+    multi_source = state.get("multi_source") or {}
+    if multi_source:
+        def _score(item):
+            data = item[1]
+            if not isinstance(data, dict):
+                return float("inf")
+            v = data.get("score")
+            if v is None:
+                return float("inf")
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float("inf")
+
+        top_fn = min(multi_source.items(), key=_score)[0]
+        return {
+            "function": top_fn,
+            "source": "semantic_top1",
+            "confidence": "low",
+        }
+
+    return None
+
+
+_HIGH_BLOCK = (
+    "PRIMARY FUNCTION: {fn}\n"
+    "\n"
+    "Your explanation MUST describe THIS function. The other functions "
+    "in the context are reference material only — describe them ONLY "
+    "when they directly explain the behavior of {fn}. If {fn}'s source "
+    "doesn't fully answer the user's question, say so explicitly rather "
+    "than describing a different function.\n"
+    "\n"
+)
+
+_MEDIUM_BLOCK = (
+    "PRIMARY FUNCTION: {fn}\n"
+    "\n"
+    "Anchor your explanation on this function. The user asked about a "
+    "business identifier (like a CAP code) which RTIE resolved to this "
+    "function. Describe what THIS function does for the requested "
+    "identifier. The other functions in the context are reference "
+    "material.\n"
+    "\n"
+)
+
+_LOW_BLOCK = (
+    "LIKELY PRIMARY FUNCTION: {fn}\n"
+    "\n"
+    "This function appeared most relevant to the user's query. Anchor "
+    "your explanation on it where reasonable. If the user's question "
+    "is better answered by a different function in the context, you "
+    "may anchor there, but state which function you're describing at "
+    "the top of your response.\n"
+    "\n"
+)
+
+
+def build_anchor_block(anchor: Optional[Dict[str, Any]]) -> str:
+    """Render the anchor block to prepend to ``SEMANTIC_EXPLANATION_PROMPT``.
+
+    Confidence-tiered:
+
+      * ``high`` — mandates the anchor with a "say so explicitly"
+        escape hatch when the primary's source is genuinely thin.
+      * ``medium`` — frames the anchor as a BI-resolved redirect.
+      * ``low`` — softens to "you may anchor elsewhere if the
+        question genuinely demands it" with an instruction to name
+        the chosen target up front.
+
+    Returns ``""`` for ``None`` input — caller emits the prompt
+    unchanged.
+    """
+    if anchor is None:
+        return ""
+    fn = anchor["function"]
+    conf = anchor["confidence"]
+    if conf == "high":
+        return _HIGH_BLOCK.format(fn=fn)
+    if conf == "medium":
+        return _MEDIUM_BLOCK.format(fn=fn)
+    return _LOW_BLOCK.format(fn=fn)
+
+
+def apply_w70_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
+    """Compute primary anchor, stamp diagnostic onto *state*, log decision.
+
+    Mirrors the W76 stamp pattern: writes ``state["w70_anchor"]`` (which
+    may be ``None``) so downstream diagnostics, tests, and operator
+    introspection can see what the explainer was told to anchor on.
+
+    Returns the anchor dict for the caller to feed into
+    :func:`build_anchor_block`. The caller is responsible for
+    prepending the rendered block to its system prompt.
+    """
+    anchor = determine_primary_anchor(state)
+    state["w70_anchor"] = anchor  # type: ignore[typeddict-item]
+    if anchor:
+        logger.info(
+            "apply_w70_anchor: anchored on %s (source=%s, confidence=%s)",
+            anchor["function"], anchor["source"], anchor["confidence"],
+        )
+    else:
+        logger.info("apply_w70_anchor: no anchor available")
+    return anchor

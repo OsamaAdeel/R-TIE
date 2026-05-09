@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from src.agents.anchor_resolution import apply_w70_anchor, build_anchor_block
 from src.pipeline.state import LogicState
 from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
@@ -1940,8 +1941,15 @@ class LogicExplainer:
             site="logic_explainer.explain_semantic",
         )
 
+        # W70: cascade-resolve the user's primary function and prepend a
+        # confidence-tiered anchor block to the existing system prompt so
+        # the LLM doesn't anchor its body on the wrong function from the
+        # retrieved set.
+        w70_anchor = apply_w70_anchor(state)
+        anchor_block = build_anchor_block(w70_anchor)
+
         messages = [
-            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
+            SystemMessage(content=anchor_block + SEMANTIC_EXPLANATION_PROMPT),
             HumanMessage(content=user_prompt),
         ]
 
@@ -1985,7 +1993,10 @@ class LogicExplainer:
         """Stream semantic explanation tokens as an async generator.
 
         Yields markdown tokens one chunk at a time for SSE streaming.
-        Does NOT update state — the caller collects the full text.
+        The caller collects the full text. The only state mutation is
+        ``state["w70_anchor"]`` (set by :func:`apply_w70_anchor` for
+        diagnostic visibility) — the streamed tokens themselves are
+        not stored back onto state.
 
         Args:
             state: Pipeline state with raw_query and multi_source.
@@ -2040,8 +2051,15 @@ class LogicExplainer:
             site="logic_explainer.stream_semantic",
         )
 
+        # W70: cascade-resolve the user's primary function and prepend a
+        # confidence-tiered anchor block to the existing system prompt so
+        # the LLM doesn't anchor its body on the wrong function from the
+        # retrieved set. Also stamps state["w70_anchor"] for diagnostics.
+        w70_anchor = apply_w70_anchor(state)
+        anchor_block = build_anchor_block(w70_anchor)
+
         messages = [
-            SystemMessage(content=SEMANTIC_EXPLANATION_PROMPT),
+            SystemMessage(content=anchor_block + SEMANTIC_EXPLANATION_PROMPT),
             HumanMessage(content=user_prompt),
         ]
 

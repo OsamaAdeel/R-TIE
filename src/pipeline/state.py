@@ -81,6 +81,14 @@ class LogicState(TypedDict):
     # rewritten to point at a function the user named elsewhere in the
     # query. Absent when neither rule fires.
     w76_anchor: dict
+    # W70: explainer-anchor diagnostic record. Populated by
+    # anchor_resolution.apply_w70_anchor right before the explainer LLM
+    # call. Carries the cascade-resolved primary function (function,
+    # source, confidence) used to build the anchor block prepended to
+    # SEMANTIC_EXPLANATION_PROMPT, or ``None`` when no anchor was
+    # available (rare — only DECLINED-shaped states with empty
+    # multi_source).
+    w70_anchor: Optional[dict]
     # W79: user-driven schema selection. "ALL" fans retrieval out across
     # every discovered schema with per-schema top-K. Any other value
     # ("OFSMDM" / "OFSERM" / "FSDM" / "FSAPPS") restricts retrieval to
