@@ -99,6 +99,40 @@ _COLUMN_NAME_PREFIXES = (
 # pre-startup paths.
 _PROCESS_SUBPROCESS_NAMES: frozenset[str] = frozenset()
 
+# W76: prefix patterns that explicitly anchor a question inside a named
+# PL/SQL function. When matched, the named function becomes the
+# asked-about object regardless of what the classifier returned for
+# target_variable / object_name. The remaining query text is treated as
+# a sub-target inside that function's body — useful when the classifier
+# would otherwise mistake a CASE-branch alias literal (EXP_11, COND_5,
+# etc.) for the asked-about object.
+#
+# Triggers:
+#   "In <FunctionName>, ..."
+#   "Inside <FunctionName>, ..."
+#   "Within <FunctionName>, ..."
+#   "In the function <FunctionName>, ..."
+#   "Within the function <FunctionName>, ..."
+#   "<FunctionName>'s ..."     (possessive form)
+#
+# Anchored at the start of the query (post-whitespace), case-insensitive
+# on the keyword. The candidate name is captured as group "name". Suffix
+# is required to disambiguate where the name ends — comma, colon, or a
+# question word — to prevent the regex from greedily eating tokens past
+# the function name.
+_NAMED_FUNCTION_ANCHOR_PATTERNS = (
+    re.compile(
+        r"^\s*(?:in|inside|within)(?:\s+the\s+function)?\s+"
+        r"(?P<name>[A-Za-z][A-Za-z0-9_]+)"
+        r"(?=\s*[,:]|\s+(?:when|where|how|what|why|which|if))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?P<name>[A-Za-z][A-Za-z0-9_]+)'s\s+",
+        re.IGNORECASE,
+    ),
+)
+
 
 def set_process_subprocess_names(names) -> None:
     """Replace the W58.d exclusion set with *names* (uppercased).
@@ -403,6 +437,119 @@ class Orchestrator:
             self._bi_patterns,
         )
 
+    def apply_named_function_anchor(self, state: LogicState) -> LogicState:
+        """W76 — anchor on an explicit function name when the raw query
+        starts with ``"In <FunctionName>, ..."`` (or ``Inside`` / ``Within``
+        / possessive variants), or when the classifier put an alias
+        literal into ``target_variable`` while the user's query mentions
+        a real function elsewhere.
+
+        Defends against the classifier mistaking CASE-branch alias
+        literals (``EXP_11``, ``COND_5``, …) for the asked-about object
+        — those are local identifiers inside a generated SQL body, not
+        callable functions or column traces.
+
+        Mutates and returns *state*. Idempotent: with no anchor and no
+        recoverable function, leaves state untouched (apart from
+        clearing an alias-literal ``target_variable`` so the downstream
+        variable tracer doesn't chase it globally).
+
+        On fire stamps:
+
+          * ``state["object_name"]`` — the resolved function name (so
+            downstream consumers that read object_name as a function
+            identifier — metadata fetch, validator, renderer — pick up
+            the right body).
+          * ``state["query_type"]`` — promoted to ``COLUMN_LOGIC``
+            when it would otherwise have been ``VARIABLE_TRACE`` /
+            empty, so the graph pipeline takes the function-lookup
+            path instead of the variable-trace path that would chase
+            an alias literal globally.
+          * ``state["target_variable"]`` — cleared if the classifier
+            put an alias literal there. The alias is a sub-target
+            inside the anchored function's body, not a top-level
+            column the variable tracer should chase.
+          * ``state["w76_anchor"]`` — diagnostic record of what the
+            rule did (which function it anchored on, what it
+            overrode).
+        """
+        raw = state.get("raw_query", "") or ""
+        if not raw:
+            return state
+
+        # Mechanism 1 — explicit "In <FunctionName>, ..." prefix.
+        anchor_name = detect_named_function_anchor(raw)
+        anchor_source = "prefix" if anchor_name else None
+
+        original_query_type = state.get("query_type", "")
+        original_target = (state.get("target_variable") or "").strip()
+        target_upper = original_target.upper()
+        target_is_alias = bool(original_target) and any(
+            p.match(target_upper) for p in _INTERNAL_ALIAS_PATTERNS
+        )
+
+        # Mechanism 2 — alias-literal fallback. The classifier put a
+        # CASE-branch alias in target_variable; try to recover the
+        # enclosing function from elsewhere in the query.
+        if anchor_name is None and target_is_alias:
+            candidates = extract_function_candidates(raw)
+            if candidates:
+                anchor_name = candidates[0]
+                anchor_source = "alias_fallback"
+                logger.info(
+                    "apply_named_function_anchor (M2): alias literal %s in "
+                    "target_variable; anchoring on candidate %s from query",
+                    original_target, anchor_name,
+                )
+            else:
+                # Alias literal with no enclosing function context. Clear
+                # target_variable so the variable tracer doesn't chase
+                # an alias globally; downstream W57 catches will surface
+                # NAMED_FUNCTION_NOT_RETRIEVED.
+                state["target_variable"] = ""
+                state["w76_anchor"] = {
+                    "function": "",
+                    "alias_literal_cleared": original_target,
+                    "reason": "alias literal with no enclosing function",
+                    "source": "alias_fallback_no_function",
+                }
+                logger.info(
+                    "apply_named_function_anchor (M2): cleared alias-literal "
+                    "target_variable %s — no enclosing function in query",
+                    original_target,
+                )
+                return state
+
+        if not anchor_name:
+            return state
+
+        state["object_name"] = anchor_name
+
+        # Promote into the FUNCTION_LOGIC path so the graph pipeline
+        # treats *anchor_name* as the function-of-interest. COLUMN_LOGIC
+        # is what the live classifier emits for the same shape.
+        if original_query_type in ("", "VARIABLE_TRACE"):
+            state["query_type"] = "COLUMN_LOGIC"
+
+        # Drop alias-literal target_variable values — they're sub-
+        # targets inside the anchored function, not columns to trace.
+        if target_is_alias:
+            state["target_variable"] = ""
+
+        state["w76_anchor"] = {
+            "function": anchor_name,
+            "source": anchor_source,
+            "original_query_type": original_query_type,
+            "original_target_variable": original_target,
+        }
+
+        logger.info(
+            "apply_named_function_anchor: anchored on %s "
+            "(source=%s, was query_type=%s target_variable=%r)",
+            anchor_name, anchor_source, original_query_type, original_target,
+        )
+        return state
+
     def _get_llm(
         self,
         provider: Optional[str] = None,
@@ -604,6 +751,58 @@ def extract_function_candidates(query: str) -> List[str]:
             continue
         out.append(cand)
     return out
+
+
+def detect_named_function_anchor(query: str) -> Optional[str]:
+    """Return the function name when *query* explicitly anchors itself
+    inside a named PL/SQL function via an "In <FunctionName>, ..." style
+    prefix, otherwise ``None``.
+
+    Recognises (case-insensitive on the keyword):
+
+      * ``"In <NAME>[,:|when|where|how|what|why|which|if]"``
+      * ``"Inside <NAME>..."`` / ``"Within <NAME>..."``
+      * ``"In/Within the function <NAME>..."``
+      * ``"<NAME>'s ..."``  (possessive)
+
+    Returns ``None`` when no pattern matches OR when the captured name
+    fails the W58 exclusion gates (table prefix, internal alias regex,
+    column prefix, manifest process name, stopword) — those tokens are
+    never callable PL/SQL function names. Also requires at least one
+    underscore in the name and a minimum length of 6 to avoid binding
+    to bare keywords like ``CASE`` or ``SELECT``.
+
+    Reuses the W58 pattern constants read-only — W76 does not modify
+    candidate-extraction filters.
+    """
+    if not query:
+        return None
+    for pat in _NAMED_FUNCTION_ANCHOR_PATTERNS:
+        m = pat.match(query)
+        if not m:
+            continue
+        name = m.group("name")
+        if not name or len(name) < 6:
+            continue
+        # Bare uppercase keywords ("CASE", "SELECT", "WHERE") never name
+        # a function — require at least one underscore.
+        if "_" not in name:
+            continue
+        name_upper = name.upper()
+        if name_upper in _NAME_STOPWORDS:
+            continue
+        if _COLUMN_TYPE_PREFIX.match(name_upper):
+            continue
+        if any(name_upper.startswith(p) for p in _TABLE_NAME_PREFIXES):
+            continue
+        if any(name_upper.startswith(p) for p in _COLUMN_NAME_PREFIXES):
+            continue
+        if any(p.match(name_upper) for p in _INTERNAL_ALIAS_PATTERNS):
+            continue
+        if name_upper in _PROCESS_SUBPROCESS_NAMES:
+            continue
+        return name
+    return None
 
 
 def function_exists_in_graph(

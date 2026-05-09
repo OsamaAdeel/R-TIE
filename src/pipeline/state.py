@@ -75,6 +75,12 @@ class LogicState(TypedDict):
     # routing did not fire — the existing classification + retrieval path
     # runs unchanged.
     bi_routing: dict
+    # W76: named-function anchor diagnostic record. Populated by
+    # orchestrator.apply_named_function_anchor when an "In <FunctionName>,
+    # ..." prefix matches OR when an alias-literal target_variable was
+    # rewritten to point at a function the user named elsewhere in the
+    # query. Absent when neither rule fires.
+    w76_anchor: dict
     # W79: user-driven schema selection. "ALL" fans retrieval out across
     # every discovered schema with per-schema top-K. Any other value
     # ("OFSMDM" / "OFSERM" / "FSDM" / "FSAPPS") restricts retrieval to

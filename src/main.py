@@ -845,6 +845,26 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             candidates[0], owner,
                         )
 
+            # --- W76: named-function anchor pre-rule. When the raw
+            # query starts with "In <FunctionName>, ..." (or Inside /
+            # Within / possessive variants), anchor the asked-about
+            # object on that function regardless of what the classifier
+            # returned for target_variable / object_name. Defends
+            # against the classifier mistaking CASE-branch alias
+            # literals (EXP_11, COND_5, ...) for the asked-about
+            # object. Mechanism 2 backstop also fires when the
+            # classifier put an alias literal into target_variable
+            # while the query mentions a real function elsewhere.
+            #
+            # Runs BEFORE the date-range / Phase 2 / Option A / W37 /
+            # BI routing branches so its query_type override (->
+            # COLUMN_LOGIC) takes effect at every downstream gate. The
+            # W79 schema_scope override (above) already settled
+            # state["schema"]; W76 leaves schema alone — function-name
+            # cross-scope detection is the W79 precheck's job.
+            with stage_timer("named_function_anchor", correlation_id):
+                _orchestrator.apply_named_function_anchor(state)
+
             # --- Date-range override: any query with BOTH start_date and
             # end_date is a time-series question, which DataQueryAgent must
             # handle via a two-date SQL comparison. Force DATA_QUERY even if
