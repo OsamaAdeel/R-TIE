@@ -1381,6 +1381,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     functions_analyzed=functions_analyzed,
                     query_type=state.get("query_type", ""),
                     redis_client=_graph_redis,
+                    # W76b: forward the orchestrator's anchor so the
+                    # NAMED_FUNCTION_NOT_RETRIEVED check + post-hoc
+                    # Caveats appender consult it instead of re-
+                    # extracting from raw_query (which would latch
+                    # onto alias literals like EXP_11).
+                    w76_anchor=state.get("w76_anchor") or {},
                 )
 
             # W49: when the partial-source branch ran, surface the
