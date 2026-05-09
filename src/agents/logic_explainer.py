@@ -153,6 +153,7 @@ def evaluate_grounding(
     functions_analyzed: List[str],
     query_type: str,
     redis_client: Any = None,
+    w76_anchor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate whether a streamed explanation is grounded in retrieved source.
 
@@ -231,7 +232,16 @@ def evaluate_grounding(
     # catches the exact W37 failure mode where the vector store doesn't
     # index a schema (e.g. OFSERM) but the graph does have it — the
     # pre-check passes but semantic search silently substitutes neighbors.
-    requested_functions = _extract_function_candidates_local(raw_query)
+    #
+    # W76b: trust state["w76_anchor"]["function"] when set — the
+    # orchestrator already resolved the asked-about function from
+    # an explicit "In <FunctionName>, ..." prefix (or alias-literal
+    # fallback) and the rest of the pipeline anchored on it. Without
+    # this, the raw_query extractor would (pre-W58-fix) latch onto
+    # alias literals like EXP_11 and emit phantom warnings.
+    requested_functions = _resolve_asked_about_functions(
+        raw_query, w76_anchor=w76_anchor,
+    )
     if requested_functions:
         analyzed_upper = {f.upper() for f in functions_analyzed}
         missing = [
@@ -273,6 +283,7 @@ def evaluate_grounding(
                 multi_source=multi_source,
                 functions_analyzed=functions_analyzed,
                 redis_client=redis_client,
+                w76_anchor=w76_anchor,
             )
             warnings.extend(w57_warnings)
         except Exception as exc:
@@ -534,8 +545,28 @@ _FN_STOPWORDS = frozenset({
 
 
 def _extract_function_candidates_local(query: str) -> List[str]:
-    """Same heuristic as orchestrator.extract_function_candidates; duplicated
-    here to avoid an import cycle during grounding evaluation."""
+    """Same heuristic as orchestrator.extract_function_candidates.
+
+    W76b: applies the full W58 exclusion gate (table prefixes, internal
+    alias literals like ``EXP_<digit>`` / ``COND_<digit>`` / ``T_<digit>`` /
+    ``SS_*`` / ``TT_*``, multi-letter column prefixes, and manifest
+    process names) by importing the orchestrator's W58 constants
+    read-only. Without this, grounding evaluators downstream would emit
+    phantom ``NAMED_FUNCTION_NOT_RETRIEVED`` warnings citing alias
+    literals or table names the user merely referenced in passing.
+
+    The original "import cycle" comment is stale — orchestrator does
+    not import logic_explainer (verified by grep), so the module-level
+    import below is safe. The constants are tuples / frozensets so
+    re-exporting them is allocation-free.
+    """
+    from src.agents.orchestrator import (
+        _COLUMN_NAME_PREFIXES,
+        _INTERNAL_ALIAS_PATTERNS,
+        _PROCESS_SUBPROCESS_NAMES,
+        _TABLE_NAME_PREFIXES,
+    )
+
     seen: set[str] = set()
     out: List[str] = []
     for match in _FN_CANDIDATE_RE.finditer(query):
@@ -550,8 +581,48 @@ def _extract_function_candidates_local(query: str) -> List[str]:
             continue
         if _FN_COLUMN_PREFIX_RE.match(cu):
             continue
+        # W58.a: OFSAA table-name prefixes.
+        if any(cu.startswith(p) for p in _TABLE_NAME_PREFIXES):
+            continue
+        # W58.c: OFSAA column-name prefixes (defense-in-depth alongside
+        # the single-letter regex above).
+        if any(cu.startswith(p) for p in _COLUMN_NAME_PREFIXES):
+            continue
+        # W58.b: OFSAA-generated internal alias / CASE-label patterns.
+        if any(p.match(cu) for p in _INTERNAL_ALIAS_PATTERNS):
+            continue
+        # W58.d: manifest process and sub_process names.
+        if cu in _PROCESS_SUBPROCESS_NAMES:
+            continue
         out.append(cand)
     return out
+
+
+def _resolve_asked_about_functions(
+    raw_query: str,
+    w76_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W76b — return the function name(s) the user asked about.
+
+    When ``state["w76_anchor"]`` carries an anchored function (set by
+    :func:`orchestrator.apply_named_function_anchor` after matching an
+    "In <FunctionName>, ..." prefix or recovering a function from an
+    alias-literal target), trust it as the asked-about. Skip raw_query
+    extraction entirely — the orchestrator has already settled the
+    question for the rest of the pipeline.
+
+    When the anchor is absent (or carries the no-function alias-clear
+    diagnostic), fall back to the legacy raw_query extraction. The
+    extractor itself now applies the full W58 exclusion gate, so
+    phantom alias literals (``EXP_11``) and table names
+    (``FCT_OPS_RISK_DATA``) the user merely referenced in passing
+    no longer slip past as "named in query."
+    """
+    if w76_anchor:
+        anchored = (w76_anchor.get("function") or "").strip()
+        if anchored:
+            return [anchored]
+    return _extract_function_candidates_local(raw_query)
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1001,7 @@ def _w57_check_anchoring(
     raw_query: str,
     functions_analyzed: List[str],
     markdown: str,
+    w76_anchor: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """W57 Check 3a: when the user named a specific function, the response
     must address it.
@@ -938,8 +1010,13 @@ def _w57_check_anchoring(
       - asked-about function is not in functions_analyzed at all
       - asked-about is analyzed but the response primarily cites a
         different function much more frequently
+
+    W76b: routes through :func:`_resolve_asked_about_functions` so the
+    orchestrator's ``state["w76_anchor"]`` (when set) wins over
+    raw_query extraction. Keeps the W76 anchor as the single source
+    of truth for "what did the user ask about."
     """
-    asked = _extract_function_candidates_local(raw_query)
+    asked = _resolve_asked_about_functions(raw_query, w76_anchor=w76_anchor)
     if not asked:
         return []  # nothing to anchor against
 
@@ -1288,6 +1365,7 @@ def w57_enforce_grounding(
     multi_source: Dict[str, Any],
     functions_analyzed: List[str],
     redis_client: Any = None,
+    w76_anchor: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Run all six W57 grounding checks. Returns combined warnings list.
 
@@ -1318,9 +1396,14 @@ def w57_enforce_grounding(
     flips the badge) while presenting a clean list to the user.
     """
     # Derive the asked-about function from the query once; reused by
-    # Check 5 (template-phrase scope). Uses the same extractor as
-    # Check 3a so the two checks agree on the user's named target.
-    asked_candidates = _extract_function_candidates_local(raw_query)
+    # Check 5 (template-phrase scope). Uses the same anchor-aware
+    # extractor as evaluate_grounding's NAMED_FUNCTION_NOT_RETRIEVED
+    # check so the two layers agree on the user's named target —
+    # state["w76_anchor"]["function"] wins when set, otherwise the
+    # raw_query extraction (now W58-filtered) is used.
+    asked_candidates = _resolve_asked_about_functions(
+        raw_query, w76_anchor=w76_anchor,
+    )
     asked_about_function = asked_candidates[0] if asked_candidates else None
 
     warnings: List[str] = []
@@ -1329,7 +1412,8 @@ def w57_enforce_grounding(
     ))
     warnings.extend(_w57_check_citation_count_cap(markdown))
     warnings.extend(_w57_check_anchoring(
-        raw_query, functions_analyzed, markdown
+        raw_query, functions_analyzed, markdown,
+        w76_anchor=w76_anchor,
     ))
     warnings.extend(_w57_check_chain_coherence(markdown, multi_source))
     warnings.extend(_w57_check_hierarchy_body_consistency(
