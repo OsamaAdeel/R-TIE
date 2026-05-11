@@ -989,6 +989,121 @@ _W57_TEMPLATE_PHRASES = (
     ),
 )
 
+
+# W83 Option A: December/year-end-only paraphrase patterns. W70 (merge
+# d106d7e, 2026-05-10) shifted gpt-4o-mini phrasing from the literal
+# ``only runs when the reporting month is December`` (caught by the
+# tuple above) to paraphrases like ``is executed only when the reporting
+# month is December, as indicated by the conditional checks in the
+# code``. Same fabrication, different verb — the literal-substring
+# matcher above misses it.
+#
+# Source check on CS_Deferred_Tax_Asset_Net_of_DTL_Calculation
+# (2026-05-11) confirmed that function has NO month-12 logic; its date
+# filter is ``D_CALENDAR_DATE = TO_DATE('20260331', ...)`` — March 31,
+# 2026. Yet the post-W70 response asserts December gating in
+# paraphrased language and badges VERIFIED with empty warnings.
+#
+# These regex patterns extend W57 Check 5 to cover verb variants
+# (executed / fires / triggered / operates), year-end framing, and Q4
+# framing. The companion check below uses the same source-content gate
+# (:func:`_w57_source_has_december_gate`) and the same W76 anchoring
+# (:func:`_w57_resolve_primary_function`) as the literal-phrase
+# matcher. Asymmetric design: only patterns that are unambiguously
+# about month-12 / year-end execution belong here; generic phrasings
+# like "indicated by the conditional checks" or "the date conditions
+# in this function" describe any date filter and are excluded to avoid
+# false positives — W83 Option B's content-grounded check picks those
+# up post-Run-8.
+_W57_DECEMBER_PARAPHRASE_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # Verb variants of "only runs <December clause>". The verb forms
+    # are spelled out as ``execute(?:s|d)?`` to cover all of
+    # "execute" / "executes" / "executed" (a plain ``executed?`` would
+    # miss "executes", which is the common third-person present form
+    # gpt-4o-mini emits).
+    r"only\s+runs\s+(?:when\s+the\s+reporting\s+month\s+is\s+december|in\s+december|during\s+december)",
+    r"(?:is\s+)?execute(?:s|d)?\s+only\s+(?:when\s+the\s+reporting\s+month\s+is\s+december|in\s+december|during\s+december)",
+    r"fires?\s+only\s+(?:when\s+the\s+reporting\s+month\s+is\s+december|in\s+december|during\s+december)",
+    r"only\s+fires?\s+(?:when\s+the\s+reporting\s+month\s+is\s+december|in\s+december|during\s+december)",
+    r"is\s+triggered\s+only\s+(?:when\s+the\s+reporting\s+month\s+is\s+december|in\s+december|during\s+december)",
+    r"operates\s+only\s+(?:in|during)\s+december",
+    r"only\s+operates\s+(?:in|during)\s+december",
+    # Year-end / fiscal-year-end variants (semantically equivalent to
+    # month-12-only execution in OFSAA context). Both word orders —
+    # "only <verb> at year-end" and "<verb> only at year-end" — appear
+    # in gpt-4o-mini output.
+    r"only\s+(?:runs|fires|execute(?:s|d)?|is\s+executed|operates)\s+at\s+(?:fiscal\s+)?year[-\s]end",
+    r"(?:runs|fires|execute(?:s|d)?|operates)\s+only\s+at\s+(?:fiscal\s+)?year[-\s]end",
+    r"(?:is\s+)?execute(?:s|d)?\s+at\s+(?:fiscal\s+)?year[-\s]end\s+only",
+    r"fires?\s+at\s+(?:fiscal\s+)?year[-\s]end\s+only",
+    r"year[-\s]end\s+(?:processing|execution|run)\s+only",
+    # Q4 variants (less common but worth catching).
+    r"only\s+(?:runs|fires|execute(?:s|d)?|is\s+executed)\s+(?:in|during)\s+(?:q4|the\s+fourth\s+quarter)",
+    r"(?:is\s+)?execute(?:s|d)?\s+(?:in|during)\s+(?:q4|the\s+fourth\s+quarter)\s+only",
+    r"only\s+fires?\s+(?:in|during)\s+(?:q4|the\s+fourth\s+quarter)",
+))
+
+# Genuine month-12 / year-end gate detection in source code. If any of
+# these patterns matches the asked-about function's source, the December
+# claim in the response is grounded and no warning fires. Designed to
+# err on the side of "source supports it" so we don't false-positive on
+# legitimate December-gated functions. The hex-date pattern catches
+# year-end calendar literals (``TO_DATE('YYYY1231', ...)``) which are a
+# common OFSAA pattern for explicit year-end runs.
+_W57_DECEMBER_GATE_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"EXTRACT\s*\(\s*MONTH\s+FROM",
+    r"TO_CHAR\s*\([^)]{0,80},\s*['\"]MM['\"]\s*\)\s*=\s*['\"]12['\"]",
+    # Catches both bare ``MONTH = 'DECEMBER'`` and the TO_CHAR form
+    # ``TO_CHAR(..., 'MONTH') = 'DECEMBER'`` (where ``'MONTH')`` precedes
+    # the ``=``). The leading ``['"]?`` makes the opening quote
+    # optional; ``\)?`` makes the closing paren optional.
+    r"['\"]?MONTH['\"]?\s*\)?\s*=\s*['\"]DECEMBER['\"]",
+    r"MONTH\s*=\s*12\b",
+    r"D_CALENDAR_DATE\s*=\s*TO_DATE\s*\(\s*['\"]\d{4}12\d{2}",
+    r"FIC_MIS_DATE\s*=\s*TO_DATE\s*\(\s*['\"]\d{4}12\d{2}",
+    r"TO_DATE\s*\(\s*['\"]\d{4}1231['\"]",
+))
+
+
+# W83a-vs-Check-5 cross-check dedup. ``_W57_TEMPLATE_PHRASES`` already
+# includes literal December phrases that Check 5 catches and emits its
+# own warning for. When the body contains one of those literals AND
+# also paraphrases the same claim, both checks would fire — two
+# warnings about one fabrication. This tuple lists the literal
+# December phrases from ``_W57_TEMPLATE_PHRASES``; the paraphrase
+# check (:func:`_w57_check_december_paraphrase`) skips when any of
+# them is present in the body, deferring to Check 5 (whose warning
+# names the exact literal phrase and is more informative to the
+# user).
+#
+# Trade-off: in the rare case where Check 5's loose validator
+# (``EXTRACT(MONTH`` or ``TO_CHAR`` present AND ``"12"`` anywhere in
+# source) falsely says "supported" while W83a's strict gate would say
+# "not supported", deferring to Check 5 means we under-warn. Per
+# asymmetric design (false positives intolerable; false negatives
+# tolerable) this is acceptable.
+_W57_CHECK5_DECEMBER_LITERAL_PHRASES = (
+    "only runs when the reporting month is december",
+    "only runs in december",
+)
+
+
+def _w57_source_has_december_gate(source_text: str) -> bool:
+    """Return True iff *source_text* contains genuine month-12 logic.
+
+    Used by :func:`_w57_check_december_paraphrase` as the source-content
+    gate: if the asked-about function's source actually has December
+    logic, a "executes only in December" claim is grounded and no
+    warning fires. If not, the claim is fabricated.
+    """
+    if not source_text:
+        return False
+    for pat in _W57_DECEMBER_GATE_PATTERNS:
+        if pat.search(source_text):
+            return True
+    return False
+
+
 # Check 6 caveat triggers: phrases that the system itself emits when it
 # already knows the answer is uncertain. If any are present in the
 # rendered markdown, the badge MUST reflect that uncertainty.
@@ -1512,6 +1627,71 @@ def _w57_check_template_phrases(
     return warnings
 
 
+def _w57_check_december_paraphrase(
+    markdown: str,
+    multi_source: Dict[str, Any],
+    asked_about_function: Optional[str] = None,
+) -> List[str]:
+    """W83 Option A: catch December/year-end-only execution paraphrases.
+
+    W57 Check 5 above matches literal phrases (``only runs in december``,
+    ``only runs when the reporting month is december``). Post-W70 the
+    LLM emits paraphrases (``is executed only when the reporting month
+    is December``, ``executes only at year-end``) that evade the literal
+    matcher. This companion check uses regex patterns
+    (:data:`_W57_DECEMBER_PARAPHRASE_PATTERNS`) to catch the paraphrase
+    classes, then validates against the asked-about function's source
+    via :func:`_w57_source_has_december_gate`.
+
+    Emits **at most one** GROUNDING-HIGH warning per response, even when
+    multiple paraphrase patterns match — the warning message is
+    canonical (no phrase text included) so the set-based dedup at the
+    bottom of :func:`w57_enforce_grounding` collapses to one. This
+    keeps the trust banner clean when the LLM hedges the same claim
+    across multiple sentences.
+
+    Anchoring matches Check 5: validation runs against the
+    asked-about function's source only (resolved via
+    :func:`_w57_resolve_primary_function`). When the target can't be
+    resolved, the check skips rather than guess.
+    """
+    if not multi_source:
+        return []
+
+    target_fn = _w57_resolve_primary_function(
+        markdown, asked_about_function, multi_source,
+    )
+    if target_fn is None:
+        return []
+
+    body = _w57_ascii_normalize(markdown)
+    # W83a-vs-Check-5 dedup: if a Check-5 literal December phrase
+    # matches the body, Check 5 has already covered the claim. Skip
+    # to avoid emitting two warnings about the same fabrication. See
+    # test_literal_and_paraphrase_in_same_body_dedup_to_one.
+    body_lower = body.lower()
+    if any(p in body_lower for p in _W57_CHECK5_DECEMBER_LITERAL_PHRASES):
+        return []
+
+    matched = False
+    for pat in _W57_DECEMBER_PARAPHRASE_PATTERNS:
+        if pat.search(body):
+            matched = True
+            break
+    if not matched:
+        return []
+
+    target_source = _concat_multi_source({target_fn: multi_source[target_fn]})
+    if _w57_source_has_december_gate(target_source):
+        return []
+
+    return [
+        f"GROUNDING-HIGH: response claims '{target_fn}' executes only "
+        f"in December / at year-end (paraphrase form), but cited "
+        f"source contains no month-12 gate"
+    ]
+
+
 def _w57_check_caveat_vs_badge(markdown: str) -> List[str]:
     """W57 Check 6: if the system itself emitted a self-aware caveat,
     the badge must reflect that.
@@ -1593,6 +1773,12 @@ def w57_enforce_grounding(
         markdown, multi_source, redis_client
     ))
     warnings.extend(_w57_check_template_phrases(
+        markdown, multi_source, asked_about_function=asked_about_function,
+    ))
+    # W83 Option A: paraphrase variants of Check 5's literal phrases.
+    # Uses the same asked-about anchor and the same single-source
+    # validation as Check 5.
+    warnings.extend(_w57_check_december_paraphrase(
         markdown, multi_source, asked_about_function=asked_about_function,
     ))
     warnings.extend(_w57_check_caveat_vs_badge(markdown))
