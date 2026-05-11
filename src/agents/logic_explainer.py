@@ -706,6 +706,52 @@ _W57_PROSE_FUNCTION_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# W78a: heading + responsibility framing. W78's prose regex above catches
+# "function|procedure NAME" framings, but CAP973 (post-W70 canary, merge
+# d106d7e) surfaced two framings W78 misses:
+#
+#   PATTERN A — markdown heading at start of line:
+#       "## CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+#       "### Function FN_LOAD_OPS_RISK_DATA"
+#       "# CS_GOODWILL_CALCULATION"
+#
+#   PATTERN B — function-name token preceding "is/has the responsib(le|ility)":
+#       "CS_FOO is responsible for calculating..."
+#       "`FN_LOAD_OPS_RISK_DATA` is responsible for loading..."
+#       "CS_BAR has the responsibility of ..."
+#
+# CAP973's body mentioned CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT
+# (BI's literal-index resolution, NOT in functions_analyzed) in a `##` heading
+# — pre-W78a this slipped past W57 and badged VERIFIED on a body anchored on
+# a function not in retrieval (trust property #1 violation).
+#
+# Both patterns share the identifier shape used by :data:`_FN_CANDIDATE_RE`
+# (requires at least one underscore so words like INSERT/MERGE/Function
+# can't match) and are filtered through
+# :func:`_w57_passes_function_name_filters` (W58 exclusion gate, read-only
+# reuse from W78). Pattern A allows optional non-name words between the
+# heading markers and the identifier (e.g. "### Function NAME") via a
+# non-greedy `(?:\S+[ \t]+)*?`; whitespace is restricted to space/tab so
+# the scan stays within the heading line.
+#
+# Pattern B's edge case "The function is responsible for X." (no NAME) is
+# NOT matched because "function" lacks an underscore and so fails the
+# identifier shape constraint.
+_W57_HEADING_AND_RESPONSIBILITY_REF_RE = re.compile(
+    r"""
+    (?:
+        # Pattern A: markdown heading -> first underscore-bearing identifier
+        (?:^|\n)\#+[ \t]+(?:\S+[ \t]+)*?
+        (?P<heading_name>[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)
+      |
+        # Pattern B: NAME [`/space]* is/has the responsib(le|ility)
+        (?P<resp_name>[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)
+        [ \t`]*\b(?:is|has\s+the)\s+responsib(?:le|ility)\b
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
 
 def _w57_passes_function_name_filters(cand: str) -> bool:
     """W78: returns True iff *cand* survives all W58 exclusion gates.
@@ -979,12 +1025,19 @@ def _w57_check_per_claim_binding(
     """W57 Check 1: per-claim citation binding.
 
     Sub-checks:
-      1.0 (W78) Prose-framing function references — "The function `NAME`
+      1.0a (W78) Prose-framing function references — "The function `NAME`
           performs ...", "the `NAME` function", "procedure NAME" — must
           name a function in retrieved sources. Catches gpt-4o-mini's
           framing where the function name and line range are decoupled
           (gpt-5-mini bound them as "(NAME, Lines X-Y)" and was caught
           by 1.1; gpt-4o-mini does not, and slipped past pre-W78).
+      1.0b (W78a) Markdown headings ("## NAME") and responsibility
+          framings ("NAME is responsible for", "NAME has the
+          responsibility of") cite functions outside W78's prose
+          framing. Pre-W78a these slipped past — CAP973 cited
+          CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT in a `##`
+          heading where the function was not in functions_analyzed,
+          and badged VERIFIED on an out-of-retrieval anchor.
       1.1 Each explicit (function_name, line_range) tuple in the markdown
           must reference a function in retrieved sources.
       1.2 Each line range must fit inside that function's source body.
@@ -996,13 +1049,16 @@ def _w57_check_per_claim_binding(
     sources_upper = {fn.upper(): _source_line_count(multi_source.get(fn))
                      for fn in multi_source}
 
-    # 1.0 (W78): prose-framing function citations. Reuses the W58 filter
-    # via :func:`_w57_passes_function_name_filters` so table tokens
-    # (FCT_*, DIM_*, ABL_*-when-followed-by-"table"), column names, and
-    # alias literals don't trip the check. Same warning text as 1.1 so
-    # downstream dedup in :func:`w57_enforce_grounding` collapses any
-    # overlap with parenthesised bindings of the same fabricated name.
-    seen_prose: set[str] = set()
+    # 1.0a (W78) + 1.0b (W78a): cited function names in prose, headings, and
+    # responsibility framings. Both passes reuse the W58 filter via
+    # :func:`_w57_passes_function_name_filters` so table tokens (FCT_*, DIM_*,
+    # STG_*, FSI_*), column names, and alias literals don't trip the check,
+    # and share a single ``seen_cited_fn`` dedup set so the same fabrication
+    # cited in multiple framings (e.g. heading AND responsibility) fires
+    # exactly one warning. Same warning text as 1.1 so downstream dedup in
+    # :func:`w57_enforce_grounding` collapses any overlap with parenthesised
+    # bindings of the same fabricated name.
+    seen_cited_fn: set[str] = set()
     for match in _W57_PROSE_FUNCTION_REF_RE.finditer(markdown):
         cand = match.group(1) or match.group(2)
         if not cand:
@@ -1012,9 +1068,26 @@ def _w57_check_per_claim_binding(
         cu = cand.upper()
         if cu in sources_upper:
             continue
-        if cu in seen_prose:
+        if cu in seen_cited_fn:
             continue
-        seen_prose.add(cu)
+        seen_cited_fn.add(cu)
+        warnings.append(
+            f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
+            f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
+        )
+
+    for match in _W57_HEADING_AND_RESPONSIBILITY_REF_RE.finditer(markdown):
+        cand = match.group("heading_name") or match.group("resp_name")
+        if not cand:
+            continue
+        if not _w57_passes_function_name_filters(cand):
+            continue
+        cu = cand.upper()
+        if cu in sources_upper:
+            continue
+        if cu in seen_cited_fn:
+            continue
+        seen_cited_fn.add(cu)
         warnings.append(
             f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
             f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
