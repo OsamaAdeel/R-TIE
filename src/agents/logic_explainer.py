@@ -1708,6 +1708,73 @@ FORMAT:
 """
 
 
+def detect_cross_process_response(state: LogicState, redis_client) -> bool:
+    """W81 — True when retrieved functions span more than one process.
+
+    The hierarchy header anchors on a single function's process. For
+    cross-flow responses (e.g. ``"Trace N_SHAREHOLDING_PERCENT across the
+    OPS_RISK_PROCESSING flow"`` whose ``multi_source`` includes both
+    OPS_RISK_PROCESSING and CONSOLIDATION_DATA_POPULATION functions),
+    rendering the header on whichever single function the explainer
+    landed on misframes the answer. The caller (``hierarchy_header``)
+    suppresses the header when this returns True.
+
+    Detection: iterate ``state["multi_source"]``, fetch each function's
+    graph from Redis using its per-entry ``schema``, read the
+    ``hierarchy.process`` field, count distinct values. ``> 1`` → True.
+
+    Edge cases:
+      * ``redis_client is None`` — cannot detect; return False (caller
+        falls through to the existing single-function path).
+      * Empty / single-entry ``multi_source`` — return False
+        (single-function answer; existing renderer is correct).
+      * Function with missing ``hierarchy.process`` metadata — skip
+        (a missing process must NOT count as a distinct one and
+        spuriously trigger suppression).
+      * Redis fetch error per function — log debug and skip; treat as
+        missing metadata.
+
+    Asymmetric design (Option A): suppress when ambiguous rather than
+    risk a misframing header. Option B (a multi-process header listing
+    every distinct process) is deferred until usage data justifies the
+    extra renderer surface.
+    """
+    if redis_client is None:
+        return False
+
+    multi_source = state.get("multi_source") or {}
+    if len(multi_source) <= 1:
+        return False
+
+    from src.parsing.store import get_function_graph
+
+    state_schema = (state.get("schema") or "").strip()
+
+    seen_processes: set[str] = set()
+    for fn_name, entry in multi_source.items():
+        schema = ((entry or {}).get("schema") or "").strip() or state_schema
+        if not schema or not fn_name:
+            continue
+        try:
+            graph = get_function_graph(redis_client, schema, fn_name.upper())
+        except Exception as exc:
+            logger.debug(
+                "W81 cross-process lookup failed for %s/%s: %s",
+                schema, fn_name, exc,
+            )
+            continue
+        if graph is None:
+            continue
+        hierarchy = graph.get("hierarchy") or {}
+        process = (hierarchy.get("process") or "").strip()
+        if not process:
+            continue
+        seen_processes.add(process)
+        if len(seen_processes) > 1:
+            return True
+    return False
+
+
 class LogicExplainer:
     """Agent for generating structured PL/SQL logic explanations.
 
@@ -1763,8 +1830,33 @@ class LogicExplainer:
         ``MetadataInterpreter.fetch_multi_logic`` now stamps onto each
         ``multi_source`` entry, falling through to ``state["schema"]``
         only when the entry doesn't carry one.
+
+        W81: when ``multi_source`` spans more than one process, the
+        single-function header misframes cross-flow responses (a
+        VARIABLE_TRACE answer that touches OPS_RISK_PROCESSING and
+        CONSOLIDATION_DATA_POPULATION cannot truthfully claim either
+        as the function's home). Suppress the header in that case and
+        stamp ``state["w81_suppressed"] = True`` for diagnostic
+        visibility, mirroring W76/W70 stamps.
+
+        W74: render the full ``sub_process_path`` chain (outermost →
+        innermost) instead of only the innermost ``sub_process``. The
+        manifest already publishes both fields per task; the previous
+        renderer just consumed the leaf, which silently dropped any
+        intermediate sub-process layers. Forward-compatible — flat
+        manifests render identically to before.
         """
         if self._redis_client is None:
+            return ""
+
+        if detect_cross_process_response(state, self._redis_client):
+            state["w81_suppressed"] = True
+            logger.info(
+                "W81 cross-process suppression fired | "
+                "correlation_id=%s functions=%s",
+                state.get("correlation_id", ""),
+                list((state.get("multi_source") or {}).keys()),
+            )
             return ""
 
         multi_source = state.get("multi_source") or {}
@@ -1808,9 +1900,16 @@ class LogicExplainer:
 
         batch = hierarchy.get("batch") or ""
         process = hierarchy.get("process") or ""
-        sub_process = hierarchy.get("sub_process") or ""
+        # W74: prefer the full path published by manifest.to_node_hierarchy.
+        # Fall back to the innermost ``sub_process`` field for fixtures /
+        # legacy graphs that only carry the leaf.
+        sub_process_path = hierarchy.get("sub_process_path") or []
+        if not sub_process_path:
+            innermost = hierarchy.get("sub_process") or ""
+            if innermost:
+                sub_process_path = [innermost]
         order = hierarchy.get("task_order")
-        parts = [p for p in (batch, process, sub_process) if p]
+        parts = [p for p in (batch, process, *sub_process_path) if p]
         if not parts:
             return ""
 
