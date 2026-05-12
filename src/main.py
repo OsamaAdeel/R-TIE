@@ -606,6 +606,57 @@ class QueryRequest(BaseModel):
     schema_scope: str = "ALL"
 
 
+def _build_diagnostic_block(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract W81/W70/W76 anchor state for the /v1/stream done event.
+
+    Surfaces three internal anchor signals that are otherwise invisible
+    to SSE consumers (benchmark harnesses, diagnostic scripts):
+
+      * ``w81_suppressed`` — True iff the hierarchy-header renderer hit
+        the W81 cross-process suppression branch
+        (``logic_explainer._build_hierarchy_header``). Default False;
+        the renderer never stamps False, so absence means no
+        suppression. Always present as a bool.
+
+      * ``w70_anchor`` — the function name from
+        ``state["w70_anchor"]["function"]`` (cascade-resolved primary
+        anchor passed to the explainer prompt by
+        ``anchor_resolution.apply_w70_anchor``). ``None`` when the
+        cascade didn't produce an anchor or when the response flow
+        bypassed the explainer (e.g. variable-trace).
+
+      * ``w76_anchor`` — the function name from
+        ``state["w76_anchor"]["function"]`` (stamped by
+        ``orchestrator.apply_named_function_anchor`` only when the
+        ``"In <FunctionName>, …"`` prefix rule or alias-literal
+        fallback fires). ``None`` for queries that don't match either
+        mechanism. NOT the ``_w57_resolve_primary_function`` result —
+        that helper picks a target per content check and doesn't
+        stamp state.
+
+    Empty strings (e.g. ``w76_anchor.function == ""`` after the
+    cleared-alias branch in orchestrator) collapse to ``None`` for a
+    clean string-or-null contract on the wire.
+    """
+    w70_raw = state.get("w70_anchor")
+    w70_fn: Optional[str] = None
+    if isinstance(w70_raw, dict):
+        candidate = (w70_raw.get("function") or "").strip()
+        w70_fn = candidate or None
+
+    w76_raw = state.get("w76_anchor")
+    w76_fn: Optional[str] = None
+    if isinstance(w76_raw, dict):
+        candidate = (w76_raw.get("function") or "").strip()
+        w76_fn = candidate or None
+
+    return {
+        "w81_suppressed": bool(state.get("w81_suppressed", False)),
+        "w70_anchor": w70_fn,
+        "w76_anchor": w76_fn,
+    }
+
+
 @app.post("/v1/query")
 async def query_endpoint(request: QueryRequest, req: Request) -> Dict[str, Any]:
     """Process a logic query or slash command.
@@ -1443,6 +1494,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     "markdown": final_markdown,
                     "summary": final_markdown[:200],
                 },
+                # W84: expose W81/W70/W76 anchor state so benchmark
+                # tooling can measure suppression firing rate and
+                # anchor preservation without re-deriving them from
+                # logs. Additive; consumers that only read the
+                # existing fields are unaffected.
+                "diagnostic": _build_diagnostic_block(state),
             }
             with stage_timer("done_emit", correlation_id):
                 yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"
