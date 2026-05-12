@@ -1945,6 +1945,125 @@ def _w57_check_calendar_gating_grounded(
     ]
 
 
+def _w57_check_anchor_vs_asked_mismatch(
+    raw_query: str,
+    redis_client: Any = None,
+    w70_anchor: Optional[Dict[str, Any]] = None,
+    w76_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W85: catch routing-correctness violations — anchor differs from
+    the function the user explicitly named.
+
+    Run 9 D1 surfaced the failure surface: ``Trace
+    N_NET_INTEREST_INCOME ...`` produced a response anchored on
+    ``INSIGNFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP`` (an unrelated
+    function) with fabricated SQL and line-citation padding. W83B's
+    Canary A reproduced the same class more cleanly: ``How does
+    CS_Goodwill_Calculation work?`` with ``w70_anchor`` landing on the
+    sibling ``CS_GOODWILL_NET_OF_DTL_CALCULATION``. Routing was wrong;
+    no existing W57 check fired because every other check measures the
+    *content* of the response against source, not the *routing* of the
+    anchor against the asked function.
+
+    W85 is the missing routing-correctness check. It compares the
+    function the user named in their query (via the W58-filtered
+    candidate extractor :func:`_extract_function_candidates_local`,
+    the same extractor :func:`_resolve_asked_about_functions` uses)
+    against the W70 cascade anchor (with W76 fallback). When they
+    disagree AND the asked function actually exists in the graph,
+    fires a HIGH-severity warning.
+
+    Fires independently of every other W57 sub-check. An anchor
+    mismatch + a content fabrication is strictly worse than either
+    alone; collapsing them would underreport the trust violation.
+
+    Gates that prevent false positives:
+
+      * **No anchor signal** — neither w70_anchor nor w76_anchor
+        resolves to a function name. Cannot compare; no-op.
+      * **No named function in query** — W58 filter strips CAP codes,
+        column names (``N_*``, ``V_*``, ``F_*``, ``D_*``), table names
+        (``FCT_*``, ``DIM_*``, ``STG_*``, ``FSI_*``, …), alias literals
+        (``EXP_<digit>``, ``COND_<digit>``), and manifest process
+        names. If extraction returns empty, no-op. **This is the gate
+        that prevents BI-routing queries (``How is CAP973 calculated?``)
+        from false-positively firing W85** — CAP codes never pass the
+        filter, so the comparison never happens.
+      * **Asked function not in graph** — if every named candidate
+        fails :func:`function_exists_in_graph`, the user is asking
+        about a non-existent or out-of-scope function and W45-class
+        checks handle that. W85 stays out of W45 territory.
+      * **Any candidate matches anchor** — if the user named multiple
+        functions and the anchor matches any of them, no mismatch.
+
+    Anchor preference: w70_anchor.function first (W84-exposed cascade
+    result), w76_anchor.function as fallback. Same preference order
+    W83B uses.
+
+    Returns at most one warning per response. Single canonical message
+    text so enforce-level set dedup collapses any duplicates.
+    """
+    # Resolve anchor (W70 > W76 > no-op).
+    anchor_fn: Optional[str] = None
+    if isinstance(w70_anchor, dict):
+        candidate = (w70_anchor.get("function") or "").strip()
+        if candidate:
+            anchor_fn = candidate
+    if anchor_fn is None and isinstance(w76_anchor, dict):
+        candidate = (w76_anchor.get("function") or "").strip()
+        if candidate:
+            anchor_fn = candidate
+    if anchor_fn is None:
+        return []
+
+    # Extract asked function(s) from raw_query using the W58-filtered
+    # extractor. CAP codes, columns, tables, and alias literals are
+    # dropped here. Pure raw_query extraction (NOT
+    # _resolve_asked_about_functions which would override with the
+    # w76 anchor when set — but that's the same signal we're comparing
+    # against, so using it here would mask legitimate mismatches in
+    # the rare case where w76's anchor and w70's cascade disagree).
+    asked_candidates = _extract_function_candidates_local(raw_query)
+    if not asked_candidates:
+        return []
+
+    # Known-function gate: at least one candidate must exist in the
+    # graph. Without this, queries that mention a non-existent
+    # function-shaped string ("How does FAKE_FN_NAME work?") would
+    # fire here instead of falling through to the W45-style
+    # ungrounded-identifier flow that handles them.
+    #
+    # Import is local for the same reason
+    # :func:`_extract_function_candidates_local` does it locally:
+    # the orchestrator module pulls in heavier startup dependencies
+    # that don't need to load when logic_explainer is imported in
+    # isolation (e.g. by unit tests stubbing redis).
+    from src.agents.orchestrator import function_exists_in_graph
+    known_asked: List[str] = []
+    for cand in asked_candidates:
+        try:
+            if function_exists_in_graph(cand, redis_client):
+                known_asked.append(cand)
+        except Exception:
+            continue
+    if not known_asked:
+        return []
+
+    # Case-insensitive match: anchor matches any of the asked
+    # candidates → no mismatch. Multiple-named-function queries
+    # ("Compare FN_A and FN_B") are accepted as long as the anchor
+    # landed on at least one of them.
+    anchor_upper = anchor_fn.upper()
+    if any(c.upper() == anchor_upper for c in known_asked):
+        return []
+
+    asked = known_asked[0]
+    return [
+        f"GROUNDING-ANCHOR-MISMATCH-HIGH: response anchors on "
+        f"'{anchor_fn}' but user asked about '{asked}'"
+    ]
+
+
 def _w57_check_caveat_vs_badge(markdown: str) -> List[str]:
     """W57 Check 6: if the system itself emitted a self-aware caveat,
     the badge must reflect that.
@@ -2043,6 +2162,16 @@ def w57_enforce_grounding(
         markdown, multi_source,
         asked_about_function=asked_about_function,
         w70_anchor=w70_anchor,
+    ))
+    # W85 (Check 8): anchor-vs-asked-function mismatch. Routing-
+    # correctness check; fires INDEPENDENTLY of every content check
+    # because "wrong function" and "wrong claim about right function"
+    # are distinct trust violations and collapsing them underreports.
+    warnings.extend(_w57_check_anchor_vs_asked_mismatch(
+        raw_query,
+        redis_client=redis_client,
+        w70_anchor=w70_anchor,
+        w76_anchor=w76_anchor,
     ))
     warnings.extend(_w57_check_caveat_vs_badge(markdown))
 
