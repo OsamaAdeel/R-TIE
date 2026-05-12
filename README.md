@@ -153,46 +153,412 @@ make canary-tier1                                # Makefile wrapper, same thing
 
 ---
 
-## Architecture at a glance
+## Architecture
+
+### High-Level System Overview
+
+```mermaid
+graph TB
+    UI["React + Vite Frontend<br/><i>localhost:5173</i>"]
+    API["FastAPI Backend<br/><i>localhost:8000 &bull; /v1/stream</i>"]
+    ORC["Orchestrator<br/><i>classify + route (7 query types)</i>"]
+    GP["Graph Pipeline<br/><i>query engine (Phase 1)</i>"]
+    VT["Value Tracer<br/><i>row-first trace (Phase 2)</i>"]
+    DQ["Data Query Agent<br/><i>SQL gen + safeguards (Option A)</i>"]
+    LLM["LLM Layer<br/><i>OpenAI / Claude</i>"]
+    SS["Semantic Search<br/><i>embeddings + KNN</i>"]
+    MI["Metadata Interpreter<br/><i>fetch source code</i>"]
+    REDIS[("Redis<br/><i>Graph store &bull; Column index<br/>Origins catalog &bull; Source cache</i>")]
+    PG[("PostgreSQL<br/><i>LangGraph checkpointer</i>")]
+    ORACLE[("Oracle OFSAA<br/><i>read-only</i>")]
+
+    UI -- "SSE streaming" --> API
+    API --> ORC
+    ORC --> GP
+    ORC --> VT
+    ORC --> DQ
+    ORC --> SS
+    SS --> MI
+    GP --> REDIS
+    VT --> REDIS
+    VT --> ORACLE
+    DQ --> ORACLE
+    DQ --> LLM
+    LLM --> API
+    MI --> REDIS
+    MI --> ORACLE
+    API --> PG
+
+    style UI fill:#4f46e5,color:#fff,stroke:none
+    style API fill:#0f766e,color:#fff,stroke:none
+    style ORC fill:#7c3aed,color:#fff,stroke:none
+    style GP fill:#0369a1,color:#fff,stroke:none
+    style VT fill:#059669,color:#fff,stroke:none
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style LLM fill:#d97706,color:#fff,stroke:none
+    style SS fill:#6d28d9,color:#fff,stroke:none
+    style MI fill:#059669,color:#fff,stroke:none
+    style REDIS fill:#dc2626,color:#fff,stroke:none
+    style PG fill:#2563eb,color:#fff,stroke:none
+    style ORACLE fill:#9333ea,color:#fff,stroke:none
+```
+
+### LLM Provider
+
+All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB); SQL generation prompts are ~1-2KB.
+
+### Query Types and Routing
+
+The orchestrator ([src/agents/orchestrator.py](src/agents/orchestrator.py)) classifies every query into one of seven types and routes to the matching handler. This is the single decision that determines which capability answers the question.
+
+| Query Type | Example | Handler | Phase |
+|------------|---------|---------|-------|
+| VARIABLE_TRACE | "How is EAD_AMOUNT calculated?" | Logic Explainer | 1 |
+| COLUMN_LOGIC | "What does N_EOP_BAL do?" | Logic Explainer | 1 |
+| FUNCTION_LOGIC | "Explain FN_LOAD_OPS_RISK_DATA" | Logic Explainer | 1 |
+| VALUE_TRACE | "Why is N_EOP_BAL -10 for account X?" | Value Tracer | 2 |
+| DIFFERENCE_EXPLANATION | "Bank says 52M, we show 50M for account X" | Value Tracer | 2 |
+| DATA_QUERY | "Total N_EOP_BAL for V_LV_CODE='ABL'" | Data Query Agent | Option A |
+| UNSUPPORTED | "FCT vs STG reconciliation" / forecasting | Capability decline | — |
+
+**Ambiguity rule:** When unclear, the orchestrator defaults to VALUE_TRACE (which handles single-row questions correctly including breakdown requests). Mis-routing aggregation queries to VALUE_TRACE was the original silent-failure bug, so the classifier requires explicit aggregation keywords ("total", "sum", "count", "how many", "which accounts") AND absence of a specific account number to route to DATA_QUERY.
+
+### Request Pipeline (SSE Streaming)
+
+When a user asks a question, the `/v1/stream` endpoint processes it through stages, streaming Server-Sent Events (SSE) to the frontend at each stage:
+
+```mermaid
+flowchart TD
+    Q(["User Query"])
+    C["1. CLASSIFY<br/><i>Orchestrator LLM call<br/>7 query types</i>"]
+    R{"Query<br/>type?"}
+
+    GP["Phase 1<br/><i>Graph trace<br/>(logic only)</i>"]
+    VT["Phase 2<br/><i>Row-first value trace</i>"]
+    DQ["Option A<br/><i>SQL generation + execution</i>"]
+    UN["UNSUPPORTED<br/><i>Explicit decline</i>"]
+
+    E["STREAM<br/><i>LLM streams markdown tokens</i>"]
+    V["W57 GROUNDING OVERLAY<br/><i>evaluate_grounding()<br/>8 sub-checks</i>"]
+    D(["Done event<br/><i>badge + warnings + diagnostic</i>"])
+
+    Q --> C
+    C --> R
+    R -- "VARIABLE_TRACE<br/>COLUMN_LOGIC<br/>FUNCTION_LOGIC" --> GP
+    R -- "VALUE_TRACE<br/>DIFFERENCE_EXPLANATION" --> VT
+    R -- "DATA_QUERY" --> DQ
+    R -- "UNSUPPORTED" --> UN
+
+    GP --> E
+    VT --> E
+    DQ --> E
+    UN --> E
+    E --> V --> D
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style C fill:#7c3aed,color:#fff,stroke:none
+    style R fill:#0f766e,color:#fff,stroke:none
+    style GP fill:#0369a1,color:#fff,stroke:none
+    style VT fill:#059669,color:#fff,stroke:none
+    style DQ fill:#b45309,color:#fff,stroke:none
+    style UN fill:#6b7280,color:#fff,stroke:none
+    style E fill:#d97706,color:#fff,stroke:none
+    style V fill:#dc2626,color:#fff,stroke:none
+    style D fill:#4f46e5,color:#fff,stroke:none
+```
+
+The W57 grounding overlay runs after generation and only on `/v1/stream` — see the [Trust contract](#trust-contract--what-badges-mean) and [API endpoints](#api-endpoints--v1stream-vs-v1query) sections below.
+
+### Phase 1 — Graph Pipeline (Startup + Query Time)
+
+On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis. A 1,500-line function (67,721 chars) compresses to ~288 lines (9,084 chars) — **86.6% reduction**. At query time, only the relevant subgraph is sent to the LLM (~300 tokens instead of ~17,000).
+
+```mermaid
+flowchart TD
+    SQL[(".sql files")]
+    P["1. PARSER<br/><i>parser.py</i><br/>Regex block extraction<br/>Comment stripping"]
+    B["2. BUILDER<br/><i>builder.py</i><br/>Typed nodes + column_maps<br/>Per-function column_index"]
+    I["3. INDEXER<br/><i>indexer.py</i><br/>Cross-function edges<br/>Global column index<br/>Topological sort"]
+    R[("4. REDIS STORE<br/><i>MessagePack compressed</i><br/>graph:{schema}:{fn}<br/>graph:full:{schema}<br/>graph:index:{schema}")]
+
+    SQL --> P --> B --> I --> R
+
+    style SQL fill:#6b7280,color:#fff,stroke:none
+    style P fill:#7c3aed,color:#fff,stroke:none
+    style B fill:#0369a1,color:#fff,stroke:none
+    style I fill:#059669,color:#fff,stroke:none
+    style R fill:#dc2626,color:#fff,stroke:none
+```
+
+**Node types:** INSERT, UPDATE, MERGE, DELETE, SCALAR_COMPUTE, WHILE_LOOP, FOR_LOOP, SELECT_INTO
+
+**Calculation types:** DIRECT, ARITHMETIC, CONDITIONAL, FALLBACK, OVERRIDE
+
+**Parser handles these patterns:**
+
+| Pattern | What it captures |
+|---------|-----------------|
+| Function-level execution conditions | `IF EXTRACT(MONTH...) = 12` — December-only functions |
+| Intermediate variable calculations | `SELECT INTO` and `:=` assignments (SCALAR_COMPUTE nodes) |
+| Composite key overrides | `DECODE(V_GL_CODE \|\| '-' \|\| V_BRANCH_CODE, ...)` |
+| NVL/COALESCE fallback logic | Primary subquery lookup with column fallback |
+| WHILE loop iteration detail | Counter range, what data each iteration processes |
+| Transaction boundaries | `committed_after` flag on every node for failure analysis |
+| Commented-out blocks | Flagged as `commented_out_nodes` — never treated as active logic |
+
+**Schema awareness (W35 in flight).** `schema` is a first-class parameter throughout the loader, indexer, store, agents, and streaming layer. Redis keys are namespaced (`graph:OFSMDM:*`, `graph:OFSERM:*`). Phases 0-4 of the refactor have landed; Phases 5-8 (business-identifier indexing + routing) remain. See `docs/w35_architecture.md` and the `docs/w35_phaseN_summary.md` series before touching parsing, store, agents, or `main.py`.
+
+### Query Engine (Query-Time Subgraph)
+
+When a Phase 1 query arrives, the query engine resolves it to a compact structured payload in microseconds.
+
+```mermaid
+flowchart TD
+    TV(["Target Variable<br/><i>e.g. N_ANNUAL_GROSS_INCOME</i>"])
+    AR["1. ALIAS RESOLUTION<br/><i>Business terms to column names</i>"]
+    CI["2. COLUMN INDEX LOOKUP<br/><i>Microsecond: column -> node_ids</i>"]
+    CF["3. CROSS-FUNCTION TRAVERSAL<br/><i>Column-aware edge following</i>"]
+    RF["4. RELEVANCE FILTER<br/><i>Drop nodes without target variable</i>"]
+    UD["5. UPSTREAM DISCOVERY<br/><i>SCALAR_COMPUTE text-matching<br/>Transitive variable lookup</i>"]
+    PA["6. PAYLOAD ASSEMBLY<br/><i>Pass-through consolidation<br/>Intermediate vars + conditions</i>"]
+    OUT(["Structured payload ~2-4KB<br/><i>sent to LLM</i>"])
+
+    TV --> AR --> CI --> CF --> RF --> UD --> PA --> OUT
+
+    style TV fill:#4f46e5,color:#fff,stroke:none
+    style AR fill:#7c3aed,color:#fff,stroke:none
+    style CI fill:#6d28d9,color:#fff,stroke:none
+    style CF fill:#0369a1,color:#fff,stroke:none
+    style RF fill:#059669,color:#fff,stroke:none
+    style UD fill:#b45309,color:#fff,stroke:none
+    style PA fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Example: "How is N_ANNUAL_GROSS_INCOME calculated?"**
+
+| Step | Tool | Time | Cost |
+|---|---|---|---|
+| Alias resolution | Redis | < 1ms | Free |
+| Column index lookup | Redis | < 1ms | Free |
+| Fetch 6 nodes + edges | Redis | < 1ms | Free |
+| Assemble payload | Python | < 1ms | Free |
+| LLM explanation | GPT-4o (1 call, ~500 tokens) | ~2s | ~$0.005 |
+
+### Phase 2 — Value Lineage (Row-First Pipeline)
+
+Phase 2 answers questions about actual data values: *"Why is this value X?"* It starts from the row, not the graph. The row's `V_DATA_ORIGIN` column reveals whether the value was computed by PL/SQL or loaded from external ETL — and that single fact determines the entire trace strategy.
+
+```mermaid
+flowchart TD
+    Q(["Why is N_EOP_BAL<br/>-10 for account X<br/>on 2025-12-31?"])
+
+    S1["1. RowInspector<br/><i>row_inspector.py</i><br/>Fetch actual row from Oracle"]
+    M{"Row<br/>exists?"}
+    NR["row_not_found<br/><i>Explicit decline</i>"]
+
+    S2["2. OriginClassifier<br/><i>origin_classifier.py</i><br/>Check V_DATA_ORIGIN<br/>Check GL block list<br/>Check EOP overrides"]
+
+    S3{"Origin<br/>category?"}
+
+    S4A["PLSQL origin<br/><i>graph_trace</i><br/>Walk graph path<br/>Fetch value at each node"]
+    S4B["ETL origin<br/><i>etl_explain</i><br/>Identify source system<br/>List PL/SQL non-modifications"]
+    S4C["UNKNOWN origin<br/><i>diagnose</i><br/>Surface row facts<br/>Suggest investigation"]
+
+    S5["3. EvidenceBuilder<br/><i>evidence_builder.py</i><br/>Assemble verified facts only"]
+
+    S6["4. Phase2Explainer<br/><i>explainer.py</i><br/>Hallucination-forbidden LLM prompt<br/>Sanity check output"]
+
+    OUT(["Response with row facts,<br/>SQL verification, and<br/>actionable fix path"])
+
+    Q --> S1 --> M
+    M -- "No" --> NR
+    M -- "Yes" --> S2 --> S3
+    S3 -- "PLSQL" --> S4A --> S5
+    S3 -- "ETL" --> S4B --> S5
+    S3 -- "UNKNOWN" --> S4C --> S5
+    S5 --> S6 --> OUT
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#7c3aed,color:#fff,stroke:none
+    style M fill:#0f766e,color:#fff,stroke:none
+    style NR fill:#6b7280,color:#fff,stroke:none
+    style S2 fill:#6d28d9,color:#fff,stroke:none
+    style S3 fill:#0f766e,color:#fff,stroke:none
+    style S4A fill:#0369a1,color:#fff,stroke:none
+    style S4B fill:#059669,color:#fff,stroke:none
+    style S4C fill:#b45309,color:#fff,stroke:none
+    style S5 fill:#059669,color:#fff,stroke:none
+    style S6 fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Row-first matters.** A row in STG_PRODUCT_PROCESSOR can arrive via at least four different paths:
+
+1. PL/SQL function execution (traceable through the graph)
+2. Direct ETL load from an external system (T24, IBG, CBS, ODF)
+3. Manual upload processes
+4. Other OFSAA modules outside the current batch
+
+A graph-first trace assumes every row flows through PL/SQL and breaks when it doesn't. The row-first approach handles all four paths because classification comes from the row's `V_DATA_ORIGIN` column — not from assumptions about the pipeline shape.
+
+### Origins Catalog (Auto-Derived from Graph)
+
+The origins catalog maps `V_DATA_ORIGIN` values to what produced them, tracks GL codes in hardcoded block lists, and records hardcoded overrides (e.g. `N_EOP_BAL = 0` for specific GL codes). It is **built automatically at startup** by scanning the parsed graph in Redis. No hardcoded batch-specific knowledge.
+
+```mermaid
+flowchart LR
+    G[("Redis<br/><i>Parsed graph<br/>(Phase 1 output)</i>")]
+    CB["build_catalog()<br/><i>origins_catalog.py</i>"]
+
+    E1["Extract V_DATA_ORIGIN literals<br/><i>from column_maps + CASE/DECODE</i>"]
+    E2["Extract GL block list<br/><i>from CONDITIONAL on F_EXPOSURE_ENABLED_IND</i>"]
+    E3["Extract EOP overrides<br/><i>from OVERRIDE calculations</i>"]
+    E4["Seed ETL origins<br/><i>BOOTSTRAP_ETL_ORIGINS<br/>(OF, T24, IBG, CBS, SWIFT)</i>"]
+
+    V["_validate_completeness()<br/><i>Ensure all bootstrap keys present<br/>Functions match graph key count</i>"]
+
+    SW["Atomic swap<br/><i>_catalog = new_catalog<br/>(only after build success)</i>"]
+
+    C[("Module global<br/><i>OriginsCatalog<br/>(served by get_catalog())</i>")]
+
+    G --> CB
+    CB --> E1 --> V
+    CB --> E2 --> V
+    CB --> E3 --> V
+    CB --> E4 --> V
+    V --> SW --> C
+
+    style G fill:#dc2626,color:#fff,stroke:none
+    style CB fill:#7c3aed,color:#fff,stroke:none
+    style E1 fill:#0369a1,color:#fff,stroke:none
+    style E2 fill:#059669,color:#fff,stroke:none
+    style E3 fill:#b45309,color:#fff,stroke:none
+    style E4 fill:#6b7280,color:#fff,stroke:none
+    style V fill:#0f766e,color:#fff,stroke:none
+    style SW fill:#4f46e5,color:#fff,stroke:none
+    style C fill:#d97706,color:#fff,stroke:none
+```
+
+**Hardened against partial initialization.** `build_catalog()` builds into a local variable first. The module global is only swapped in after `build()` succeeds AND `_validate_completeness()` passes. On any failure, the previous working catalog remains in memory (or stays `None` on first-time failure, causing clean `RuntimeError` on requests). No half-initialized catalog ever serves traffic.
+
+**Adding a new batch:** Drop new `.sql` files under `db/modules/<NEW_MODULE>/functions/`, restart. The graph pipeline re-parses everything, the catalog rebuilds, new V_DATA_ORIGIN values and GL codes are picked up automatically. Zero code changes.
+
+### Option A — Data Query Handler
+
+Option A handles questions where the answer is in the database, not in the code. Aggregation, filter, count, time series — these are raw data questions that need SQL execution, not graph tracing.
+
+```mermaid
+flowchart TD
+    Q(["Total N_EOP_BAL<br/>for V_LV_CODE='ABL'<br/>on 2025-12-31?"])
+
+    S1["1. SQL Generator<br/><i>data_query.py</i><br/>LLM translates NL to SQL<br/>Bind variables only<br/>Prefer aggregation"]
+
+    S2["2. SQL Guardian<br/><i>sql_guardian.py</i><br/>SELECT-only validation<br/>Reject DML/DDL/PL/SQL"]
+
+    S3{"Query<br/>kind?"}
+
+    S4A["AGGREGATION<br/><i>SUM, COUNT, AVG</i><br/>Execute directly"]
+    S4B["ROW_LIST<br/><i>Row count pre-check<br/>(SAFEGUARD 1)</i>"]
+    S4C["TIME_SERIES<br/><i>FIC_MIS_DATE IN (...)<br/>Deterministic delta</i>"]
+
+    RCC{"Row<br/>count?"}
+    R1["> 10K → reject<br/><i>Narrowing suggestion</i>"]
+    R2["100 to 10K →<br/><i>Ask user confirmation</i>"]
+    R3["< 100 →<br/><i>FETCH FIRST 100<br/>(SAFEGUARD 3)</i>"]
+
+    EX["Oracle execute<br/><i>schema_tools.py</i>"]
+
+    F["Result Formatter<br/><i>Deterministic markdown<br/>No LLM speculation</i>"]
+
+    OUT(["Scalar / table<br/>+ SQL + bind params<br/>+ one-line summary"])
+
+    Q --> S1 --> S2 --> S3
+    S3 -- "AGGREGATION / COUNT" --> S4A --> EX
+    S3 -- "ROW_LIST" --> S4B --> RCC
+    S3 -- "TIME_SERIES" --> S4C --> EX
+    RCC -- "> 10K" --> R1
+    RCC -- "100-10K" --> R2
+    RCC -- "< 100" --> R3 --> EX
+    EX --> F --> OUT
+
+    style Q fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#7c3aed,color:#fff,stroke:none
+    style S2 fill:#dc2626,color:#fff,stroke:none
+    style S3 fill:#0f766e,color:#fff,stroke:none
+    style S4A fill:#0369a1,color:#fff,stroke:none
+    style S4B fill:#059669,color:#fff,stroke:none
+    style S4C fill:#b45309,color:#fff,stroke:none
+    style RCC fill:#0f766e,color:#fff,stroke:none
+    style R1 fill:#6b7280,color:#fff,stroke:none
+    style R2 fill:#d97706,color:#fff,stroke:none
+    style R3 fill:#059669,color:#fff,stroke:none
+    style EX fill:#9333ea,color:#fff,stroke:none
+    style F fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Three safeguards prevent large-dataset incidents:**
+
+1. **Row count pre-check** — For row-list queries, run `COUNT(*)` first with the same WHERE clause. Hard limit of 10,000 rows rejects with a narrowing suggestion. Between 100-10,000 asks the user whether to return rows or a summary. Under 100 executes.
+
+2. **Aggregation preference in the LLM prompt** — The SQL generator is explicitly instructed to produce SUM/COUNT/AVG queries when the question can be answered aggregately. "How many" becomes COUNT. "Total" becomes SUM.
+
+3. **Mandatory row limit injection** — For row-listing queries that pass the count check, `FETCH FIRST 100 ROWS ONLY` is auto-appended after SQL generation, before execution.
+
+**Time series presentation.** When a query provides `start_date` and `end_date`, the result table shows BOTH dates explicitly. Missing dates display `no data` placeholders — facts only, no speculation about why. When both dates have data and the target column is numeric, a deterministic delta is computed and displayed.
+
+### Variable Tracer (Phase 1 Fallback)
+
+When a logic query has no matches in the graph's column index, the Variable Tracer is the fallback. It extracts relevant lines from raw source using a hybrid LLM + Python approach.
+
+```mermaid
+flowchart TD
+    UQ(["How is EAD_AMOUNT calculated?"])
+    S1["Stage 1: LLM RESOLVER<br/><i>~500 char prompt</i><br/>EAD_AMOUNT -> LN_EXP_AMOUNT, N_EAD"]
+    S2["Stage 2: PYTHON EXTRACTION<br/><i>Pure Python, no LLM</i><br/>Build alias map + extract ~60-80 lines<br/>Tags: SEED, TRANSFORM, COMMENTED_OUT"]
+    S3["Stage 3: LLM EXPLANATION<br/><i>~300 token prompt, streamed via SSE</i><br/>Business meaning, not SQL syntax"]
+    OUT(["Markdown response<br/><i>with citations</i>"])
+
+    UQ --> S1 --> S2 --> S3 --> OUT
+
+    style UQ fill:#4f46e5,color:#fff,stroke:none
+    style S1 fill:#b45309,color:#fff,stroke:none
+    style S2 fill:#059669,color:#fff,stroke:none
+    style S3 fill:#d97706,color:#fff,stroke:none
+    style OUT fill:#4f46e5,color:#fff,stroke:none
+```
+
+**Primary path vs fallback:**
+- **Graph pipeline** (primary) — used when the target variable is found in the column index. Produces a structured ~300 token payload. No raw source sent to LLM.
+- **Variable Tracer** (fallback) — used when the graph has no matches. Extracts relevant lines from raw source using regex + LLM hybrid.
+
+### Frontend Architecture
 
 ```
-                ┌─────────────────────────────────────────────┐
-                │   Orchestrator — 7-type query classifier    │
-                └────────────────────┬────────────────────────┘
-                                     │
-       ┌───────────────────┬─────────┼─────────┬──────────────────┐
-       ▼                   ▼         ▼         ▼                  ▼
-  FUNCTION_LOGIC      VARIABLE_     DATA_     VALUE_         UNSUPPORTED
-  COLUMN_LOGIC          TRACE       QUERY     TRACE
-       │                   │         │         │                  │
-       └─── Logic Explainer ┘     Data Query   Value Tracer      Decline
-       (Phase 1: graph trace)    (Option A:   (Phase 2:         (explicit
-                                  SQL gen +    row-first)        capability
-                                  guardian)                      limitation)
-                                     │
-                                     ▼
-                       ┌────────── LangGraph pipeline ──────────┐
-                       │  classify → retrieve → generate →      │
-                       │  validate (W57 grounding overlay) →    │
-                       │  render (SSE stream)                   │
-                       └────────────────────────────────────────┘
+React + Vite + Tailwind CSS v4
+    |
+    +-- App.jsx              Main app with model selector
+    +-- pages/Chat.jsx       Chat interface, auto-scroll control
+    +-- components/
+    |     MessageBubble.jsx  User messages (edit, retry, copy)
+    |     |                  Assistant messages (streaming markdown)
+    |     |                  AgentThinking (pipeline stage indicator)
+    |     |                  CodeBlockWithCopy (syntax highlighted)
+    |     ResponseCard.jsx   Structured response cards
+    |     CommandResult.jsx  Slash command output
+    +-- api/client.js        SSE streaming via fetch + ReadableStream
 ```
 
-Six things to know:
-
-1. **Orchestrator** ([src/agents/orchestrator.py](src/agents/orchestrator.py)) classifies every query into one of seven types: `FUNCTION_LOGIC`, `COLUMN_LOGIC`, `VARIABLE_TRACE`, `VALUE_TRACE`, `DIFFERENCE_EXPLANATION`, `DATA_QUERY`, `UNSUPPORTED`. The ambiguity rule defaults to `VALUE_TRACE` unless explicit aggregation keywords ("total", "sum", "count") AND absence of a specific account number trigger `DATA_QUERY`.
-
-2. **Phase 1 — graph pipeline.** At startup, `db/modules/*/functions/*.sql` is parsed into a compressed graph (~86% smaller than raw source) stored in Redis under `graph:{schema}:{fn}`. At query time, the query engine resolves a target column to a subgraph of ~2-4KB and sends only that to the LLM. Source for the W35 schema-aware refactor: `src/parsing/` plus `docs/w35_*.md`.
-
-3. **Phase 2 — value tracer.** "Why is N_EOP_BAL X for account Y?" starts from the row, not the graph. The row's `V_DATA_ORIGIN` column determines the trace strategy: PL/SQL-computed values walk the graph, ETL-loaded values point to the source system, unknown origins surface row facts and suggest investigation paths. Catalog is auto-derived from the parsed graph at startup. Source: `src/phase2/`.
-
-4. **Option A — data query.** Aggregation/filter/count/time-series questions go through an LLM-generated SQL path with three safeguards: row-count pre-check (rejects >10K rows), aggregation-preference prompt, and mandatory `FETCH FIRST 100 ROWS ONLY` injection for row-list queries. Every query passes through `SqlGuardian` (SELECT-only, AST-validated, bind params only) before execution. Source: `src/agents/data_query.py`, `src/tools/sql_guardian.py`.
-
-5. **W57 grounding overlay.** After the LangGraph pipeline generates a response, `evaluate_grounding` in [src/agents/logic_explainer.py](src/agents/logic_explainer.py) runs eight sub-checks against the retrieved source — chain coherence, per-claim binding, citation hygiene, template-phrase detection, paraphrase grounding, December-only execution claims, etc. Failures emit warnings tagged `GROUNDING-HIGH:` (badge-blocking) or `GROUNDING-LOW:` (advisory). **This overlay only runs on `/v1/stream`. `/v1/query` skips it.**
-
-6. **Schema awareness (W35 in flight).** `schema` is a first-class parameter throughout the loader, indexer, store, agents, and streaming layer. Redis keys are namespaced (`graph:OFSMDM:*`, `graph:OFSERM:*`). The frontend schema dropdown picks `ALL` / `OFSMDM` / `OFSERM`, threaded through as `schema_scope`. Phases 0-4 of the refactor have landed; Phases 5-8 (business-identifier indexing + routing) remain. See `docs/w35_architecture.md` and `docs/w35_phaseN_summary.md` before touching parsing, store, agents, or `main.py`.
-
-For deeper architecture, query routing details, and the streaming SSE payload shape, the prior README content is preserved in git history (`git log -- README.md`) and the diagrams in `docs/ARCHITECTURE_OVERVIEW.md` are still current.
+**SSE event flow:**
+```
+event: stage  -> Updates pipeline stage indicator (classify/trace/stream)
+event: meta   -> Populates function list, origin info, SQL, bind params
+event: token  -> Appends to streaming markdown (rendered incrementally)
+event: done   -> Final metadata (badge, validated, warnings, source_citations,
+                 functions_analyzed, meta, diagnostic — see Trust contract below)
+event: error  -> Error display
+```
 
 ---
 
