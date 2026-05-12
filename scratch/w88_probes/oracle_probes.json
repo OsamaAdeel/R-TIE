@@ -1,0 +1,609 @@
+[
+  {
+    "name": "ofserm_fct_ops_risk_data_count",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_OPS_RISK_DATA",
+    "notes": "Total rows in OFSERM.FCT_OPS_RISK_DATA",
+    "rows": [
+      [
+        57
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_ops_risk_data_methods",
+    "sql": "SELECT N_BASEL_METHOD_SKEY, COUNT(*) C FROM OFSERM.FCT_OPS_RISK_DATA GROUP BY N_BASEL_METHOD_SKEY ORDER BY C DESC",
+    "notes": "Methodology distribution on FCT_OPS_RISK_DATA",
+    "rows": [
+      [
+        115,
+        57
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "dim_basel_methodology_inventory",
+    "sql": "SELECT N_BASEL_METHOD_SKEY, V_BASEL_METHOD_CODE, V_BASEL_METHOD_DESC, V_BASEL_RISK_TYPE_ID, V_BASEL_APPROACH_TYPE_ID FROM OFSERM.DIM_BASEL_METHODOLOGY WHERE F_LATEST_RECORD_INDICATOR = 'Y' ORDER BY N_BASEL_METHOD_SKEY",
+    "notes": "Method SKEY \u2192 name mapping",
+    "rows": [
+      [
+        -1,
+        "OTH",
+        "Others",
+        null,
+        null
+      ],
+      [
+        0,
+        "MSG",
+        "Missing",
+        null,
+        null
+      ],
+      [
+        1,
+        "NSFIRBLTA",
+        "Non Sec Foundation IRB - Look Through Approach",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        2,
+        "NSFIRBCRMCOM",
+        "Non Sec - FIRB - CRM - Comprehensive Method",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        3,
+        "NSFIRBMBA",
+        "Non Sec Foundation IRB - Mandate Based Approach",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        4,
+        "NSFIRBSTDM",
+        "Non Sec - FIRB - Standardized Method",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        5,
+        "NSAIRBSMLTA",
+        "Non Sec - AIRB - Equity to IF - Simple Modified Look Through Approach",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        6,
+        "NSFPDEQ",
+        "Non Sec - FIRB - Equity - PD LGD Method",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        7,
+        "SSCRMCOM",
+        "Sec Standardized - CRM - Comprehensive Method",
+        "CR",
+        "SECSTD"
+      ],
+      [
+        8,
+        "NSFIRBIMM",
+        "Non Sec - FIRB - Internal Model Method",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        9,
+        "SECSFA",
+        "Sec - Supervisory Formulae Approach",
+        "CR",
+        "SECIRB"
+      ],
+      [
+        10,
+        "OTCCEM",
+        "Over the Counter - Current Exposure Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        11,
+        "NSPDEQ",
+        "Equity Exposures - IRB PD/LGD Approach",
+        "CR",
+        "NONIRB"
+      ],
+      [
+        12,
+        "NSSTDFBA",
+        "Non Sec Standardized - Fall Back Approach",
+        "CR",
+        "NONSTD"
+      ],
+      [
+        13,
+        "NSFIRB",
+        "Non Sec - Foundation IRB",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        14,
+        "NSAIMEQ",
+        "Non Sec - AIRB - Equity - Internal Model Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        15,
+        "SIRBACOM",
+        "Sec - Ratings Based Approach - CRM - Comprehensive Method",
+        "CR",
+        "SECALL"
+      ],
+      [
+        16,
+        "ORAMA",
+        "Operational Risk - AMA Approach",
+        "OR",
+        "ORAMA"
+      ],
+      [
+        17,
+        "CVAIMM",
+        "CVA - Internal Model Method",
+        "CR",
+        "CVAIMM"
+      ],
+      [
+        18,
+        "SSCRMSM",
+        "Sec Standardized - CRM - Simple Method",
+        "CR",
+        "SECSTD"
+      ],
+      [
+        19,
+        "NSIMEQ",
+        "Equity Exposures - IRB Inter Model Approach",
+        "CR",
+        "NONIRB"
+      ],
+      [
+        20,
+        "NSSTDSFTSM",
+        "Non Sec - SFT - Simple Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        21,
+        "NSAPDEQ",
+        "Non Sec - AIRB - Equity - PD LGD Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        22,
+        "NSAIRBCOM",
+        "Non Sec - AIRB - SFT - Comprehensive Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        23,
+        "NSAIRBCRMCOM",
+        "Non Sec - AIRB - CRM - Comprehensive Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        24,
+        "SECIAA",
+        "Sec - Internal Assessment Approach",
+        "CR",
+        "SECIRB"
+      ],
+      [
+        25,
+        "OTCSM",
+        "Over the Counter - Supervisory Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        26,
+        "NSSTDRWAO",
+        "Non Sec Standardized - Investment Fund - Risk Weight Approach   - Others",
+        "CR",
+        "NONSTD"
+      ],
+      [
+        27,
+        "NSAIRBSM",
+        "Non Sec - AIRB - SFT - Simple Method(LGD Adjustment)",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        28,
+        "NSSTDSFTVAR",
+        "Non Sec - SFT - VAR Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        29,
+        "NSAIRBLTA",
+        "Non Sec Advanced IRB - Look Through Approach",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        30,
+        "NSFIRBMTM",
+        "Non Sec - FIRB - Mark to Market Method",
+        "CR",
+        "NONFIRB"
+      ],
+      [
+        31,
+        "REPIMM",
+        "Repo - Internal Model Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        32,
+        "NSCRMSM",
+        "Non Sec Standardized - CRM - Simple Method",
+        "CR",
+        "NONSTD"
+      ],
+      [
+        33,
+        "SECERB",
+        "Sec - External Ratings Based Approach",
+        "CR",
+        "SECERB"
+      ],
+      [
+        34,
+        "NSAIRBFLTA",
+        "Non Sec - AIRB - Equity to IF - Full Look Through Approach",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        35,
+        "NSAIRBSL",
+        "Non Sec - AIRB - SL Approach",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        36,
+        "ORSASA",
+        "Operational Risk - Simplified Alternative Standarised Approach",
+        "OR",
+        "ORSASA"
+      ],
+      [
+        37,
+        "SEC1250RW",
+        "Sec- 1250% risk weight approach",
+        "CR",
+        "SECALL"
+      ],
+      [
+        38,
+        "NSAIRBCEM",
+        "Non Sec - AIRB - Current Exposure Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        39,
+        "NSSTDLTA",
+        "Non Sec Standardized - Look Through Approach",
+        "CR",
+        "NONSTD"
+      ],
+      [
+        40,
+        "OTCIMM",
+        "Over the Counter - Internal Model Method",
+        "CR",
+        "NONSEC"
+      ],
+      [
+        41,
+        "CVASTD",
+        "CVA - Standardized Method",
+        "CR",
+        "CVASTD"
+      ],
+      [
+        42,
+        "NSSTDOP2",
+        "Non-Sec Standardized Approach - Option 2",
+        "CR",
+        "NONSTD"
+      ],
+      [
+        43,
+        "NSAIRBNSL",
+        "Non Sec - AIRB - Non SL Approach",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        44,
+        "SECIRB1250RW",
+        "Sec - IRB - 1250% Risk Weight Approach",
+        "CR",
+        "SECIRB"
+      ],
+      [
+        45,
+        "BASEL1",
+        "Basel 1 Method",
+        "CR",
+        "BASEL 1"
+      ],
+      [
+        46,
+        "NSAIRBOEM",
+        "Non Sec - AIRB - Original Exposure Method",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        47,
+        "NSACRDRWTP",
+        "Non Sec AIRB - Investment Fund - Risk Weight Approach - Third Party",
+        "CR",
+        "NONAIRB"
+      ],
+      [
+        48,
+        "NSSTDSLM",
+        "Non-Sec Standardized Approach - Slotting Method",
+        "CR",
+        "NONSTD"
+      ]
+    ],
+    "row_count": 143,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_ops_risk_data_bia_sample",
+    "sql": "SELECT N_RUN_SKEY, N_MIS_DATE_SKEY, N_BASEL_METHOD_SKEY, N_CAPITAL_CHARGE, N_RWA_AMT, N_ANNUAL_GROSS_INCOME FROM OFSERM.FCT_OPS_RISK_DATA WHERE N_BASEL_METHOD_SKEY = 115 FETCH FIRST 5 ROWS ONLY",
+    "notes": "Sample BIA rows",
+    "rows": [
+      [
+        840,
+        20251231,
+        115,
+        20398245100.0,
+        254978063750.0,
+        130957494000.0
+      ],
+      [
+        812,
+        20251231,
+        115,
+        null,
+        null,
+        137029711000.0
+      ],
+      [
+        812,
+        20251231,
+        115,
+        null,
+        null,
+        139977697000.0
+      ],
+      [
+        812,
+        20251231,
+        115,
+        20386244100.0,
+        254828051250.0,
+        130717474000.0
+      ],
+      [
+        818,
+        20251231,
+        115,
+        null,
+        null,
+        137029711000.0
+      ]
+    ],
+    "row_count": 5,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_ops_risk_data_bia_totals",
+    "sql": "SELECT SUM(N_CAPITAL_CHARGE) CAP_CHG, SUM(N_RWA_AMT) RWA FROM OFSERM.FCT_OPS_RISK_DATA WHERE N_BASEL_METHOD_SKEY = 115",
+    "notes": "BIA capital charge + RWA totals",
+    "rows": [
+      [
+        408928819500,
+        5111610243750
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_ops_risk_summary_count",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_OPS_RISK_SUMMARY",
+    "notes": "",
+    "rows": [
+      [
+        223
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_market_risk_summary_count",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_MARKET_RISK_SUMMARY",
+    "notes": "",
+    "rows": [
+      [
+        0
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_market_risk_summary_methods",
+    "sql": "SELECT N_BASEL_METHOD_SKEY, COUNT(*) C FROM OFSERM.FCT_MARKET_RISK_SUMMARY GROUP BY N_BASEL_METHOD_SKEY ORDER BY C DESC",
+    "notes": "",
+    "rows": [],
+    "row_count": 0,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_mr_var_data_count",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_MR_VAR_DATA",
+    "notes": "",
+    "rows": [
+      [
+        0
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_standard_acct_head_count",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_STANDARD_ACCT_HEAD",
+    "notes": "",
+    "rows": [
+      [
+        108
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_std_acct_head_by_capcode",
+    "sql": "SELECT DSA.V_STD_ACCT_HEAD_ID, COUNT(*) C, SUM(FSA.N_STD_ACCT_HEAD_AMT) AMT FROM OFSERM.FCT_STANDARD_ACCT_HEAD FSA JOIN OFSERM.DIM_STANDARD_ACCT_HEAD DSA ON FSA.N_STD_ACCT_HEAD_SKEY = DSA.N_STD_ACCT_HEAD_SKEY WHERE DSA.V_STD_ACCT_HEAD_ID IN ('CAP090','CAP170','CAP192','CAP210','CAP214','CAP838','CAP841','CAP935','CAP959','CAP960','CAP1923') GROUP BY DSA.V_STD_ACCT_HEAD_ID ORDER BY DSA.V_STD_ACCT_HEAD_ID",
+    "notes": "Capital ratio + RWA targets",
+    "rows": [
+      [
+        "CAP090",
+        1,
+        61175589179.388
+      ],
+      [
+        "CAP170",
+        1,
+        254828051250
+      ],
+      [
+        "CAP192",
+        1,
+        0.26289311967
+      ],
+      [
+        "CAP210",
+        1,
+        256312062250.36
+      ],
+      [
+        "CAP214",
+        1,
+        0.19286686188
+      ],
+      [
+        "CAP838",
+        1,
+        974966794778.654
+      ],
+      [
+        "CAP841",
+        1,
+        188038786146.63
+      ],
+      [
+        "CAP959",
+        1,
+        419940000
+      ],
+      [
+        "CAP960",
+        1,
+        0.19286686188
+      ]
+    ],
+    "row_count": 9,
+    "status": "OK"
+  },
+  {
+    "name": "ofserm_fct_non_sec_exposures_exists",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_NON_SEC_EXPOSURES FETCH FIRST 1 ROWS ONLY",
+    "notes": "Credit risk RWA source",
+    "error": "RetryError: RetryError[<Future at 0x2789abd2b30 state=finished raised DatabaseError>]",
+    "status": "FAIL"
+  },
+  {
+    "name": "ofserm_fct_sec_exposures_exists",
+    "sql": "SELECT COUNT(*) FROM OFSERM.FCT_SEC_EXPOSURES FETCH FIRST 1 ROWS ONLY",
+    "notes": "",
+    "error": "RetryError: RetryError[<Future at 0x2789abfa090 state=finished raised DatabaseError>]",
+    "status": "FAIL"
+  },
+  {
+    "name": "ofsmdm_abl_ops_risk_data_count",
+    "sql": "SELECT COUNT(*) FROM OFSMDM.ABL_OPS_RISK_DATA",
+    "notes": "",
+    "rows": [
+      [
+        9
+      ]
+    ],
+    "row_count": 1,
+    "status": "OK"
+  },
+  {
+    "name": "user_tables_lcr_nsfr_leverage",
+    "sql": "SELECT OWNER, TABLE_NAME FROM ALL_TABLES WHERE OWNER IN ('OFSERM','OFSMDM') AND (TABLE_NAME LIKE '%LCR%' OR TABLE_NAME LIKE '%NSFR%' OR TABLE_NAME LIKE '%LEVERAGE%' OR TABLE_NAME LIKE '%LIQUIDITY%') ORDER BY OWNER, TABLE_NAME",
+    "notes": "",
+    "rows": [],
+    "row_count": 0,
+    "status": "OK"
+  },
+  {
+    "name": "user_tables_fct_credit",
+    "sql": "SELECT OWNER, TABLE_NAME FROM ALL_TABLES WHERE OWNER IN ('OFSERM','OFSMDM') AND (TABLE_NAME LIKE 'FCT_%CR%' OR TABLE_NAME LIKE 'FCT_NON_SEC%' OR TABLE_NAME LIKE 'FCT_SEC_%' OR TABLE_NAME LIKE '%CREDIT%') ORDER BY OWNER, TABLE_NAME",
+    "notes": "",
+    "rows": [
+      [
+        "OFSERM",
+        "DIM_BASEL_CREDIT_RATING"
+      ],
+      [
+        "OFSERM",
+        "DIM_CREDIT_RATING"
+      ]
+    ],
+    "row_count": 2,
+    "status": "OK"
+  }
+]
