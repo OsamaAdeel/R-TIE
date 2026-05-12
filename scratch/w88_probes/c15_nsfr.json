@@ -1,0 +1,47 @@
+{
+  "probe_id": "c15_nsfr",
+  "query": "What is the Net Stable Funding Ratio (NSFR) on 2026-03-31?",
+  "stages": [
+    "{\"stage\": \"classify\", \"message\": \"Understanding your question...\"}",
+    "{\"stage\": \"classify\", \"message\": \"Classified as DATA_QUERY\"}",
+    "{\"stage\": \"search\", \"message\": \"Building schema catalog...\"}",
+    "{\"stage\": \"generating_sql\", \"message\": \"Generating SQL for your question...\"}",
+    "{\"stage\": \"validating\", \"message\": \"Validating the generated SQL...\"}",
+    "{\"stage\": \"fetch\", \"message\": \"Querying Oracle...\"}",
+    "{\"stage\": \"explain\", \"message\": \"Formatting the results...\"}"
+  ],
+  "done": {
+    "type": "data_query",
+    "status": "answered",
+    "query_kind": "TIME_SERIES",
+    "validated": true,
+    "badge": "VERIFIED",
+    "sanity_warnings": [],
+    "suspicious": false,
+    "suspicion_reason": null,
+    "summary": "No rows returned for the date range.",
+    "schema_searched": [
+      "OFSMDM"
+    ],
+    "schema_scope": "ALL",
+    "correlation_id": "87ed2625-960b-43ae-a9cb-f170dbff6a7c",
+    "explanation": {
+      "markdown": "**Summary:** No rows returned for the date range.\n\n**SQL executed:**\n\n```sql\nSELECT FIC_MIS_DATE, N_LOANS_ADVANCES_AMT, N_NET_INTEREST_INCOME FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE IN (TO_DATE(:mis_date, 'YYYY-MM-DD')) ORDER BY FIC_MIS_DATE\n```\n\n**Bind params:** `{\"mis_date\": \"2026-03-31\"}`"
+    },
+    "sql": "SELECT FIC_MIS_DATE, N_LOANS_ADVANCES_AMT, N_NET_INTEREST_INCOME FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE IN (TO_DATE(:mis_date, 'YYYY-MM-DD')) ORDER BY FIC_MIS_DATE",
+    "count_sql": null,
+    "params": {
+      "mis_date": "2026-03-31"
+    },
+    "columns": [
+      "FIC_MIS_DATE",
+      "N_LOANS_ADVANCES_AMT",
+      "N_NET_INTEREST_INCOME"
+    ],
+    "rows": [],
+    "row_count": 0,
+    "requested_dates": [],
+    "verification_sql": "SELECT FIC_MIS_DATE, N_LOANS_ADVANCES_AMT, N_NET_INTEREST_INCOME FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE IN (TO_DATE(:mis_date, 'YYYY-MM-DD')) ORDER BY FIC_MIS_DATE"
+  },
+  "elapsed_s": 10.01
+}

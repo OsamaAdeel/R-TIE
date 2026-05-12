@@ -1,0 +1,609 @@
+{
+  "method_115": [
+    [
+      115,
+      "ORBIA",
+      "Operational Risk - Basic Indicator Approach",
+      "OR",
+      "ORBIA"
+    ]
+  ],
+  "op_risk_methods": [
+    [
+      16,
+      "ORAMA",
+      "Operational Risk - AMA Approach"
+    ],
+    [
+      36,
+      "ORSASA",
+      "Operational Risk - Simplified Alternative Standarised Approach"
+    ],
+    [
+      77,
+      "ORSTD",
+      "Operational Risk - Standardized Approach"
+    ],
+    [
+      115,
+      "ORBIA",
+      "Operational Risk - Basic Indicator Approach"
+    ]
+  ],
+  "mkt_risk_methods": [
+    [
+      94,
+      "MRSTD",
+      "Market Risk - Standardized Approach"
+    ],
+    [
+      106,
+      "MRIM",
+      "Market Risk - Internal Model Approach"
+    ],
+    [
+      132,
+      "MRSTDSM",
+      "Market Risk-Standardized-Simplified Method"
+    ],
+    [
+      133,
+      "MRSTDSCM",
+      "Market Risk-Standardized-Scenario Matrix approach"
+    ],
+    [
+      135,
+      "MRSTDDP",
+      "Market Risk-Standardized-Delta plus Approach"
+    ]
+  ],
+  "cap1923_check": [],
+  "cap935_check": [
+    [
+      "CAP935",
+      "Tier 2 Capital Ratio"
+    ]
+  ],
+  "all_caps_in_fact": [
+    [
+      "CAP001",
+      "Paid-up common stock share capital",
+      11450738851.0
+    ],
+    [
+      "CAP002",
+      "Share Premium",
+      0.0
+    ],
+    [
+      "CAP003",
+      "Retained earnings",
+      143150634066.51
+    ],
+    [
+      "CAP038",
+      "Risk Weighted Asset amount for Standardized Portfolios",
+      974966794778.654
+    ],
+    [
+      "CAP047",
+      "Revaluation Reserve excl latent revaluation reserve",
+      45127854962.36
+    ],
+    [
+      "CAP048",
+      "Latent revaluation reserves from securities",
+      25244570197.37
+    ],
+    [
+      "CAP051",
+      "General Provisions",
+      2324391147.02
+    ],
+    [
+      "CAP058",
+      "Net Tier 1 Capital",
+      188038786146.63
+    ],
+    [
+      "CAP064",
+      "Gross Tier 2 Capital",
+      70372425159.73
+    ],
+    [
+      "CAP067",
+      "Net T2 Capital",
+      68273276103.73
+    ],
+    [
+      "CAP090",
+      "Market Risk RWA",
+      61175589179.388
+    ],
+    [
+      "CAP139",
+      "De:IRB - EL greater than total eligible Provision",
+      0.0
+    ],
+    [
+      "CAP160",
+      "General provision for Standardised Approach",
+      0.0
+    ],
+    [
+      "CAP1600",
+      "Deferred tax assets that rely on future profitability, and related to temporary differences",
+      0.0
+    ],
+    [
+      "CAP1604",
+      "Systemic risk buffer",
+      0.0
+    ],
+    [
+      "CAP161",
+      "Total Eligible provision for IRB Approach",
+      0.0
+    ],
+    [
+      "CAP1611",
+      "Capital Conservation Buffer",
+      0.0
+    ],
+    [
+      "CAP1612",
+      "Countercyclical Buffer",
+      0.0
+    ],
+    [
+      "CAP1613",
+      "Systemic Risk Buffer",
+      0.0
+    ],
+    [
+      "CAP169",
+      "Credit RWA",
+      658963154349.266
+    ],
+    [
+      "CAP170",
+      "Operational RWA",
+      254828051250.0
+    ],
+    [
+      "CAP1807",
+      "Total Leverage Exposure Amount",
+      0.0
+    ],
+    [
+      "CAP1809",
+      "On Balance and Off Balance Total Leverage Exposure Measure For Securitized Exposures",
+      0.0
+    ],
+    [
+      "CAP1810",
+      "On Balance Total Leverage Exposure Measure For Market Risk Exposures",
+      0.0
+    ],
+    [
+      "CAP1811",
+      "Excess of Tier 1 Capital Over Minimum Leverage Ratio Requirement",
+      0.0
+    ],
+    [
+      "CAP1812",
+      "Total Leverage Exposure Amount for Credit Risk of Invested Exposures",
+      0.0
+    ],
+    [
+      "CAP1813",
+      "Total Leverage Exposure Amount for Credit Risk Exposures",
+      0.0
+    ],
+    [
+      "CAP1814",
+      "Total Leverage Exposure Amount for SFT",
+      0.0
+    ],
+    [
+      "CAP1815",
+      "Total Leverage Exposure Amount for Derivatives",
+      0.0
+    ],
+    [
+      "CAP1816",
+      "Adjusted Leverage Ratio",
+      0.0
+    ],
+    [
+      "CAP1817",
+      "Minimum Leverage Ratio",
+      0.03
+    ],
+    [
+      "CAP1852",
+      "General Provision over Credit Risk Exposure Amount",
+      0.0
+    ],
+    [
+      "CAP192",
+      "Capital Ratio",
+      0.26289311967
+    ],
+    [
+      "CAP197",
+      "General provision for IRB",
+      0.0
+    ],
+    [
+      "CAP210",
+      "Total eligible capital",
+      256312062250.36
+    ],
+    [
+      "CAP214",
+      "Tier 1 Capital Ratio",
+      0.19286686188
+    ],
+    [
+      "CAP308",
+      "Other Intangible Assets",
+      -4353312294.93
+    ],
+    [
+      "CAP322",
+      "De-Ind:Invt in inst iss by FI>10% of invtg bank's cap funds",
+      0.0
+    ],
+    [
+      "CAP324",
+      "General Reserves",
+      47691992486.11
+    ],
+    [
+      "CAP504",
+      "Minority Interest - CET1 Capital attributable to Third Party",
+      null
+    ],
+    [
+      "CAP505",
+      "Minority Interest - Capital attributable to Third Party included in Common Equity Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP506",
+      "Significant Investment amount in Common Stock above the 15% Aggregate Threshold Limit",
+      0.0
+    ],
+    [
+      "CAP507",
+      "MSR above the 15% Aggregate Threshold Limit",
+      0.0
+    ],
+    [
+      "CAP508",
+      "DTA related to Temporary Differences above the 15% Aggregate Threshold Limit",
+      0.0
+    ],
+    [
+      "CAP511",
+      "Minority Interest - T1 Capital attributable to Third Party",
+      null
+    ],
+    [
+      "CAP512",
+      "Minority Interest - T1 Capital Surplus attributable to Third Party",
+      0.0
+    ],
+    [
+      "CAP513",
+      "Minority Interest - Capital attributable to Third Party included in Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP514",
+      "Minority Interest - Capital attributable to Third Party included in Additional Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP518",
+      "Minority Interest - Total Capital attributable to Third Party",
+      null
+    ],
+    [
+      "CAP519",
+      "Minority Interest - Total Capital Surplus attributable to Third Party",
+      0.0
+    ],
+    [
+      "CAP520",
+      "Minority Interest - Capital attributable to Third Party included in Total Capital",
+      null
+    ],
+    [
+      "CAP819",
+      "Required Weighted Average Countercyclical Buffer",
+      0.0
+    ],
+    [
+      "CAP820",
+      "Required Common Equity Tier 1 Capital Ratio",
+      0.045
+    ],
+    [
+      "CAP821",
+      "Required Tier 1 Capital Ratio",
+      0.06
+    ],
+    [
+      "CAP822",
+      "Required Capital Adequacy Ratio",
+      0.08
+    ],
+    [
+      "CAP823",
+      "Required Capital Conservation Buffer",
+      0.025
+    ],
+    [
+      "CAP824",
+      "Required Additional Loss Absorbency Capital",
+      0.0
+    ],
+    [
+      "CAP826",
+      "Available Buffer from CET1 Capital",
+      0.0
+    ],
+    [
+      "CAP827",
+      "Available Buffer from T1",
+      0.13286686188
+    ],
+    [
+      "CAP828",
+      "Available Buffer from Capital Adequacy Ratio",
+      0.18289311967
+    ],
+    [
+      "CAP829",
+      "Required Buffer from CET1 Capital",
+      0.0
+    ],
+    [
+      "CAP830",
+      "Required Buffer from Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP831",
+      "Required Buffer from Capital Adequacy Ratio",
+      0.0
+    ],
+    [
+      "CAP832",
+      "Available Total Buffer Amount",
+      0.0
+    ],
+    [
+      "CAP833",
+      "Required Capital Conservation Buffer Amount",
+      24374169869.4664
+    ],
+    [
+      "CAP835",
+      "Required Additional Loss Absorbency Capital Amount",
+      0.0
+    ],
+    [
+      "CAP836",
+      "Minimum Capital Conservation Ratio",
+      1.0
+    ],
+    [
+      "CAP837",
+      "CET1 and Buffer Lookup Ratio",
+      0.045
+    ],
+    [
+      "CAP838",
+      "Total RWA",
+      974966794778.654
+    ],
+    [
+      "CAP841",
+      "Net Common Equity Tier 1 Capital",
+      188038786146.63
+    ],
+    [
+      "CAP843",
+      "Leverage Ratio",
+      0.0
+    ],
+    [
+      "CAP856",
+      "Goodwill and Intangible Asset (net of Deferred Tax Liability)",
+      0.0
+    ],
+    [
+      "CAP861",
+      "Mortgage Servicing Rights (Net of Deferred Tax Liability)",
+      0.0
+    ],
+    [
+      "CAP867",
+      "Deferred Tax Asset related to Temporary Differences",
+      0.0
+    ],
+    [
+      "CAP870",
+      "Net Defined Pension Fund",
+      8724100223.06
+    ],
+    [
+      "CAP895",
+      "Net CET1 Capital post Minority Interest Adjustment",
+      202293365403.62
+    ],
+    [
+      "CAP896",
+      "Net CET1 Capital post Regulatory Adjustment",
+      188038786146.63
+    ],
+    [
+      "CAP897",
+      "Net CET1 Capital post deduction of Investment in BFSI where Bank does not own more than 10%",
+      188038786146.63
+    ],
+    [
+      "CAP898",
+      "Net CET1 Capital post deduction above Threshold Limit",
+      188038786146.63
+    ],
+    [
+      "CAP899",
+      "Net CET1 Capital post adjustment due to insufficient AT1 Capital",
+      188038786146.63
+    ],
+    [
+      "CAP901",
+      "Net AT1 Capital post Minority Interest Adjustment",
+      0.0
+    ],
+    [
+      "CAP902",
+      "Net AT1 Capital post Regulatory Adjustment",
+      0.0
+    ],
+    [
+      "CAP907",
+      "Shortfall in Additional Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP908",
+      "Net Additional Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP912",
+      "Shortfall in Tier 2 Capital",
+      0.0
+    ],
+    [
+      "CAP918",
+      "Deduction Amount of CET1 Capital in BFSI where Bank does not own more than 10%",
+      0.0
+    ],
+    [
+      "CAP919",
+      "Deduction Amount of AT1 Capital in BFSI where Bank does not own more than 10%",
+      0.0
+    ],
+    [
+      "CAP920",
+      "Deduction Amount of T2 Capital in BFSI where Bank does not own more than 10%",
+      0.0
+    ],
+    [
+      "CAP925",
+      "Deduction Amount of CET1 in Significant Investment Entity",
+      0.0
+    ],
+    [
+      "CAP926",
+      "Deduction Amount of AT1 in Significant Investment Entity",
+      0.0
+    ],
+    [
+      "CAP927",
+      "Deduction Amount of T2 in Significant Investment Entity",
+      2099149056.0
+    ],
+    [
+      "CAP928",
+      "Significant Investment in Common Shares of BFSI where Bank owns more than 10%",
+      0.0
+    ],
+    [
+      "CAP936",
+      "Phase-in Regulatory Deduction",
+      0.0
+    ],
+    [
+      "CAP939",
+      "Reciprocal Cross Holding in CET1 Capital",
+      1177166739.0
+    ],
+    [
+      "CAP941",
+      "Defined Pension Fund Asset",
+      -8724100223.06
+    ],
+    [
+      "CAP943",
+      "Deferred Tax Asset  (Net of Deferred Tax Liability)",
+      null
+    ],
+    [
+      "CAP946",
+      "Threshold Line Items exceeding 15% of CET1 Capital",
+      0.0
+    ],
+    [
+      "CAP947",
+      "Gross Common Equity Tier 1 Capital",
+      202293365403.62
+    ],
+    [
+      "CAP953",
+      "Gross Additional Tier 1 Capital",
+      0.0
+    ],
+    [
+      "CAP954",
+      "Credit Valuation Adjustments RWA",
+      301818289.075
+    ],
+    [
+      "CAP959",
+      "Regulatory Adjustments Phase-In RWA",
+      419940000.0
+    ],
+    [
+      "CAP960",
+      "Common Equity Tier 1 Capital ratio",
+      0.19286686188
+    ],
+    [
+      "CAP971",
+      "Goodwill net of DTL",
+      0.0
+    ],
+    [
+      "CAP972",
+      "Other Intangible Assets net of DTL",
+      0.0
+    ],
+    [
+      "CAP973",
+      "Defined Pension Fund Asset net of DTL",
+      -8724100223.06
+    ],
+    [
+      "CAP975",
+      "Percentage used for the Aggregate Threshold Limit",
+      0.1765
+    ],
+    [
+      "CAPBNS",
+      "Reserves for issue of Bonus Shares",
+      0.0
+    ],
+    [
+      "CAPINTFCEL",
+      "Investment in TFC Exceeding Limit",
+      0.0
+    ]
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "probe_id": "c07_credit_irb_a",
+  "query": "What is the credit risk RWA under IRB Advanced on 2026-03-31?",
+  "stages": [
+    "{\"stage\": \"classify\", \"message\": \"Understanding your question...\"}",
+    "{\"stage\": \"classify\", \"message\": \"Classified as DATA_QUERY\"}",
+    "{\"stage\": \"search\", \"message\": \"Building schema catalog...\"}",
+    "{\"stage\": \"generating_sql\", \"message\": \"Generating SQL for your question...\"}",
+    "{\"stage\": \"validating\", \"message\": \"Validating the generated SQL...\"}",
+    "{\"stage\": \"fetch\", \"message\": \"Querying Oracle...\"}",
+    "{\"stage\": \"explain\", \"message\": \"Formatting the results...\"}"
+  ],
+  "done": {
+    "type": "data_query",
+    "status": "answered",
+    "query_kind": "AGGREGATE",
+    "validated": true,
+    "badge": "VERIFIED",
+    "sanity_warnings": [],
+    "suspicious": false,
+    "suspicion_reason": null,
+    "summary": "CREDIT_RISK_RWA = None.",
+    "schema_searched": [
+      "OFSMDM"
+    ],
+    "schema_scope": "ALL",
+    "correlation_id": "b20cfb03-6d05-4e3b-800b-c0bfb2e87292",
+    "explanation": {
+      "markdown": "**Summary:** CREDIT_RISK_RWA = None.\n\n**Result:** `None`\n**SQL executed:**\n\n```sql\nSELECT SUM(N_LOANS_ADVANCES_AMT) AS CREDIT_RISK_RWA FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')\n```\n\n**Bind params:** `{\"mis_date\": \"2026-03-31\"}`"
+    },
+    "sql": "SELECT SUM(N_LOANS_ADVANCES_AMT) AS CREDIT_RISK_RWA FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')",
+    "count_sql": null,
+    "params": {
+      "mis_date": "2026-03-31"
+    },
+    "columns": [
+      "CREDIT_RISK_RWA"
+    ],
+    "rows": [
+      [
+        null
+      ]
+    ],
+    "row_count": 1,
+    "requested_dates": [],
+    "verification_sql": "SELECT SUM(N_LOANS_ADVANCES_AMT) AS CREDIT_RISK_RWA FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
+  },
+  "elapsed_s": 15.36
+}

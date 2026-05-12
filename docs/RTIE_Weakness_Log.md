@@ -171,3 +171,9 @@ defer further.
 **Status.** Deferred. Not assigned to a sprint.
 
 ---
+
+## W88. Named regulatory computation pre-router — DIAGNOSTIC IN FLIGHT (2026-05-12)
+
+Diagnostic for a DATA_QUERY pre-router that maps named Basel computations (BIA, CET1 ratio, RWA, LCR/NSFR, etc.) to canonical OFSERM fact tables + methodology / CAP-code filters. Empirical inventory in [docs/w88_diagnostic.md](docs/w88_diagnostic.md); fix-PR pending Toheed review.
+
+---

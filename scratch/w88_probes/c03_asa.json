@@ -1,0 +1,49 @@
+{
+  "probe_id": "c03_asa",
+  "query": "What is the operational risk capital charge under the Alternative Standardised Approach (ASA) on 2026-03-31?",
+  "stages": [
+    "{\"stage\": \"classify\", \"message\": \"Understanding your question...\"}",
+    "{\"stage\": \"classify\", \"message\": \"Classified as DATA_QUERY\"}",
+    "{\"stage\": \"search\", \"message\": \"Building schema catalog...\"}",
+    "{\"stage\": \"generating_sql\", \"message\": \"Generating SQL for your question...\"}",
+    "{\"stage\": \"validating\", \"message\": \"Validating the generated SQL...\"}",
+    "{\"stage\": \"fetch\", \"message\": \"Querying Oracle...\"}",
+    "{\"stage\": \"explain\", \"message\": \"Formatting the results...\"}"
+  ],
+  "done": {
+    "type": "data_query",
+    "status": "answered",
+    "query_kind": "AGGREGATE",
+    "validated": true,
+    "badge": "VERIFIED",
+    "sanity_warnings": [],
+    "suspicious": false,
+    "suspicion_reason": null,
+    "summary": "OPERATIONAL_RISK_CAPITAL_CHARGE = None.",
+    "schema_searched": [
+      "OFSMDM"
+    ],
+    "schema_scope": "ALL",
+    "correlation_id": "ece41d1e-fbd9-44c0-950b-6509d2301003",
+    "explanation": {
+      "markdown": "**Summary:** OPERATIONAL_RISK_CAPITAL_CHARGE = None.\n\n**Result:** `None`\n**SQL executed:**\n\n```sql\nSELECT SUM(N_ALPHA_PERCENT * N_ANNUAL_GROSS_INCOME) AS OPERATIONAL_RISK_CAPITAL_CHARGE FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')\n```\n\n**Bind params:** `{\"mis_date\": \"2026-03-31\"}`"
+    },
+    "sql": "SELECT SUM(N_ALPHA_PERCENT * N_ANNUAL_GROSS_INCOME) AS OPERATIONAL_RISK_CAPITAL_CHARGE FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')",
+    "count_sql": null,
+    "params": {
+      "mis_date": "2026-03-31"
+    },
+    "columns": [
+      "OPERATIONAL_RISK_CAPITAL_CHARGE"
+    ],
+    "rows": [
+      [
+        null
+      ]
+    ],
+    "row_count": 1,
+    "requested_dates": [],
+    "verification_sql": "SELECT SUM(N_ALPHA_PERCENT * N_ANNUAL_GROSS_INCOME) AS OPERATIONAL_RISK_CAPITAL_CHARGE FROM ABL_OPS_RISK_DATA WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
+  },
+  "elapsed_s": 15.55
+}
