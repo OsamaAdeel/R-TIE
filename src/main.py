@@ -1438,6 +1438,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     # extracting from raw_query (which would latch
                     # onto alias literals like EXP_11).
                     w76_anchor=state.get("w76_anchor") or {},
+                    # W83B: forward W70's cascade-resolved anchor so
+                    # the calendar-gating check consults the same
+                    # function the explainer prompt anchored on. Set
+                    # by apply_w70_anchor during stream_semantic;
+                    # absent on variable-trace-only paths.
+                    w70_anchor=state.get("w70_anchor") or None,
                 )
 
             # W49: when the partial-source branch ran, surface the

@@ -605,6 +605,103 @@ def w84_existing_fields_unchanged():
     return passed, extra
 
 
+@test("W83B — A2 (CS_Goodwill_Calculation) hedged-Dec framing must NOT badge VERIFIED")
+def w83b_a2_canonical_target():
+    """The canonical W83B target. CS_Goodwill_Calculation source has
+    zero month-12 logic. Run 8 and Run 9 both produced body text of
+    the form 'particularly when the reporting month is December' and
+    badged VERIFIED with empty warnings.
+
+    With W83B wired in, when the hedged form reproduces, the response
+    must badge UNVERIFIED with at least one calendar-grounding
+    warning (GROUNDING-CALENDAR-HIGH from W83B, the W83a paraphrase
+    catch, or Check 5's literal-phrase catch — all three are valid
+    paths to UNVERIFIED on the same fabrication).
+
+    If the hedged form does not reproduce this run (LLM
+    nondeterminism), pass with a note.
+    """
+    r = run_query("How does `CS_Goodwill_Calculation` work?")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+    has_hedged_dec = any(
+        phrase in markdown.lower()
+        for phrase in (
+            "particularly when the reporting month is december",
+            "operates under the condition that the reporting month is december",
+            "contingent on the reporting month",
+            "executed under specific conditions, particularly when",
+        )
+    )
+    has_calendar_warning = any(
+        "GROUNDING-CALENDAR-HIGH" in w for w in warnings
+    )
+    has_w83a_warning = any(
+        "executes only" in w and "paraphrase form" in w for w in warnings
+    )
+    has_check5_warning = any(
+        "only runs" in w and "december" in w.lower() for w in warnings
+    )
+    badge = d.get("badge")
+    if not has_hedged_dec:
+        return True, summarize_done(d) + " (hedged form not reproduced this run)"
+    passed = (
+        badge == "UNVERIFIED"
+        and (has_calendar_warning or has_w83a_warning or has_check5_warning)
+    )
+    extra = summarize_done(d)
+    if not passed:
+        extra += (
+            f" has_hedged_dec={has_hedged_dec} "
+            f"has_cal={has_calendar_warning} "
+            f"has_w83a={has_w83a_warning} "
+            f"has_check5={has_check5_warning}"
+        )
+    return passed, extra
+
+
+@test("W83B — CAP973 dedup: no double-fire of W83B and W83a on same fabrication")
+def w83b_cap973_dedup_check():
+    """CAP973 trips W78a/W45. If W83B is wired in, it must NOT emit
+    a GROUNDING-CALENDAR-HIGH warning when W83a already covered the
+    same fabrication. Verifies the dedup ordering wired in
+    `w57_enforce_grounding`. W83B emits at most one warning per
+    response by design."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    cal_count = sum(1 for w in warnings if "GROUNDING-CALENDAR-HIGH" in w)
+    w83a_count = sum(
+        1 for w in warnings
+        if "executes only" in w and "paraphrase form" in w
+    )
+    # W83B emits ≤1 per response by design. When W83a also fired on
+    # the same body, W83B should have deferred (cal_count == 0).
+    passed = cal_count <= 1 and not (cal_count >= 1 and w83a_count >= 1)
+    extra = summarize_done(d)
+    if not passed:
+        extra += f" cal_count={cal_count} w83a_count={w83a_count}"
+    return passed, extra
+
+
+@test("W83B — W84 diagnostic block still exposed (regression check)")
+def w83b_diagnostic_block_intact():
+    """W83B plumbed w70_anchor through evaluate_grounding. Confirm
+    the W84 diagnostic block in the done event is unaffected."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    diag = d.get("diagnostic") or {}
+    passed = (
+        "diagnostic" in d
+        and isinstance(diag.get("w81_suppressed"), bool)
+        and (diag.get("w70_anchor") is None or isinstance(diag.get("w70_anchor"), str))
+        and (diag.get("w76_anchor") is None or isinstance(diag.get("w76_anchor"), str))
+    )
+    extra = summarize_done(d) + f" diagnostic={diag}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:

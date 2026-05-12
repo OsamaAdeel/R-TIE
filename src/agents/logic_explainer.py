@@ -155,6 +155,7 @@ def evaluate_grounding(
     query_type: str,
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
+    w70_anchor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate whether a streamed explanation is grounded in retrieved source.
 
@@ -285,6 +286,7 @@ def evaluate_grounding(
                 functions_analyzed=functions_analyzed,
                 redis_client=redis_client,
                 w76_anchor=w76_anchor,
+                w70_anchor=w70_anchor,
             )
             warnings.extend(w57_warnings)
         except Exception as exc:
@@ -1088,6 +1090,169 @@ _W57_CHECK5_DECEMBER_LITERAL_PHRASES = (
 )
 
 
+# W83B (W57 Check 7): content-grounded calendar-gating detector. W83a
+# above matches verb-direct paraphrase patterns (``is executed only in
+# December``, ``operates only at year-end``); its asymmetric design
+# leaves hedged framings — ``operates under the condition that the
+# reporting month is December``, ``contingent on the reporting month
+# being December``, ``particularly when the reporting month is
+# December`` — uncovered. Run 9 (2026-05-12) confirmed A2 (the
+# canonical CS_Goodwill_Calculation softener) is the durable
+# false-negative class. W83B catches it via a co-occurrence rule on
+# three token classes rather than a fixed verb-shape regex set.
+#
+# Same source-content gate (``_w57_source_has_december_gate``) as
+# W83a, so a function that actually has month-12 logic in its source
+# does not get flagged. Different warning code
+# (``GROUNDING-CALENDAR-HIGH``) so future benchmark runs can measure
+# W83a vs W83B fire rates independently. Defers to W83a (and Check
+# 5's literal phrases) when both would match — Check-5 names the
+# exact phrase, W83a names the paraphrase shape, both are more
+# informative than W83B's structural-fabrication summary.
+#
+# Class A — gating language (the action being gated).
+_W83B_GATING_LANGUAGE = (
+    "executes", "executed", "execute",
+    "runs", "is run", "ran",
+    "fires", "fired", "fire",
+    "triggered",
+    "operates", "operating",
+    "activates", "activated",
+)
+
+# Class B — restrictive qualifier (the gating-ness). Includes hedged
+# multi-word forms ("under the condition that", "particularly when")
+# that the W83a verb-direct regex set deliberately excluded.
+_W83B_RESTRICTIVE_QUALIFIER = (
+    "only", "exclusively", "solely",
+    "limited to", "restricted to",
+    "contingent on", "conditional on",
+    "under the condition that", "under the condition",
+    "particularly when", "specifically when",
+    "is fired when", "is executed when", "is triggered when",
+    "is run when",
+)
+
+# Class C — calendar referent (the December-ness).
+_W83B_CALENDAR_REFERENT = (
+    "december",
+    "reporting month is december", "reporting month being december",
+    "month of december", "the month is december",
+    "month 12", "month = 12", "month=12",
+    "year-end", "year end", "yearend",
+    "fiscal year-end", "fiscal year end",
+    "q4", "fourth quarter", "4th quarter",
+    "calendar year-end",
+)
+
+# Proximity window for the co-occurrence rule. Within a sentence,
+# both B-to-A and C-to-A distances must be ≤ this many characters.
+# The B+C fallback (no explicit A) also uses this window.
+_W83B_PROXIMITY_CHARS = 80
+
+# Sentence-boundary regex. Splits on ``.``/``!``/``?`` followed by
+# whitespace. SQL fences are stripped first so identifiers like
+# ``TABLE.COLUMN`` don't fragment the body. ``re.S`` not needed —
+# fences are removed before this fires.
+_W83B_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
+_W83B_SENTENCE_END_RE = re.compile(r"[.!?]+\s+")
+
+
+def _w83b_find_token_spans(text: str, tokens) -> List[tuple]:
+    """Return sorted (start, end) span list for any *tokens* in *text*.
+
+    *text* is expected lowercased; *tokens* are matched as literal
+    substrings (not regex). Overlapping matches of the same token are
+    kept — each token's positions are independent so multiple
+    occurrences within a sentence all participate in the proximity
+    rule.
+    """
+    spans: List[tuple] = []
+    for tok in tokens:
+        start = 0
+        while True:
+            idx = text.find(tok, start)
+            if idx == -1:
+                break
+            spans.append((idx, idx + len(tok)))
+            start = idx + 1
+    spans.sort()
+    return spans
+
+
+def _w83b_within_window(s1: int, e1: int, s2: int, e2: int, window: int) -> bool:
+    """True iff spans ``[s1,e1)`` and ``[s2,e2)`` are within *window* chars."""
+    if s2 >= e1:
+        return s2 - e1 <= window
+    if s1 >= e2:
+        return s1 - e2 <= window
+    return True  # overlapping = within window
+
+
+def _w83b_split_sentences(body_lower: str) -> List[str]:
+    """Split *body_lower* into rough sentences after stripping code fences.
+
+    SQL fenced in triple-backticks contains ``.``/``!``/``?`` characters
+    inside identifiers (``DIM_DATES.D_CALENDAR_DATE``) that would
+    otherwise shred the sentence boundary. Strip the fences first;
+    the W83B detector only inspects natural-language framing, so
+    code content does not need to participate.
+    """
+    stripped = _W83B_CODE_FENCE_RE.sub(" ", body_lower)
+    parts = _W83B_SENTENCE_END_RE.split(stripped)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _w83b_sentence_matches(sentence: str) -> bool:
+    """Apply the W83B co-occurrence firing rule to a single sentence.
+
+    Fires if either:
+      (1) An A-token, a B-token, and a C-token all appear, with B
+          within ``_W83B_PROXIMITY_CHARS`` of A and C within the same
+          window of A. This catches the canonical verb-direct hedged
+          forms ("operates under the condition that ... December").
+      (2) A B-token and a C-token co-occur within the proximity
+          window without any explicit A. This relaxation catches
+          common LLM phrasings where the verb is implicit
+          ("particularly when the reporting month is December",
+          "contingent on the reporting month being December"). The
+          source-content gate guards against false positives from
+          this relaxation.
+    """
+    c_spans = _w83b_find_token_spans(sentence, _W83B_CALENDAR_REFERENT)
+    if not c_spans:
+        return False
+    b_spans = _w83b_find_token_spans(sentence, _W83B_RESTRICTIVE_QUALIFIER)
+    if not b_spans:
+        return False
+    a_spans = _w83b_find_token_spans(sentence, _W83B_GATING_LANGUAGE)
+
+    # Rule 1: A ∧ B ∧ C with B and C both within window of A.
+    for a_s, a_e in a_spans:
+        for b_s, b_e in b_spans:
+            if not _w83b_within_window(a_s, a_e, b_s, b_e, _W83B_PROXIMITY_CHARS):
+                continue
+            for c_s, c_e in c_spans:
+                if _w83b_within_window(a_s, a_e, c_s, c_e, _W83B_PROXIMITY_CHARS):
+                    return True
+
+    # Rule 2 (relaxation): B ∧ C within window, A inferred.
+    for b_s, b_e in b_spans:
+        for c_s, c_e in c_spans:
+            if _w83b_within_window(b_s, b_e, c_s, c_e, _W83B_PROXIMITY_CHARS):
+                return True
+
+    return False
+
+
+def _w83b_body_has_hedged_calendar_gating(body_lower: str) -> bool:
+    """Return True iff any sentence of *body_lower* matches the W83B rule."""
+    for sentence in _w83b_split_sentences(body_lower):
+        if _w83b_sentence_matches(sentence):
+            return True
+    return False
+
+
 def _w57_source_has_december_gate(source_text: str) -> bool:
     """Return True iff *source_text* contains genuine month-12 logic.
 
@@ -1692,6 +1857,94 @@ def _w57_check_december_paraphrase(
     ]
 
 
+def _w57_check_calendar_gating_grounded(
+    markdown: str,
+    multi_source: Dict[str, Any],
+    asked_about_function: Optional[str] = None,
+    w70_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W83B (W57 Check 7): catch hedged-framing calendar/December claims.
+
+    W83a's pattern set is verb-direct (``is executed only in December``,
+    ``operates only at year-end``). Run 8 and Run 9 confirmed
+    gpt-4o-mini also emits hedged framings — ``operates under the
+    condition that the reporting month is December``, ``contingent on
+    the reporting month being December``, ``particularly when the
+    reporting month is December`` — that share W83a's failure semantics
+    but use a syntactic family W83a's regex set does not match. A2
+    (CS_Goodwill_Calculation) is the canonical case.
+
+    W83B replaces verb-direct regex matching with a co-occurrence rule
+    over three token classes (gating language, restrictive qualifier,
+    calendar referent) and validates against the same source-content
+    gate (:func:`_w57_source_has_december_gate`) W83a uses. Same gate,
+    broader prose detector. Separate warning code so future benchmark
+    runs can attribute fires to W83a vs W83B independently.
+
+    Anchor resolution prefers W84's ``state["w70_anchor"]["function"]``
+    when present (cascade-resolved primary anchor passed to the
+    explainer prompt). Falls back to
+    :func:`_w57_resolve_primary_function` (the W76-anchored path W83a
+    uses) when the W84 anchor is absent or doesn't match the retrieved
+    set. NO-OPs when neither resolves a target — without an anchor we
+    cannot consult source-content.
+
+    Dedup order: skips when a literal Check-5 December phrase is in the
+    body (Check 5 already named the exact phrase) OR when any W83a
+    paraphrase pattern matched (W83a already named the paraphrase
+    shape). Same defer-to-narrower-check pattern W83a established with
+    Check 5.
+
+    Returns at most one warning per response. The message text is
+    canonical so the set-based dedup at the bottom of
+    :func:`w57_enforce_grounding` collapses any duplicates from
+    multi-sentence hedging into a single banner line.
+    """
+    if not multi_source:
+        return []
+
+    # Anchor preference: W84 first, W76-based resolver second.
+    target_fn: Optional[str] = None
+    if isinstance(w70_anchor, dict):
+        candidate = (w70_anchor.get("function") or "").strip()
+        if candidate:
+            cu = candidate.upper()
+            for fn in multi_source:
+                if fn.upper() == cu:
+                    target_fn = fn
+                    break
+    if target_fn is None:
+        target_fn = _w57_resolve_primary_function(
+            markdown, asked_about_function, multi_source,
+        )
+    if target_fn is None:
+        return []
+
+    body = _w57_ascii_normalize(markdown)
+    body_lower = body.lower()
+
+    # Dedup vs Check 5 — literal phrase already covered.
+    if any(p in body_lower for p in _W57_CHECK5_DECEMBER_LITERAL_PHRASES):
+        return []
+    # Dedup vs W83a — verb-direct paraphrase already covered.
+    for pat in _W57_DECEMBER_PARAPHRASE_PATTERNS:
+        if pat.search(body):
+            return []
+
+    if not _w83b_body_has_hedged_calendar_gating(body_lower):
+        return []
+
+    target_source = _concat_multi_source({target_fn: multi_source[target_fn]})
+    if _w57_source_has_december_gate(target_source):
+        return []
+
+    return [
+        f"GROUNDING-CALENDAR-HIGH: response claims '{target_fn}' is "
+        f"gated on December / year-end / Q4 (hedged form), but cited "
+        f"source contains no month-12 gate"
+    ]
+
+
 def _w57_check_caveat_vs_badge(markdown: str) -> List[str]:
     """W57 Check 6: if the system itself emitted a self-aware caveat,
     the badge must reflect that.
@@ -1719,6 +1972,7 @@ def w57_enforce_grounding(
     functions_analyzed: List[str],
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
+    w70_anchor: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Run all six W57 grounding checks. Returns combined warnings list.
 
@@ -1780,6 +2034,15 @@ def w57_enforce_grounding(
     # validation as Check 5.
     warnings.extend(_w57_check_december_paraphrase(
         markdown, multi_source, asked_about_function=asked_about_function,
+    ))
+    # W83B (Check 7): hedged-framing calendar/December claims. Runs
+    # AFTER W83a so the dedup defers to the narrower W83a warning
+    # when both would fire on the same body. Prefers W84's w70_anchor
+    # over the W76-based asked_about_function path.
+    warnings.extend(_w57_check_calendar_gating_grounded(
+        markdown, multi_source,
+        asked_about_function=asked_about_function,
+        w70_anchor=w70_anchor,
     ))
     warnings.extend(_w57_check_caveat_vs_badge(markdown))
 
