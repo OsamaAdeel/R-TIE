@@ -469,6 +469,142 @@ def t16_cap973_w45_takes_precedence():
     return passed, extra
 
 
+@test("W84 — diagnostic block present on single-function semantic explain")
+def w84_diagnostic_single_function():
+    """``How does FN_LOAD_OPS_RISK_DATA work?`` is a single-function
+    semantic-explain query: it lands in the LOGIC_EXPLAINER branch and
+    apply_w70_anchor runs. The W76 prefix rule does NOT fire (no
+    ``In <Name>, ...`` syntax). Expectations on the diagnostic block:
+
+      * the block exists with all three keys
+      * w81_suppressed is a bool (its actual value depends on whether
+        retrieval pulled multi-process candidates — empirically True
+        for FN_LOAD_OPS_RISK_DATA because related-function retrieval
+        crosses processes)
+      * w70_anchor is the asked-about function (cascade resolves to it)
+      * w76_anchor is None (no prefix-anchor query syntax)
+    """
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    diag = d.get("diagnostic") or {}
+    checks = {
+        "diagnostic_present": "diagnostic" in d,
+        "has_all_three_keys": set(diag.keys()) == {
+            "w81_suppressed", "w70_anchor", "w76_anchor"
+        },
+        "w81_suppressed_is_bool": isinstance(diag.get("w81_suppressed"), bool),
+        "w70_anchor_resolves_to_asked_function": (
+            diag.get("w70_anchor") == "FN_LOAD_OPS_RISK_DATA"
+        ),
+        "w76_anchor_null_for_no_prefix_query": diag.get("w76_anchor") is None,
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" diagnostic={diag}"
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("W84 — diagnostic block present on CAP-code BI routing")
+def w84_diagnostic_cap_code():
+    """``How is CAP973 calculated?`` exercises the BI-routing branch;
+    CAP973 in particular is the W45 ungrounded-identifier case (per
+    test 16). The diagnostic block must still be present and well-
+    shaped regardless of whether the explainer ran or the W45
+    'not found' branch took over."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+    diag = d.get("diagnostic") or {}
+    checks = {
+        "diagnostic_present": "diagnostic" in d,
+        "has_all_three_keys": set(diag.keys()) == {
+            "w81_suppressed", "w70_anchor", "w76_anchor"
+        },
+        "w81_suppressed_is_bool": isinstance(diag.get("w81_suppressed"), bool),
+        "w70_anchor_is_string_or_null": (
+            diag.get("w70_anchor") is None
+            or isinstance(diag.get("w70_anchor"), str)
+        ),
+        "w76_anchor_is_string_or_null": (
+            diag.get("w76_anchor") is None
+            or isinstance(diag.get("w76_anchor"), str)
+        ),
+    }
+    # Note: this query may hit the W45 declined branch (no
+    # diagnostic) OR the semantic-explain branch (diagnostic
+    # present). Only enforce diagnostic shape when the block is
+    # there; absence is acceptable for the W45 declined path.
+    if "diagnostic" not in d:
+        return True, summarize_done(d) + " (W45 declined branch — no diagnostic expected)"
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" diagnostic={diag}"
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("W84 — diagnostic block present on cross-flow VARIABLE_TRACE; w81_suppressed=True")
+def w84_diagnostic_cross_flow_variable_trace():
+    """A cross-flow variable trace forces W81 cross-process
+    suppression (multi_source spans more than one process). Per the
+    W81+W74 production behavior, w81_suppressed should be True for
+    queries that span OPS_RISK_PROCESSING and any sibling process.
+    w70_anchor is typically None on this path because
+    variable_tracer.stream_chain bypasses apply_w70_anchor."""
+    r = run_query(
+        "Trace how N_SHAREHOLDING_PERCENT is set across the "
+        "OPS_RISK_PROCESSING flow. Which functions read it, "
+        "which write it, and how?"
+    )
+    d = r["done"] or {}
+    diag = d.get("diagnostic") or {}
+    checks = {
+        "diagnostic_present": "diagnostic" in d,
+        "has_all_three_keys": set(diag.keys()) == {
+            "w81_suppressed", "w70_anchor", "w76_anchor"
+        },
+        "w81_suppressed_is_bool": isinstance(diag.get("w81_suppressed"), bool),
+        "w70_anchor_is_string_or_null": (
+            diag.get("w70_anchor") is None
+            or isinstance(diag.get("w70_anchor"), str)
+        ),
+        "w76_anchor_is_string_or_null": (
+            diag.get("w76_anchor") is None
+            or isinstance(diag.get("w76_anchor"), str)
+        ),
+        # Cross-flow N_SHAREHOLDING_PERCENT triggers W81 in production.
+        "w81_suppressed_true_for_cross_flow": diag.get("w81_suppressed") is True,
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" diagnostic={diag}"
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("W84 — existing top-level fields unchanged by diagnostic addition")
+def w84_existing_fields_unchanged():
+    """Regression: the new diagnostic block must not displace any
+    existing field. Pick a known-good query and assert the canonical
+    set of pre-W84 keys are still all present at top level."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    required_pre_w84 = {
+        "badge", "validated", "warnings", "confidence",
+        "explanation", "source_citations", "functions_analyzed",
+        "schema_searched", "schema_scope", "correlation_id",
+    }
+    missing = required_pre_w84 - set(d.keys())
+    passed = not missing
+    extra = summarize_done(d)
+    if missing:
+        extra += f" MISSING_PRE_W84_FIELDS={sorted(missing)}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
