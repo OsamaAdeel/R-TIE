@@ -9,7 +9,33 @@ comments, and PR titles (`refactor/w35-…`, `fix/w83b-…`, etc.).
 
 ---
 
-## W85. Anchor-vs-asked-function mismatch — Discovered Run 9 (2026-05-12)
+## W85. Anchor-vs-asked-function mismatch — FIXED 2026-05-12 (merge SHA pending)
+
+**Status:** Implemented and merged. Live in `_w57_check_anchor_vs_asked_mismatch`
+(W57 Check 8) in [src/agents/logic_explainer.py](src/agents/logic_explainer.py).
+Fires `GROUNDING-ANCHOR-MISMATCH-HIGH` when the W70 cascade anchor
+(with W76 fallback) differs from the function the user explicitly
+named in their query.
+
+**Implementation summary:**
+- Asked function: extracted from `raw_query` via the existing
+  W58-filtered `_extract_function_candidates_local` (NOT
+  `state["object_name"]`, which the classifier sometimes sets to
+  an enriched query blob — see Section 1 of the W85 PR report).
+- Anchor function: `state["w70_anchor"]["function"]` (W84-exposed)
+  with `state["w76_anchor"]` as fallback.
+- Gates that prevent false positives: no-anchor (no signal to
+  compare), no-named-function (W58 filter drops CAP codes /
+  columns / tables / alias literals), asked-not-in-graph (W45
+  territory), and multi-candidate match (anchor matches any
+  named function → no mismatch).
+- Fires INDEPENDENTLY of every content check. Anchor mismatch
+  and content fabrication are distinct trust violations;
+  collapsing them would underreport.
+
+**Discovery context (original entry):**
+
+
 
 **Failure surface.** Run 9 D1 (`Trace N_NET_INTEREST_INCOME from
 STG_OPS_RISK_DATA to its final landing in FCT_STANDARD_ACCT_HEAD for
@@ -95,6 +121,52 @@ Run 9 evidence is one case (B3). Defer until either (a) the same
 class shows up in another benchmark run, or (b) the AST utilities
 are needed for an unrelated piece of work and W83C becomes
 cheap-to-add as a side benefit.
+
+**Status.** Deferred. Not assigned to a sprint.
+
+---
+
+## W85b. Column-trace anchor drift — Discovered W85 validation (2026-05-12)
+
+**Failure surface.** Run 9 D1 (``Trace N_NET_INTEREST_INCOME from
+STG_OPS_RISK_DATA to its final landing in FCT_STANDARD_ACCT_HEAD
+for V_STD_ACCT_HEAD_ID = 'CAP170'``) — the W70 cascade lands on a
+function unrelated to the asked column trace
+(``INSIGNFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP``), and the body
+emits fabricated SQL with line-citation padding pointing at the
+anchor's source.
+
+**Why W85 doesn't catch this.** W85 gates on the user naming a
+known function in their query. Column-trace queries name a column
+(``N_NET_INTEREST_INCOME`` — W58 ``N_`` prefix → filtered), source
+tables (``STG_*``, ``FCT_*`` — W58 prefix → filtered), and a code
+literal (``CAP170`` — no underscore → fails the candidate regex).
+With no named function to compare the anchor against, W85 correctly
+no-ops. The sibling-mismatch class W85 was designed for is closed;
+this column-trace class is structurally different.
+
+**Distinct signal needed.** Two candidate detectors, either of which
+would catch D1:
+
+1. **Fabricated-SQL detector.** Body contains SQL blocks with
+   identifiers (``INTO some_variable``, placeholder names,
+   pseudo-variables) that don't appear in any retrieved source.
+   Surface pattern: SELECT/INSERT with a target that isn't a known
+   column or PL/SQL variable in the cited function's source.
+2. **Distributed-line-citation-padding detector.** Same line range
+   cited multiple times across the response, each framed as a
+   different "step" (``Lines 54-349`` cited as Step 1, Step 2, Step
+   3). Existing W57 check 1.3 catches repeat ranges as
+   GROUNDING-LOW, but doesn't fire as HIGH when the repeats are
+   framed as distinct sequential steps — D1's exact failure mode.
+
+Either signal could fire independently of W85; they don't share
+W85's anchor-comparison shape.
+
+**Priority.** Lower than active work. D1 is the only Run-9 evidence
+for this class so far. Reassess after the next benchmark run; if
+the class repeats, lift priority. If it stays at one occurrence,
+defer further.
 
 **Status.** Deferred. Not assigned to a sprint.
 

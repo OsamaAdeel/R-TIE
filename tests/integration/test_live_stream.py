@@ -702,6 +702,76 @@ def w83b_diagnostic_block_intact():
     return passed, extra
 
 
+@test("W85 — CAP973 (BI routing) must NOT fire ANCHOR-MISMATCH (false-positive guard)")
+def w85_no_fire_on_cap_code():
+    """BI routing intentionally redirects the anchor from CAP973 to
+    the resolved function. W85's W58 candidate filter drops CAP973
+    (no underscore), so the asked-list is empty and the check no-ops.
+    This is the critical false-positive guard."""
+    r = run_query("How is `CAP973` calculated?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    has_w85 = any("GROUNDING-ANCHOR-MISMATCH-HIGH" in w for w in warnings)
+    passed = not has_w85
+    extra = summarize_done(d)
+    if has_w85:
+        extra += " UNEXPECTED W85 FIRE on CAP-code query"
+    return passed, extra
+
+
+@test("W85 — happy path (FN_LOAD_OPS_RISK_DATA) must NOT fire ANCHOR-MISMATCH")
+def w85_no_fire_on_happy_path():
+    """Asked function == anchor function (per W83B Canary D evidence:
+    w70_anchor lands on FN_LOAD_OPS_RISK_DATA for this query).
+    Must NOT fire W85; existing pass-through guard may still fire."""
+    r = run_query("How does `FN_LOAD_OPS_RISK_DATA` work?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    diag = d.get("diagnostic") or {}
+    has_w85 = any("GROUNDING-ANCHOR-MISMATCH-HIGH" in w for w in warnings)
+    # If the cascade actually drifted away from FN_LOAD_OPS_RISK_DATA
+    # this run (run-to-run variability per W83B Section 7),
+    # W85 firing IS the correct behavior — treat it as expected.
+    anchor = diag.get("w70_anchor") or ""
+    expected_silent = anchor.upper() == "FN_LOAD_OPS_RISK_DATA"
+    if expected_silent:
+        passed = not has_w85
+    else:
+        # Anchor drifted — W85 firing is the correct outcome.
+        passed = has_w85
+    extra = summarize_done(d) + f" w70_anchor={anchor!r}"
+    if not passed:
+        extra += f" has_w85={has_w85} expected_silent={expected_silent}"
+    return passed, extra
+
+
+@test("W85 — sibling mismatch (CS_Goodwill_Calculation) fires IF cascade drifts")
+def w85_sibling_mismatch_when_drifted():
+    """W83B's Canary A reproduces a w70_anchor drift on this query
+    most of the time but is run-to-run nondeterministic per the W83B
+    close-out (Section 7). Pass condition is conditional:
+      - if anchor == CS_GOODWILL_CALCULATION → W85 silent (no drift)
+      - if anchor is any other function known to graph → W85 fires
+    Both outcomes verify the check is working — the firing IS the
+    behavior we want when drifted, the silence IS the behavior we
+    want when not drifted."""
+    r = run_query("How does `CS_Goodwill_Calculation` work?")
+    d = r["done"] or {}
+    diag = d.get("diagnostic") or {}
+    warnings = d.get("warnings") or []
+    anchor = (diag.get("w70_anchor") or "").upper()
+    has_w85 = any("GROUNDING-ANCHOR-MISMATCH-HIGH" in w for w in warnings)
+    drifted = anchor != "" and anchor != "CS_GOODWILL_CALCULATION"
+    if drifted:
+        passed = has_w85
+    else:
+        passed = not has_w85
+    extra = summarize_done(d) + f" anchor={anchor!r} drifted={drifted}"
+    if not passed:
+        extra += f" has_w85={has_w85}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
