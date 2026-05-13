@@ -177,3 +177,32 @@ defer further.
 Diagnostic for a DATA_QUERY pre-router that maps named Basel computations (BIA, CET1 ratio, RWA, LCR/NSFR, etc.) to canonical OFSERM fact tables + methodology / CAP-code filters. Empirical inventory in [docs/w88_diagnostic.md](docs/w88_diagnostic.md); fix-PR pending Toheed review.
 
 ---
+
+## W86. DATA_QUERY all-null metric columns return VERIFIED — FIXED 2026-05-12 (merge SHA pending)
+
+**Status:** Implemented in `_detect_all_null_metric_columns` in
+[src/agents/data_query.py](src/agents/data_query.py). Sibling sub-check
+to W33's Layer-4 detector, wired into the same sanity-warnings emission
+point in `answer_stream`. Sets `suspicious=True` and appends
+`suspicious_metric_all_null:` to `sanity_warnings`, which the
+`/v1/stream` badge-decision path at
+[src/main.py](src/main.py) downgrades from VERIFIED to UNVERIFIED.
+
+**Failure surface.** Stakeholder test 2026-05-12 (`db/modules/ABL_CAR_CSTM_V4/rtie_benchmark_*.md` and W88 Section 3) surfaced two cases W33 didn't catch:
+
+- **Q1** ("BIA op risk values on 31-Dec-2026"): aggregate returned one row with `SUM(N_ALPHA_PERCENT)=NULL`, `SUM(N_BETA_FACTOR)=NULL`. Future date has no rows in any table. W33 gates failed: (a) row_count=1 (not zero), (b) no non-date predicate, (c) baseline table is empty at the requested date. Stamped VERIFIED.
+- **Q5** ("NPLs on 31-dec-2025"): row-list returned 100 rows from `STG_PRODUCT_PROCESSOR` with `N_EOP_BAL_NPL=NULL` on every row (column genuinely empty for this date, confirmed independently). W33's first gate failed: rows came back. Stamped VERIFIED.
+
+**Detection signal.** Fire `suspicious_metric_all_null` when:
+1. Result has at least one row (W33's territory when zero).
+2. Every metric column in the result is 100% NULL across all returned rows (full-missing answer, not partial).
+
+Metric column classification combines three rules: (a) the SELECT-list entry is an aggregate other than `COUNT(*)`/`COUNT(<int>)`, (b) Oracle `data_type` is NUMBER and the column name is not a known dimension suffix (`*_SKEY`, `*_DATE`, `*_ID`, `*_CODE`, `*_FLAG`, `*_IND`, `FIC_MIS_DATE`, `N_RUN_SKEY`), or (c) the column name starts with `N_` (OFSAA measure convention) and is not a dimension suffix. When type metadata is missing, falls back to a conservative-broad rule that still excludes obvious dimension prefixes.
+
+**v1 scope.** Only fully-missing answers (every metric column all-null). Partial-null cases — Q7-style, where some metric columns have values and others are NULL — are explicitly deferred. `COUNT(*)` aggregates returning 0 are excluded (0 is a real answer to "how many"). W86 is suppressed when W33 has already fired (already UNVERIFIED — no double-warning noise).
+
+**Why distinct from W33.** W33 catches zero-result aggregates against populated tables with non-date predicates (CHAR-padding / case-mismatch class). W86 catches the all-null class — table empty at the requested date, or column empty across the returned rows. Different gates, different signal.
+
+**Tests.** 27 new unit tests in [tests/unit/agents/test_data_query_w86.py](tests/unit/agents/test_data_query_w86.py) covering metric-column classification, all-null detection, partial-null exclusion, dimension exclusion, COUNT(*) exclusion, and end-to-end streaming wiring.
+
+---
