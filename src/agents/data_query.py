@@ -630,6 +630,40 @@ class DataQueryAgent:
                 suspicion_reason, exec_sql, params,
             )
 
+        # W86: all-metric-columns-null detector. Additive to the W33 check
+        # above. Fires when at least one metric column is 100% NULL across
+        # every returned row (aggregate-of-nulls, or row-list where the
+        # metric column is empty for the requested filter). W33's "zero
+        # rows" gate does not cover these cases. Suppressed when W33 has
+        # already fired (already UNVERIFIED).
+        if not suspicious:
+            target_table_for_types = _extract_primary_from_table(
+                _strip_sql_literals(exec_sql)
+            )
+            all_null_metric_cols = _detect_all_null_metric_columns(
+                sql=exec_sql,
+                columns=columns,
+                rows=materialised,
+                column_types_for_table=(
+                    column_types.get(target_table_for_types, {})
+                    if target_table_for_types else {}
+                ),
+            )
+            if all_null_metric_cols:
+                suspicion_reason = _format_all_null_message(
+                    columns=all_null_metric_cols,
+                    row_count=len(materialised),
+                )
+                suspicious = True
+                warnings = list(warnings) + [
+                    f"suspicious_metric_all_null: {suspicion_reason}"
+                ]
+                logger.warning(
+                    "DataQuery W86 all-null metric columns flagged | "
+                    "cols=%s rows=%d sql=%s params=%s",
+                    all_null_metric_cols, len(materialised), exec_sql, params,
+                )
+
         yield ("stage", "explain", "Formatting the results...")
         explanation = _build_explanation(
             summary=summary,
@@ -1378,6 +1412,241 @@ def _extract_primary_from_table(sql: str) -> Optional[str]:
         return None
     raw = match.group(1)
     return raw.split(".")[-1].upper()
+
+
+# ---------------------------------------------------------------------
+# W86: all-metric-columns-null detector
+# ---------------------------------------------------------------------
+
+# SELECT-list entries that look like SUM(col), AVG(col), MIN(col),
+# MAX(col), COUNT(col) — case-insensitive, whitespace tolerant. Used to
+# decide whether a SELECT column position is an aggregate result.
+_AGGREGATE_SELECT_RE = re.compile(
+    r"\b(SUM|AVG|MIN|MAX|COUNT)\s*\(", re.IGNORECASE
+)
+
+# Column-name patterns that indicate a dimension/key column rather than
+# a numeric measure, even when stored as NUMBER. These should never
+# trigger W86 — a null FIC_MIS_DATE or *_SKEY is a data shape issue,
+# not a metric absence.
+_DIMENSION_NAME_PATTERNS = (
+    "FIC_MIS_DATE",
+    "N_RUN_SKEY",
+)
+_DIMENSION_NAME_SUFFIXES = (
+    "_SKEY",
+    "_KEY",
+    "_DATE",
+    "_ID",
+    "_CODE",
+    "_FLAG",
+    "_IND",
+)
+
+
+def _select_list_body(sql: str) -> str:
+    """Extract the SELECT-list body (between SELECT and FROM). Empty when
+    the SQL is shaped unexpectedly."""
+    match = re.search(
+        r"\bSELECT\b(.+?)\bFROM\b", sql or "", re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1) if match else ""
+
+
+def _split_select_list(sql: str) -> list[str]:
+    """Split the SELECT list into items at top-level commas.
+
+    Naive comma-split breaks on aggregates like ``COALESCE(a, b)``; this
+    tracker respects parenthesis depth so ``SUM(N_X), COUNT(*)`` returns
+    two items, not three.
+    """
+    body = _select_list_body(sql)
+    if not body:
+        return []
+    depth = 0
+    parts: list[str] = []
+    current: list[str] = []
+    for ch in body:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _is_aggregate_select_item(select_item: str) -> bool:
+    """True when this SELECT-list item is a SUM/AVG/MIN/MAX/COUNT call."""
+    return bool(_AGGREGATE_SELECT_RE.match((select_item or "").lstrip()))
+
+
+def _is_count_star_item(select_item: str) -> bool:
+    """True for ``COUNT(*)`` / ``COUNT(1)`` style aggregates. These return
+    a concrete integer (0 is a legitimate answer for "how many"), so
+    they are excluded from the all-null detector.
+    """
+    return bool(
+        re.match(
+            r"^\s*COUNT\s*\(\s*(\*|\d+)\s*\)",
+            select_item or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def _is_metric_column(
+    *,
+    col_name: str,
+    col_type: Optional[str],
+    select_item: Optional[str],
+) -> bool:
+    """Decide whether a result column is a metric (numeric measure) for
+    W86 purposes.
+
+    A column is metric if AT LEAST ONE of these holds:
+      * The SELECT-list entry is an aggregate (SUM/AVG/MIN/MAX/COUNT)
+        OTHER than COUNT(*) / COUNT(<int>).
+      * The Oracle data_type is NUMBER and the column name does not
+        match a known dimension suffix.
+      * The name starts with ``N_`` (OFSAA numeric measure convention)
+        and does not match a dimension suffix.
+
+    Defensive fallback when type metadata is missing: treat any column
+    that is not obviously a dimension as metric. Over-firing here costs
+    one false-positive UNVERIFIED stamp with the actual value visible;
+    under-firing leaves null masquerading as VERIFIED.
+    """
+    name = (col_name or "").upper()
+    if not name:
+        return False
+
+    if select_item and _is_aggregate_select_item(select_item):
+        if _is_count_star_item(select_item):
+            return False
+        return True
+
+    if name in _DIMENSION_NAME_PATTERNS:
+        return False
+    if any(name.endswith(suf) for suf in _DIMENSION_NAME_SUFFIXES):
+        return False
+
+    dtype = (col_type or "").upper().strip()
+    if dtype.startswith("NUMBER"):
+        return True
+    if name.startswith("N_"):
+        return True
+
+    if not dtype:
+        # No type metadata available — be conservative-broad so a null
+        # column with an ambiguous name still surfaces a warning. The
+        # dimension-name filters above already removed the common false
+        # positives (dates, IDs, codes, flags).
+        if name.startswith(("V_", "D_", "F_")):
+            return False
+        return True
+
+    return False
+
+
+def _detect_all_null_metric_columns(
+    *,
+    sql: str,
+    columns: list[str],
+    rows: list,
+    column_types_for_table: dict[str, dict],
+) -> list[str]:
+    """Return metric column names that are 100% NULL across every row.
+
+    Fires only when EVERY metric column in the result is 100% NULL — a
+    fully-missing answer. Partial-null cases (some metric columns have
+    values, some are NULL) are explicitly out of scope for W86 v1: they
+    are partial answers, a separate detector class.
+
+    Empty result list means W86 should not fire. Caller is responsible
+    for the upstream gates (rows non-empty, W33 not already firing).
+    """
+    if not rows or not columns:
+        return []
+
+    select_items = _split_select_list(sql)
+    if select_items and len(select_items) != len(columns):
+        # SELECT-list / column-name mismatch (LLM SELECT * or join with
+        # ambiguity). Drop to name+type-only classification.
+        select_items = []
+
+    metric_col_indices: list[tuple[int, str]] = []
+    for idx, col_name in enumerate(columns):
+        select_item = select_items[idx] if select_items else None
+        col_type_info = column_types_for_table.get(
+            (col_name or "").upper()
+        ) if column_types_for_table else None
+        col_type = col_type_info.get("data_type") if col_type_info else None
+
+        if _is_metric_column(
+            col_name=col_name, col_type=col_type, select_item=select_item,
+        ):
+            metric_col_indices.append((idx, (col_name or "").upper()))
+
+    if not metric_col_indices:
+        return []
+
+    null_cols: list[str] = []
+    for idx, name in metric_col_indices:
+        all_null = True
+        for row in rows:
+            value = row[idx] if idx < len(row) else None
+            if value is not None:
+                all_null = False
+                break
+        if all_null:
+            null_cols.append(name)
+
+    # Fire only when EVERY metric column is all-null. If any metric has
+    # at least one non-null value, the answer is partial — out of scope.
+    if len(null_cols) != len(metric_col_indices):
+        return []
+    return null_cols
+
+
+def _format_all_null_message(
+    *, columns: list[str], row_count: int,
+) -> str:
+    """User-facing reason text for the SUSPICIOUS-METRIC-ALL-NULL warning.
+
+    Names up to three all-null columns, with "+N more" when the list is
+    longer.
+    """
+    if not columns:
+        return ""
+    shown = columns[:3]
+    remainder = len(columns) - len(shown)
+    cols_text = ", ".join(f"'{c}'" for c in shown)
+    if remainder > 0:
+        cols_text = f"{cols_text} (+{remainder} more)"
+
+    if len(columns) == 1:
+        subject = f"column {cols_text} has"
+    else:
+        subject = f"columns {cols_text} have"
+
+    row_phrase = "the single returned row" if row_count == 1 else (
+        f"all {row_count} returned rows"
+    )
+
+    return (
+        f"{subject} NULL on {row_phrase}. The column(s) may not be "
+        "populated for the requested date or filter, or the query may "
+        "be reading the wrong column. Treat the result as "
+        "not-meaningful and verify the underlying data."
+    )
 
 
 def _unwrap_retry_error(exc: BaseException) -> BaseException:
