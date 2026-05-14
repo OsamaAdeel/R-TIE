@@ -132,6 +132,73 @@ python run.py                      # restart
 
 ---
 
+## Running RTIE locally (Docker)
+
+The compose stack runs four services: backend, frontend (nginx-served Vite build), Redis Stack, and Postgres. Oracle stays external — configure it in `.env.dev`. The Techlogix corpus is baked into the backend image; no bind-mount required.
+
+### Prerequisites
+
+- Docker Desktop ≥ 4.30 (or Docker Engine ≥ 24 + `docker compose` v2 on Linux).
+- Network reachability to your Oracle host. If Oracle runs on the same laptop, use `host.docker.internal` for `ORACLE_HOST` on Windows / macOS, or the host bridge IP on Linux.
+- An OpenAI API key (required for embeddings — `EMBEDDING_MODEL` must be an OpenAI model regardless of `DEFAULT_LLM_PROVIDER`).
+
+### One-time setup
+
+```bash
+git clone <repo-url> RTIE
+cd RTIE
+cp .env.example .env.dev
+# Edit .env.dev: fill ORACLE_*, OPENAI_API_KEY, POSTGRES_PASSWORD, and optionally ANTHROPIC_API_KEY.
+# REDIS_HOST and POSTGRES_HOST are overridden by compose — you can leave the localhost defaults.
+```
+
+### Start the stack
+
+```bash
+docker compose up -d --build
+docker compose logs -f rtie-backend
+```
+
+**First-run cold start.** On a brand-new volume the backend lifespan loads the corpus graph and builds the vector index. Expect **5–30 minutes** of startup work before `/health` returns ready. Watch the log for messages like `Module ABL_CAR_CSTM_V4: loaded N, skipped 0, failed 0` and `Auto-index OFSMDM: N indexed, ...`. On subsequent boots the Redis volume is warm and these steps are skipped — startup is seconds.
+
+### Access
+
+- Frontend: <http://localhost:5173>
+- Backend (direct): <http://localhost:8000/health>
+- RedisInsight UI: <http://localhost:8001> (dev only)
+
+### Common commands
+
+```bash
+# Stop the stack (volumes preserved → fast restart)
+docker compose down
+
+# Stop and wipe volumes (re-runs the indexer on next boot)
+docker compose down -v
+
+# Rebuild after Dockerfile / source changes
+docker compose up -d --build
+
+# Tail backend logs
+docker compose logs -f rtie-backend
+
+# Open a shell in the backend container
+docker compose exec rtie-backend bash
+
+# Restart just the backend
+docker compose restart rtie-backend
+```
+
+### Troubleshooting
+
+- **Backend healthcheck stays "starting" past 30 min.** Cold-start indexing is taking longer than expected. Tail `docker compose logs -f rtie-backend` — if the loader/indexer log lines aren't progressing, your OpenAI key is likely missing or rate-limited.
+- **Oracle connection fails.** Confirm `ORACLE_HOST` is reachable from inside the container: `docker compose exec rtie-backend curl -v telnet://$ORACLE_HOST:$ORACLE_PORT`. From a developer laptop where Oracle runs locally, use `host.docker.internal` (Windows / macOS) instead of `localhost`.
+- **Port 5173 / 8000 / 6379 / 5432 already in use.** Either stop the conflicting process or remap the host-side port in `docker-compose.yml` (`"5174:80"` etc.).
+- **RediSearch errors at startup.** Make sure the Redis image is `redis/redis-stack:latest` — plain `redis:alpine` does NOT include RediSearch and the vector store will fail at `FT.CREATE`.
+- **Frontend shows API errors.** Confirm `rtie-backend` is healthy: `docker compose ps`. If healthy, the nginx proxy in `deploy/frontend/nginx.conf` may need adjustment for your environment.
+
+---
+
 ## Verifying it works — the canary triple
 
 Three queries exercise the three core capabilities. Run them from the UI (or via `python cli.py ask "…"`) after the backend is up. The expected outcomes below are the trust contract — if any one diverges, something in the setup or the index is wrong.

@@ -1,0 +1,48 @@
+# Files the docker build context does NOT need. Cutting these keeps the
+# layers cacheable and avoids leaking secrets into images.
+
+# VCS / IDE
+.git
+.github
+.gitignore
+.vscode
+.idea
+
+# Local dev only
+.env
+.env.*
+!.env.example
+node_modules
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Tests, scratch, working docs (not needed at runtime)
+tests
+scratch
+logs
+docs
+*.md
+!README.md
+debug_test.py
+validate_phase2.py
+
+# Frontend build artifacts (the frontend image rebuilds dist/ from source)
+frontend/dist
+frontend/node_modules
+
+# Compose file isn't needed inside the image. (Dockerfiles ARE readable by
+# `docker build` regardless of .dockerignore — but the COPYs below pull
+# `deploy/backend/entrypoint.sh` and `deploy/frontend/nginx.conf` into the
+# images, so the deploy/ tree must remain in the build context.)
+docker-compose*.yml
+
+# Misc OS junk
+.DS_Store
+Thumbs.db
