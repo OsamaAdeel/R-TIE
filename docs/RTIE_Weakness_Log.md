@@ -9,6 +9,30 @@ comments, and PR titles (`refactor/w35-…`, `fix/w83b-…`, etc.).
 
 ---
 
+## Containerization v1 (infra/containerization-v1) — partial validation, v2 follow-ups pending
+
+**Status:** Dockerfiles, compose stack, entrypoint, and README onboarding shipped on `infra/containerization-v1` (2026-05-14). Strict `poetry install --only main --no-root --no-ansi` and `npm ci --no-audit --no-fund` both succeed against the re-synced lockfiles. Outside the strict grounding/routing weaknesses this log normally tracks, but recorded here per agreement when v1 landed.
+
+**What was validated (build-only dry run):**
+- `docker compose build` produces `rtie-rtie-backend:latest` (463 MB) and `rtie-rtie-frontend:latest` (75 MB).
+- Backend Dockerfile installs the locked dep set deterministically against the regenerated `poetry.lock`.
+- Frontend Dockerfile installs deterministically against the Linux-regenerated `package-lock.json` (npm bumped to 11.x inside the builder stage to match the host npm that generated the lock).
+
+**What was NOT validated in v1 — must be exercised before declaring deployable:**
+- Cold-start indexer flow (`docker compose down -v && docker compose up -d` against a wiped Redis volume; expect 5-30 min for `load_all_functions` + `IndexerAgent.index_all_loaded` to complete).
+- Canary query end-to-end through the containerized stack (the OFSMDM `SUM(N_EOP_BAL)` canary for `V_LV_CODE='ABL'` on 2025-12-31 — expected `-24,179,237,139.63`).
+- Warm-restart timing (`docker compose down` without `-v`, then `up -d` — expect seconds, not minutes, to first /health 200).
+- Frontend → backend round-trip via the nginx proxy in [deploy/frontend/nginx.conf](deploy/frontend/nginx.conf), including the SSE /v1/stream path with `proxy_buffering off`.
+
+These four items together constitute the full-stack validation needed before this is treated as production-ready. None of them were exercised in v1 because the developer chose the build-only dry-run path to avoid wiping the currently-populated Redis volume.
+
+**v2 follow-ups:**
+- **Docker Hub rate-limit mitigation for CI image builds.** Anonymous pulls from `registry-1.docker.io` are subject to per-IP rate limits (100 / 6h for anonymous, 200 / 6h for authenticated free-tier). A laptop-side build on a shared egress IP already showed flake symptoms during v1 (one stalled `node:20-alpine` layer pull required a buildkit restart, one transient PyPI read timeout on `anthropic`). CI builds will hit this harder. Options: (a) configure a Techlogix registry mirror via Docker Desktop's `registry-mirrors` setting and a daemon-level proxy, (b) move to authenticated Docker Hub pulls with a service-account PAT in CI secrets, (c) push base-image SHAs to the Techlogix private registry and rewrite `FROM` directives to pull from there.
+- **Pin base image SHAs.** `python:3.11-slim`, `node:20-alpine`, `nginx:1.27-alpine`, `postgres:15-alpine`, and `redis/redis-stack:latest` are all tag-pinned today; pin to immutable SHAs (`python:3.11-slim@sha256:...`) for true build reproducibility once the image surface is stable.
+- **Re-sync host lockfiles when host npm changes.** The v1 `package-lock.json` was Linux-regenerated inside a `node:20-alpine` container because the host-generated lockfile was missing Linux-specific optional deps (e.g. `@emnapi/runtime@1.10.0`). When npm or node versions on the host change, re-run that regenerate-in-Linux step and commit the result before the next image build.
+
+---
+
 ## W85. Anchor-vs-asked-function mismatch — FIXED 2026-05-12 (merge SHA pending)
 
 **Status:** Implemented and merged. Live in `_w57_check_anchor_vs_asked_mismatch`

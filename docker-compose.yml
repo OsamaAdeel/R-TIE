@@ -1,27 +1,103 @@
-version: '3.8'
+# RTIE local-dev stack (v1, internal-Techlogix persona).
+#
+# Four services: backend (FastAPI), frontend (nginx-served Vite build),
+# Redis Stack (with RediSearch + RedisJSON modules — load-bearing for the
+# vector store), and Postgres (LangGraph checkpointer + memory tables).
+#
+# Oracle is EXTERNAL: the backend reaches it via ORACLE_HOST/PORT/SID/USER
+# /PASSWORD in .env.dev. Add no oracle service here.
+#
+# REDIS_HOST and POSTGRES_HOST are overridden in the backend `environment:`
+# block below to point at service names — that way .env.dev can keep
+# `localhost` for the bare-metal `python run.py` workflow without breaking
+# the compose deployment.
+
 services:
-  redis:
+  rtie-redis:
     image: redis/redis-stack:latest
     container_name: rtie-redis
     ports:
       - "6379:6379"
-      - "8001:8001"
+      - "8001:8001"  # RedisInsight UI (optional, dev-only)
     volumes:
-      - redis_data:/data
+      - rtie-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
-  postgres:
+  rtie-postgres:
     image: postgres:15-alpine
     container_name: rtie-postgres
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: rtie
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: ${POSTGRES_DB:-rtie}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres123}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./db/memory/create_memory_tables.sql:/docker-entrypoint-initdb.d/init.sql
+      - rtie-postgres-data:/var/lib/postgresql/data
+      # Memory tables — applied once on first volume init via Postgres's
+      # docker-entrypoint-initdb.d mechanism. Subsequent boots ignore it.
+      # LangGraph checkpointer creates its own tables via checkpointer.setup()
+      # on every backend startup (idempotent).
+      - ./db/memory/create_memory_tables.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rtie-backend:
+    build:
+      context: .
+      dockerfile: deploy/backend/Dockerfile
+    container_name: rtie-backend
+    env_file:
+      - .env.dev
+    environment:
+      # Force inter-container hostnames regardless of what .env.dev says, so
+      # the same .env.dev works for bare-metal dev (localhost) and compose.
+      REDIS_HOST: rtie-redis
+      REDIS_PORT: "6379"
+      POSTGRES_HOST: rtie-postgres
+      POSTGRES_PORT: "5432"
+      # ENVIRONMENT controls which .env.{ENVIRONMENT} src/main.py loads
+      # AFTER docker compose has injected env_file values. Setting it here
+      # keeps the dotenv layer pointed at the same file we already loaded.
+      ENVIRONMENT: dev
+    ports:
+      - "8000:8000"
+    depends_on:
+      rtie-redis:
+        condition: service_healthy
+      rtie-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      # ~30 min grace for the cold-start corpus indexer. Warm Redis volume
+      # makes the second boot trivially fast.
+      retries: 120
+      start_period: 60s
+    restart: unless-stopped
+
+  rtie-frontend:
+    build:
+      context: .
+      dockerfile: deploy/frontend/Dockerfile
+    container_name: rtie-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      rtie-backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  redis_data:
-  postgres_data:
+  rtie-redis-data:
+  rtie-postgres-data:
