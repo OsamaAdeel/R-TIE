@@ -230,3 +230,49 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 **Tests.** 27 new unit tests in [tests/unit/agents/test_data_query_w86.py](tests/unit/agents/test_data_query_w86.py) covering metric-column classification, all-null detection, partial-null exclusion, dimension exclusion, COUNT(*) exclusion, and end-to-end streaming wiring.
 
 ---
+
+## W89. VARIABLE_TRACE chain ordering — FIXED in this PR
+
+- **Discovered:** Stakeholder test 2 (2026-05-14). RTIE response walked the retrieved functions in a non-execution order while Cowork's reference walked classification → aggregation → threshold → deduction. Calibration evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
+- **Root cause:** The VARIABLE_TRACE chain assembly didn't consult manifest `task_order`. The order signal exists (W39, stored under each function's `graph:{schema}:{fn}` hierarchy block) but wasn't reaching the narrative-generator. Two surfaces ordered alphabetically pre-W89: `tagged_lines.sort(key=lambda x: (x["function"], x["line"]))` in [src/agents/variable_tracer.py](src/agents/variable_tracer.py) `extract_relevant_lines`, and the outer `sorted(by_function.items())` in `build_transformation_chain`. The response payload's `functions_analyzed` array used semantic-rank order (`list(state["multi_source"].keys())`).
+- **Fix:** New [src/agents/chain_ordering.py](src/agents/chain_ordering.py) helper `order_chain_by_manifest` sorts by `(batch, process, sub_process_path, task_order)` before narrative generation. Unmanifested functions sort to the end in their original input order. Wired into [src/main.py](src/main.py) `event_stream` BEFORE the meta event emit (gated on `query_type == "VARIABLE_TRACE"` so FUNCTION_LOGIC / COLUMN_LOGIC / DATA_QUERY are unaffected) and into `build_transformation_chain`'s new `function_order` parameter. `VARIABLE_TRACE_PROMPT` got one additive sentence instructing the LLM to walk the provided functions in the order they're given.
+- **Tests:** 20 unit tests in [tests/unit/agents/test_w89_chain_ordering.py](tests/unit/agents/test_w89_chain_ordering.py) covering: simple task_order sort, multi-batch / multi-process / multi-sub-process sort, unmanifested-to-end, empty / single / already-sorted no-op, Redis failure fallback, partial manifest entry, cross-schema chain, `build_transformation_chain` order honoured. 3 integration tests in [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) cover the live SSE round-trip (functions_analyzed monotonicity check, FUNCTION_LOGIC shape unchanged, DATA_QUERY shape unchanged).
+- **Merge SHA:** pending.
+
+---
+
+## W80. Cross-table multi-stage VARIABLE_TRACE retrieval — scope expanded 2026-05-14
+
+- **Original scope (Run 8):** ~25% retrieval miss on VARIABLE_TRACE queries. Documented as a known failure surface but framed as a partial coverage gap.
+- **Actual scope (stakeholder test 2, 2026-05-14):** Closer to 100% retrieval miss on cross-table multi-stage VARIABLE_TRACE queries. The `N_SIGNIFICANT_INVST_AMT` trace returned 10 functions, 0 matching Cowork's correct 5-function pipeline. Pure name-similarity matching missed every upstream function operating on different table names. Evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
+- **Implication for the fix:** Semantic search by name-similarity alone is not sufficient. W80 implementation must consider graph-edge traversal (writer → column → table → reader) as a signal complementary to semantic search, not a replacement. Multi-stage chains span sub-processes named differently from the target variable; the only reliable retrieval signal across those boundaries is the manifest-anchored graph itself.
+- **Relationship to W89:** Orthogonal. W89 (chain ordering, fixed this PR) only guarantees that whatever functions retrieval returned are presented in execution order. W80 fixes which functions retrieval returns. Both must land for stakeholder-style queries like the test_2 trace to produce a Cowork-equivalent answer.
+
+---
+
+## W90. Distributed citation-padding (HIGH tier) — NEW 2026-05-14
+
+- **Discovered:** Stakeholder test 2 (2026-05-14). GROUNDING-LOW fired on "Line 24 cited 4 times" (the W57 padding detector working as designed at LOW tier). But the actual padding pattern was 27 distinct empty-text citations at the same line across multiple SQL blocks — distributed padding at scale, not just same-line repetition.
+- **Today:** LOW tier, advisory only, badge stays VERIFIED.
+- **Fix needed:** When over a threshold (e.g. 10+ empty-text citations, or all citations point to a single line within a single function), escalate to HIGH and flip badge. The signal is qualitatively the same as W57's same-line repeat detector but operates on the broader count.
+- **Priority:** Bundle with W82 (similar surface — both are fabrication-style detectors).
+
+---
+
+## W91. `(SCHEMA)` placeholder leak in markdown — NEW 2026-05-14
+
+- **Discovered:** Stakeholder test 2 (2026-05-14). Response heading shows literal `(SCHEMA)` — a template placeholder that wasn't substituted with the actual schema name. Also surfaced in Q9 of the 2026-05-12 stakeholder test, so this is reproducible.
+- **Root cause:** `VARIABLE_TRACE_PROMPT` in [src/agents/variable_tracer.py](src/agents/variable_tracer.py) instructs the LLM to `Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)`. The LLM treats `(SCHEMA)` as literal text rather than a variable to fill. The prompt should either pre-substitute the schema or remove the bracketed token.
+- **Priority:** Small fix; bundle with W50 (formatting pass).
+
+---
+
+## W92. Response schema-label mismatch — NEW 2026-05-14
+
+- **Discovered:** Stakeholder test 2 (2026-05-14). `data.schema: "OFSMDM"` in the response payload, but every table cited in the response body (FSI_NON_REG_CONSL_ENTITY_INVST, etc.) is OFSERM. `schema_searched` correctly lists both schemas; only the single-schema label is wrong.
+- **Root cause hypothesis:** The response builder reads `state["schema"]` (the orchestrator's primary-schema guess), which is the request's classified routing schema, not the schema(s) actually consulted during retrieval. After Phase 3, each `multi_source` entry carries its own `schema` field — the response builder should aggregate from those instead.
+- **Priority:** Bundle with W35 Phase 8 cleanup work — same broader theme of "schema is no longer single-valued post-Phase-3."
+
+---
+
+> **Priority queue note (2026-05-14):** Stakeholder test 2 surfaced W89 (fixed this PR) + W90 + W91 + W92 + W80 scope expansion. Updated priority queue reflects the new tickets. Calibration evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).

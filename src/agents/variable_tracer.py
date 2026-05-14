@@ -385,7 +385,13 @@ RULES:
 
 6. Cite every claim with function name and line numbers.
 
-7. End with a SHORT SUMMARY (4 sentences max) that states:
+7. The functions in the transformation chain are listed in EXECUTION
+   ORDER as declared by the OFSAA batch manifest. Walk them in the
+   order they are given — Step 1 = the first function in the chain,
+   Step 2 = the second, and so on. Do not re-sort or reorder; trust
+   the provided order as the execution order.
+
+8. End with a SHORT SUMMARY (4 sentences max) that states:
    - Where the value originates
    - What transforms it
    - What the final value represents
@@ -778,8 +784,17 @@ class VariableTracer:
         target_variable: str,
         tagged_lines: List[Dict[str, Any]],
         seed_variables: List[str],
+        function_order: Optional[List[str]] = None,
     ) -> str:
-        """Build a compact, human-readable transformation chain."""
+        """Build a compact, human-readable transformation chain.
+
+        W89: ``function_order`` lets the caller dictate the order in
+        which functions are emitted into the chain text (and thus the
+        order the narrative LLM walks them in). When None, falls back
+        to alphabetical for backwards compatibility with non-VARIABLE_TRACE
+        callers. The VARIABLE_TRACE pipeline passes a manifest-ordered
+        list so the narrative steps follow OFSAA execution order.
+        """
         if not tagged_lines:
             return f"No lines found referencing '{target_variable}' or its aliases."
 
@@ -792,6 +807,26 @@ class VariableTracer:
             fn = line["function"]
             by_function.setdefault(fn, []).append(line)
 
+        # W89: pick the iteration order for the chain body. When the
+        # caller passed a function_order, honour it (manifest-ordered
+        # for VARIABLE_TRACE) — but include any function present in
+        # by_function but missing from function_order at the end so we
+        # never drop tagged content silently. When no order is
+        # provided, fall back to alphabetical (pre-W89 behaviour).
+        if function_order is not None:
+            seen: Set[str] = set()
+            ordered_fns: List[str] = []
+            for fn in function_order:
+                if fn in by_function and fn not in seen:
+                    ordered_fns.append(fn)
+                    seen.add(fn)
+            for fn in by_function.keys():
+                if fn not in seen:
+                    ordered_fns.append(fn)
+                    seen.add(fn)
+        else:
+            ordered_fns = sorted(by_function.keys())
+
         parts = []
         active_lines = [l for l in tagged_lines if not l.get("commented")]
         commented_lines = [l for l in tagged_lines if l.get("commented")]
@@ -799,13 +834,17 @@ class VariableTracer:
         parts.append(f"TARGET VARIABLE: {target_variable}")
         parts.append(f"RESOLVED CODE VARIABLES: {', '.join(seed_variables)}")
         parts.append(f"ALL ALIASES (including transitive): {', '.join(sorted(all_aliases))}")
-        parts.append(f"FUNCTIONS INVOLVED: {', '.join(sorted(by_function.keys()))}")
+        # "FUNCTIONS INVOLVED" preserves the execution order so the
+        # LLM sees the same sequence both in the header and in the
+        # per-function blocks below.
+        parts.append(f"FUNCTIONS INVOLVED (in execution order): {', '.join(ordered_fns)}")
         parts.append(f"ACTIVE LINES: {len(active_lines)}")
         if commented_lines:
             parts.append(f"COMMENTED-OUT LINES: {len(commented_lines)} (deprecated — do NOT treat as active logic)")
         parts.append("")
 
-        for fn_name, lines in sorted(by_function.items()):
+        for fn_name in ordered_fns:
+            lines = by_function[fn_name]
             active = [l for l in lines if not l.get("commented")]
             commented = [l for l in lines if l.get("commented")]
 
