@@ -772,6 +772,118 @@ def w85_sibling_mismatch_when_drifted():
     return passed, extra
 
 
+@test("W89 — VARIABLE_TRACE functions_analyzed is manifest-ordered")
+def w89_chain_ordering_on_known_canary():
+    """For a VARIABLE_TRACE query, the functions_analyzed array (and
+    the chain order the LLM walks) should be monotonically non-decreasing
+    in task_order within each (batch, process, sub_process) bucket.
+
+    Uses N_EOP_BAL which routes to VARIABLE_TRACE today. Pulls the
+    manifest hierarchy directly from Redis for each function in the
+    response and verifies ordering. If retrieval comes back empty or
+    the chain has fewer than 2 functions, the test is informational
+    (passes) since there's nothing to reorder."""
+    import msgpack
+    import redis
+
+    r = run_query("How is N_EOP_BAL calculated across functions?")
+    d = r["done"] or {}
+    # Find the meta event so we get functions_analyzed.
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+    if len(fns) < 2:
+        # Nothing to order; treat as informational pass.
+        return True, summarize_done(d) + f" fns={fns}"
+
+    redis_client = redis.Redis(host="localhost", port=6379)
+    schema_searched = (meta_event or {}).get("schema_searched") or []
+    # Build (key, fn_name) tuples for ordering check.
+    keys = []
+    for fn in fns:
+        # Try every schema that came back from semantic search;
+        # the first match wins.
+        h = None
+        for schema in schema_searched or [meta_event.get("schema") or "OFSMDM"]:
+            blob = redis_client.get(f"graph:{schema}:{fn.upper()}")
+            if not blob:
+                continue
+            try:
+                graph = msgpack.unpackb(blob, raw=False)
+            except Exception:
+                continue
+            h = graph.get("hierarchy") or {}
+            if h:
+                break
+        if not h or not isinstance(h.get("task_order"), int):
+            # Unmanifested; should be at the END of fns.
+            keys.append((1, 0, fn))
+        else:
+            keys.append((
+                0,
+                h.get("batch") or "",
+                h.get("process") or "",
+                tuple(h.get("sub_process_path") or ()),
+                h["task_order"],
+                fn,
+            ))
+
+    # Walk fns in the order they came back; confirm keys are
+    # monotonically non-decreasing.
+    passed = True
+    for i in range(1, len(keys)):
+        if keys[i - 1] > keys[i]:
+            passed = False
+            break
+    extra = summarize_done(d) + f" fns={fns}"
+    if not passed:
+        extra += f" not_monotonic@{i} prev={keys[i-1]} curr={keys[i]}"
+    return passed, extra
+
+
+@test("W89 — FUNCTION_LOGIC response shape unchanged")
+def w89_function_logic_shape_unchanged():
+    """FUNCTION_LOGIC queries should NOT be reordered (only
+    VARIABLE_TRACE is). The done payload's basic shape — badge,
+    functions_analyzed presence — must look the same as pre-W89."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    # Find meta. functions_analyzed should be a list of strings.
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+    passed = (
+        isinstance(fns, list)
+        and all(isinstance(f, str) for f in fns)
+        and (meta_event or {}).get("query_type") in ("FUNCTION_LOGIC", "COLUMN_LOGIC")
+    )
+    extra = summarize_done(d) + f" fns_len={len(fns)} qt={meta_event.get('query_type') if meta_event else None}"
+    return passed, extra
+
+
+@test("W89 — DATA_QUERY response shape unchanged")
+def w89_data_query_shape_unchanged():
+    """DATA_QUERY queries don't have a functions_analyzed-style chain
+    at all. Confirm the response shape and badge are unaffected by
+    the W89 reorder being gated to VARIABLE_TRACE."""
+    r = run_query(
+        "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
+    )
+    d = r["done"] or {}
+    passed = (
+        d.get("type") == "data_query"
+        and d.get("status") == "answered"
+    )
+    extra = summarize_done(d)
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:

@@ -44,6 +44,7 @@ from src.agents.logic_explainer import (
     render_derivation_header,
 )
 from src.agents.variable_tracer import VariableTracer
+from src.agents.chain_ordering import reorder_multi_source
 from src.agents.value_tracer import ValueTracerAgent
 from src.agents.data_query import DataQueryAgent
 from src.agents.validator import Validator
@@ -1067,6 +1068,21 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             with stage_timer("metadata_fetch_multi", correlation_id, functions=len(fn_names)):
                 state = await _metadata_interpreter.fetch_multi_logic(state)
 
+            # W89: for VARIABLE_TRACE queries, reorder multi_source by
+            # manifest task_order BEFORE emitting the meta event so the
+            # user-visible functions_analyzed array and the chain the
+            # narrative LLM receives are both in execution order. Other
+            # query types (FUNCTION_LOGIC, COLUMN_LOGIC, ...) retain the
+            # semantic-rank order they had pre-W89 — only the
+            # variable-trace narrative is order-sensitive in a way the
+            # alphabetical fallback misframed.
+            if state.get("query_type") == "VARIABLE_TRACE" and _graph_redis is not None:
+                with stage_timer("w89_chain_reorder", correlation_id):
+                    state["multi_source"] = reorder_multi_source(
+                        state.get("multi_source", {}) or {},
+                        redis_client=_graph_redis,
+                    )
+
             # Send metadata event
             meta = {
                 "schema": state.get("schema", ""),
@@ -1381,8 +1397,13 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             target_var, functions_source, alias_map, seeds
                         )
                     with stage_timer("variable_transformation_chain_build", correlation_id):
+                        # W89: pass functions_source's iteration order
+                        # (already manifest-reordered above before the
+                        # meta event) so the chain text walks functions
+                        # in execution order rather than alphabetical.
                         chain_text = _variable_tracer.build_transformation_chain(
-                            target_var, tagged, seeds
+                            target_var, tagged, seeds,
+                            function_order=list(functions_source.keys()),
                         )
                     with stage_timer("llm_stream_variable_trace", correlation_id):
                         _first_token = True
