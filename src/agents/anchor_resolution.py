@@ -210,6 +210,30 @@ def build_anchor_block(anchor: Optional[Dict[str, Any]]) -> str:
     return _LOW_BLOCK.format(fn=fn)
 
 
+def resolve_search_query(state: LogicState) -> str:
+    """W80: resolve the input string fed to the vector-search embedding.
+
+    Precedence:
+
+      1. ``state["object_name"]`` when non-empty — this is the clean
+         anchor stamped by W76 ``apply_named_function_anchor`` or by
+         BI ``apply_bi_routing``. After W80 the classifier no longer
+         writes this field, so a non-empty value is always a clean
+         function identifier.
+      2. ``state["raw_query"]`` — the user's verbatim question. The
+         fallback for anchorless queries. Reflects the user's intent
+         without classifier restatement noise.
+      3. Empty string — defensive only; ``raw_query`` is set at
+         endpoint entry so this branch is unreachable in practice.
+
+    The explicit ``or`` form (rather than ``dict.get(key, default)``)
+    is load-bearing: ``object_name`` can be present-but-empty (initial
+    state seeds it to ``""``), and an empty string must fall through
+    rather than be returned as-is.
+    """
+    return state.get("object_name") or state.get("raw_query") or ""
+
+
 def apply_w70_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
     """Compute primary anchor, stamp diagnostic onto *state*, log decision.
 

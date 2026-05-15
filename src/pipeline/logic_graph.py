@@ -20,6 +20,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from src.pipeline.state import LogicState
 from src.parsing.schema_discovery import fallback_to_default_schema
+from src.agents.anchor_resolution import resolve_search_query
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
@@ -84,7 +85,11 @@ def build_logic_graph(
             config: LangGraph config with provider/model.
 
         Returns:
-            Updated state with enriched search query in object_name.
+            Updated state with query_type / target_variable / schema /
+            phase2 fields populated. W80: object_name is NOT set here —
+            the classifier no longer stamps it; the post-passes
+            (apply_named_function_anchor, apply_bi_routing) own that
+            field when they fire.
         """
         logger.info(f"[parse_query] Classifying: {state['raw_query'][:80]}...")
         llm_cfg = _extract_llm_config(config)
@@ -112,11 +117,13 @@ def build_logic_graph(
     async def semantic_search(state: LogicState) -> LogicState:
         """Perform vector similarity search to find relevant functions.
 
-        Embeds the enriched query and searches Redis for the top-K
-        most relevant indexed functions.
+        Embeds the search query and searches Redis for the top-K most
+        relevant indexed functions.
 
         Args:
-            state: Current pipeline state with enriched query in object_name.
+            state: Current pipeline state. Embedding input is resolved via
+                :func:`resolve_search_query` — the W76/BI-stamped clean
+                ``object_name`` when present, else ``raw_query``.
 
         Returns:
             Updated state with search_results list.
@@ -131,8 +138,9 @@ def build_logic_graph(
             logger.warning("[semantic_search] Vector store not available")
             return state
 
-        # Use the enriched query (original + intent + search terms)
-        search_query = state.get("object_name", state["raw_query"])
+        # W80: prefer the clean anchor (W76 / BI routing); fall back to
+        # raw_query. Never the classifier blob — see resolve_search_query.
+        search_query = resolve_search_query(state)
 
         import ssl as _ssl
         import httpx as _httpx

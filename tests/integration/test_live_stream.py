@@ -1091,6 +1091,125 @@ def w83c_w83b_december_regression():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W80 — Vector retrieval embedding input poisoning fix
+# ---------------------------------------------------------------------------
+
+# The 5 Cowork-named functions the stakeholder-test-2 trace
+# (`N_SIGNIFICANT_INVST_AMT` through deduction) should retrieve. Pre-W80
+# this query retrieved 0 of 5. Post-W80 with the embedding input no
+# longer poisoned, we expect at least 2 of 5 to surface — a floor that
+# documents the W80b motivation (top-K + hybrid retrieval) without
+# blocking on it.
+W80_SIGNIFICANT_INVESTMENT_PIPELINE = {
+    "CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION",
+    "SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION",
+    "ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP",
+    "SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP",
+    "SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES",
+}
+
+
+@test("W80 — significant-investment trace recovers >=2 of 5 pipeline fns")
+def w80_significant_investment_trace_recovers_pipeline():
+    """Stakeholder test 2 (2026-05-14) reproduction. Pre-W80 the classifier
+    blob fed to the embedding pulled retrieval toward unrelated functions
+    (CS_INSIGNIFICANT_INVST_*, FN_LOAD_OPS_RISK_DATA, etc.) — 0 of 5
+    Cowork-correct functions surfaced. Post-W80 the embedding input is the
+    user's verbatim query (no W76 anchor, no CAP-code, so raw_query
+    fallback fires). The recall floor is 2 of 5 — anything less means the
+    embedding cleanup alone isn't sufficient and W80b (hybrid BM25 + KNN /
+    adaptive top-K) becomes the next priority."""
+    r = run_query(
+        "Trace `N_SIGNIFICANT_INVST_AMT` from classification through deduction."
+    )
+    d = r["done"] or {}
+
+    # functions_analyzed comes back on the meta event (and is also
+    # reflected in d.functions_analyzed when the renderer copied it through).
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns_meta = (meta_event or {}).get("functions_analyzed") or []
+    fns_done = d.get("functions_analyzed") or []
+    fns = fns_meta or fns_done
+
+    fns_upper = {f.upper() for f in fns}
+    matched = fns_upper & W80_SIGNIFICANT_INVESTMENT_PIPELINE
+    matched_count = len(matched)
+
+    passed = matched_count >= 2
+    extra = (
+        summarize_done(d)
+        + f" matched={matched_count}/5"
+        + f" matched_fns={sorted(matched)}"
+        + f" retrieved={fns}"
+    )
+    return passed, extra
+
+
+@test("W80 — anchored-function query regression unchanged")
+def w80_anchored_function_regression():
+    """W76 anchor fires; object_name = clean function name; embedding
+    input is that function name; retrieval anchors correctly. Pre-W80
+    this path already worked (because W76 overwrote the blob); post-W80
+    it must keep working — pin VERIFIED badge and FN_LOAD_OPS_RISK_DATA
+    in functions_analyzed."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+    fns_upper = {f.upper() for f in fns}
+
+    passed = (
+        d.get("badge") == "VERIFIED"
+        and "FN_LOAD_OPS_RISK_DATA" in fns_upper
+    )
+    extra = summarize_done(d) + f" fns={fns}"
+    return passed, extra
+
+
+@test("W80 — CAP-code BI-routing regression unchanged")
+def w80_cap_code_regression():
+    """BI routing fires; object_name = resolved function name; embedding
+    anchors on it. Pre-W80 this path already worked (BI routing overwrote
+    the blob); post-W80 it must keep working — pin the meta event coming
+    back with a non-empty functions_analyzed list and a non-DECLINED
+    response shape."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+
+    # CAP973 is a known regulatory tag — different W-tickets have
+    # different verdicts on its grounding (W37/W45 may surface). The
+    # only W80-specific assertion is: the embedding ran, retrieval
+    # returned something, and the response is NOT a generic
+    # function_not_found DECLINED (which would indicate BI routing or
+    # the pipeline failed entirely).
+    passed = (
+        len(fns) > 0
+        and d.get("type") != "function_not_found"
+    )
+    extra = (
+        summarize_done(d)
+        + f" type={d.get('type')} fns_count={len(fns)}"
+    )
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:

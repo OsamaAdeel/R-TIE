@@ -37,6 +37,7 @@ from src.agents.orchestrator import (
     resolve_bi_to_function,
     _detect_unrecognized_term_query,
 )
+from src.agents.anchor_resolution import resolve_search_query
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
     LogicExplainer,
@@ -1117,7 +1118,10 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
                 http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
             )
-            search_query = state.get("object_name", state["raw_query"])
+            # W80: prefer the clean anchor (W76 / BI routing); fall back to
+            # raw_query — never the classifier blob, which used to be stamped
+            # into object_name by classify_query and poisoned the embedding.
+            search_query = resolve_search_query(state)
             with stage_timer("embedding_create", correlation_id):
                 query_embedding = await embeddings.aembed_query(search_query)
             # W79: ALL fans out across every discovered schema with
