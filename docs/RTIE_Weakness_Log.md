@@ -367,3 +367,41 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 - **Fix:** New `_detect_unrecognized_term_query` gate at [src/agents/orchestrator.py:1339](src/agents/orchestrator.py#L1339), wired between `apply_bi_routing` and the embedding call at [src/main.py:1018-1064](src/main.py#L1018-L1064). Fires when `query_type ∈ {FUNCTION_LOGIC, COLUMN_LOGIC, VARIABLE_TRACE}` AND `extract_function_candidates(raw_query)` is empty AND `state["bi_routing"]` is absent AND the W76 anchor record has no function AND any classifier-set `target_variable` fails `schemas_for_column` lookup. Builds a deterministic UNVERIFIED clarification body via `build_unrecognized_term_response` ([orchestrator.py:1404](src/agents/orchestrator.py#L1404)) — mirrors W37's `build_function_not_found_response` shape but with `badge="UNVERIFIED"`, `confidence=0.2`, and a `UNRECOGNIZED_TERM: '{term}' not in indexed corpus` warning. Streamed via `_stream_unrecognized_term_response` at [src/main.py:2397](src/main.py#L2397) (stage → meta → tokens → done). W87 is an architectural sibling of W37 (pre-search, deterministic body) — NOT W45/W49 (which are post-retrieval). Term extraction prefers the classifier's `target_variable`, falls back to quoted phrase, then multi-word capitalized run, then longest single capitalized non-stopword token; returns None when no term can be isolated, which falls through to the existing classifier-`partial_flag` clarification path.
 - **Tests:** 35 unit tests in [tests/unit/agents/test_w87_unrecognized_term.py](tests/unit/agents/test_w87_unrecognized_term.py) cover the gate (positive G-Test reproduction, target_variable-vs-heuristic priority, VARIABLE_TRACE query type, quoted phrase, unfindable business concept) and negatives (known function, CAP-code BI routing, W76 anchor, empty W76 anchor, resolved column, DATA_QUERY / UNSUPPORTED / VALUE_TRACE / empty query types, mixed-with-known-function, column-check raises). Term-extraction edge cases and variation-generation are pinned. Response-builder shape pinned (badge, validated, confidence, warnings, type, status, requested_term, message vs explanation.markdown sync, honest naming of indices RTIE actually consults). 3 integration tests appended to [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) — fires on Q11 reproduction, no-fire on FN_LOAD_OPS_RISK_DATA, no-fire on CAP973. All pass against live backend. Manual canaries captured at [scratch/w87_canary_a.txt](scratch/w87_canary_a.txt) / [b.txt](scratch/w87_canary_b.txt) / [c.txt](scratch/w87_canary_c.txt).
 - **Merge SHA:** pending.
+
+---
+
+## Operational observations — surfaced during W83C canary run (2026-05-15)
+
+Two pre-existing items observed while running [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) against the live backend for W83C verification. Neither was introduced by W83C; logged here so they don't get lost.
+
+### Integration suite has 8 unrelated pre-existing failures
+
+The full live-stream integration suite reports **PASS 27 / FAIL 8 / Total 35** on the post-W87 main. Failing tests, by ID:
+
+- TEST 2 — Named function IS in graph: FN_LOAD_OPS_RISK_DATA (asserts no GROUNDING warning but a `pass-through` template-phrase warning fires)
+- TEST 4 — Business identifier IS in a loaded function (asserts no GROUNDING warning; ungrounded-citation + template-phrase warnings fire)
+- TEST 6 — New module folder discovery (asserts `graph:OFSMDM:TEST_SIMPLE` exists in Redis; key missing)
+- TEST 7 — OFSERM file parsing with warning (asserts `graph:OFSERM:ABL_DEF_PENSION_FUND_ASSET_NET_DTL` exists; key missing)
+- TEST 11 — W45 CAP973 structured response (asserts ungrounded warning + W45 `next_step` markdown; gets a different anchor + missing markdown sections)
+- TEST 12 — W45 regression: grounded VARIABLE_TRACE (asserts VERIFIED; gets UNVERIFIED with multiple unrelated warnings)
+- TEST 14 — W49 ABL_Def_Pension partial-source structure (gets `function_not_found` / DECLINED instead of UNVERIFIED partial-source markdown)
+- TEST 16 — W49 regression: CAP973 W45 branch wins (gets a different anchor + missing W45 markdown markers)
+
+Many of these stem from incremental warning growth (multiple W57 sub-checks now firing on the same body that previously had one) and from Redis/state expectations from earlier tickets that have drifted. None block the W83C merge — they are not regressions introduced by W83C — but they suggest the integration suite needs a calibration pass against current pipeline behavior. Not yet ticketed.
+
+### Windows cp1252 encoding crash in the integration runner
+
+`python tests/integration/test_live_stream.py` crashes mid-suite on Windows (PowerShell / cmd default code page 1252) when a test result contains the U+2192 arrow character (`→`):
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode character '→' in position N: character maps to <undefined>
+```
+
+Workaround: set `$env:PYTHONIOENCODING = "utf-8"` before invocation. Affects the W84 cross-flow VARIABLE_TRACE test (and any later test in the run, since the crash terminates the process).
+
+Permanent fix would be one of:
+- Replace `→` with the ASCII `->` in test names / strings (lowest-risk single-line change in the test file).
+- Add `sys.stdout.reconfigure(encoding='utf-8')` at the top of [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) so the runner is encoding-safe regardless of host shell.
+- Document the `PYTHONIOENCODING=utf-8` requirement in the Windows onboarding doc.
+
+Not blocking; the suite runs to completion under `PYTHONIOENCODING=utf-8`. Not yet ticketed.
