@@ -1,0 +1,250 @@
+=== W87_CANARY_C ===
+QUERY: How is CAP973 calculated?
+
+--- event sequence ---
+stage, stage, stage, meta, stage, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, done
+
+--- meta event (verbatim) ---
+{
+  "schema": "OFSERM",
+  "object_name": "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+  "query_type": "FUNCTION_LOGIC",
+  "functions_analyzed": [
+    "CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT",
+    "CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT",
+    "CS_PHASE_IN_DEDUCTION_AMOUNT",
+    "CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+    "THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP",
+    "TLX_PROV_AMT_FOR_CAP013",
+    "POPULATE_STDACC_FROMGL",
+    "FN_LOAD_OPS_RISK_DATA",
+    "TLX_OPS_ADJ_MISDATE",
+    "POPULATE_PP_FROMGL"
+  ],
+  "schema_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "schema_scope": "ALL",
+  "correlation_id": "3eeb8e7b-75cc-4dfc-a385-a5fac2c72a70"
+}
+
+--- done event (verbatim) ---
+{
+  "confidence": 0.4,
+  "validated": false,
+  "badge": "UNVERIFIED",
+  "source_citations": [
+    {
+      "line": 203,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 204,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 205,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 206,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 207,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 208,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 209,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 210,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 211,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 212,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 213,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 214,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 215,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 216,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 217,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 218,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 219,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 220,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 221,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 222,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 223,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    }
+  ],
+  "warnings": [
+    "GROUNDING-HIGH: cited function 'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT' not in retrieved sources (analyzed: ['CS_PHASE_IN_DEDUCTION_AMOUNT', 'CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT', 'CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT', 'CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT', 'FN_LOAD_OPS_RISK_DATA'])"
+  ],
+  "functions_analyzed": [
+    "CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT",
+    "CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT",
+    "CS_PHASE_IN_DEDUCTION_AMOUNT",
+    "CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+    "THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP",
+    "TLX_PROV_AMT_FOR_CAP013",
+    "POPULATE_STDACC_FROMGL",
+    "FN_LOAD_OPS_RISK_DATA",
+    "TLX_OPS_ADJ_MISDATE",
+    "POPULATE_PP_FROMGL"
+  ],
+  "schema_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "schema_scope": "ALL",
+  "correlation_id": "3eeb8e7b-75cc-4dfc-a385-a5fac2c72a70",
+  "explanation": {
+    "markdown": "## CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT\n\nThis entire function ONLY runs when the reporting month is December. The function is responsible for calculating the deduction amount for regulatory adjustments, specifically for the business identifier CAP973.\n\n### Step 1: Initial Insert (Lines 203-223)\n\n```sql\nINSERT INTO FCT_STANDARD_ACCT_HEAD (\n    N_MIS_DATE_SKEY,\n    N_RUN_SKEY,\n    N_CAP_COMP_GROUP_SKEY,\n    N_ORIG_STD_ACCT_HEAD_AMT,\n    N_STD_ACCT_HEAD_AMT,\n    N_UPD_CAP_COMP_GROUP_SKEY,\n    N_ENTITY,\n    N_FORECAST_DATE_SKEY\n    -- ... (+3 more)\n)\nSELECT \n    to_char(DIM_DATES.N_DATE_SKEY),\n    to_char(DIM_RUN.N_RUN_SKEY),\n    FSI_PHASE_IN_TREATMENT.N_CAP_COMP_GROUP_SKEY,\n    COALESCE(FSI_PHASE_IN_TREATMENT.N_REG_ADJUSTMENT_PHASE_IN_AMT, 0),\n    COALESCE(FSI_PHASE_IN_TREATMENT.N_PHASE_IN_AMT, 0),\n    FSI_PHASE_IN_TREATMENT.N_CAP_COMP_GROUP_SKEY,\n    to_char(FSI_PHASE_IN_TREATMENT.N_ENTITY_SKEY),\n    to_char(FSI_PHASE_IN_TREATMENT.N_FORECAST_DATE_SKEY)\n    -- ... (+3 more)\nFROM \n    FSI_PHASE_IN_TREATMENT\nJOIN \n    DIM_RUN ON DIM_RUN.N_RUN_SKEY = '870'\nJOIN \n    DIM_DATES ON DIM_DATES.D_CALENDAR_DATE = to_date('20260331', 'YYYYMMDD')\nWHERE \n    DIM_STANDARD_ACCT_HEAD.V_STD_ACCT_HEAD_ID IN ('CAP139', 'CAP852', 'CAP943', 'CAP971', 'CAP972', 'CAP973', ...)\n```\n\n1. **What is the value at this point?**\n   - The value being inserted includes various attributes related to the regulatory adjustment, such as the original standard account head amount and the standard account head amount.\n\n2. **Where did it come from?**\n   - The values are sourced from the `FSI_PHASE_IN_TREATMENT` table, which contains the regulatory adjustment data, and are joined with `DIM_RUN` and `DIM_DATES` to filter for the specific reporting period.\n\n3. **Why is it being changed?**\n   - The values are being inserted into the `FCT_STANDARD_ACCT_HEAD` table to create a record of the regulatory adjustments for the specified reporting month, which is essential for accurate regulatory capital calculations.\n\n4. **What does the result mean in business terms?**\n   - The inserted values represent the amounts that will be used to calculate the regulatory capital adjustments for the business identifier CAP973, reflecting the financial position of the entity as of the specified date.\n\n### Summary\n\nThe value for CAP973 originates from the `FSI_PHASE_IN_TREATMENT` table, where it is transformed through a series of joins and COALESCE functions to ensure that null values are handled appropriately. The final value represents the adjusted amounts for regulatory capital calculations, specifically for the December reporting period. This process is crucial for maintaining compliance with regulatory requirements.",
+    "summary": "## CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT\n\nThis entire function ONLY runs when the reporting month is December. The function is responsible for calculating the deduction amount for regula"
+  },
+  "diagnostic": {
+    "w81_suppressed": true,
+    "w70_anchor": "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+    "w76_anchor": null
+  }
+}
+
+--- rendered markdown body ---
+## CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT
+
+This entire function ONLY runs when the reporting month is December. The function is responsible for calculating the deduction amount for regulatory adjustments, specifically for the business identifier CAP973.
+
+### Step 1: Initial Insert (Lines 203-223)
+
+```sql
+INSERT INTO FCT_STANDARD_ACCT_HEAD (
+    N_MIS_DATE_SKEY,
+    N_RUN_SKEY,
+    N_CAP_COMP_GROUP_SKEY,
+    N_ORIG_STD_ACCT_HEAD_AMT,
+    N_STD_ACCT_HEAD_AMT,
+    N_UPD_CAP_COMP_GROUP_SKEY,
+    N_ENTITY,
+    N_FORECAST_DATE_SKEY
+    -- ... (+3 more)
+)
+SELECT 
+    to_char(DIM_DATES.N_DATE_SKEY),
+    to_char(DIM_RUN.N_RUN_SKEY),
+    FSI_PHASE_IN_TREATMENT.N_CAP_COMP_GROUP_SKEY,
+    COALESCE(FSI_PHASE_IN_TREATMENT.N_REG_ADJUSTMENT_PHASE_IN_AMT, 0),
+    COALESCE(FSI_PHASE_IN_TREATMENT.N_PHASE_IN_AMT, 0),
+    FSI_PHASE_IN_TREATMENT.N_CAP_COMP_GROUP_SKEY,
+    to_char(FSI_PHASE_IN_TREATMENT.N_ENTITY_SKEY),
+    to_char(FSI_PHASE_IN_TREATMENT.N_FORECAST_DATE_SKEY)
+    -- ... (+3 more)
+FROM 
+    FSI_PHASE_IN_TREATMENT
+JOIN 
+    DIM_RUN ON DIM_RUN.N_RUN_SKEY = '870'
+JOIN 
+    DIM_DATES ON DIM_DATES.D_CALENDAR_DATE = to_date('20260331', 'YYYYMMDD')
+WHERE 
+    DIM_STANDARD_ACCT_HEAD.V_STD_ACCT_HEAD_ID IN ('CAP139', 'CAP852', 'CAP943', 'CAP971', 'CAP972', 'CAP973', ...)
+```
+
+1. **What is the value at this point?**
+   - The value being inserted includes various attributes related to the regulatory adjustment, such as the original standard account head amount and the standard account head amount.
+
+2. **Where did it come from?**
+   - The values are sourced from the `FSI_PHASE_IN_TREATMENT` table, which contains the regulatory adjustment data, and are joined with `DIM_RUN` and `DIM_DATES` to filter for the specific reporting period.
+
+3. **Why is it being changed?**
+   - The values are being inserted into the `FCT_STANDARD_ACCT_HEAD` table to create a record of the regulatory adjustments for the specified reporting month, which is essential for accurate regulatory capital calculations.
+
+4. **What does the result mean in business terms?**
+   - The inserted values represent the amounts that will be used to calculate the regulatory capital adjustments for the business identifier CAP973, reflecting the financial position of the entity as of the specified date.
+
+### Summary
+
+The value for CAP973 originates from the `FSI_PHASE_IN_TREATMENT` table, where it is transformed through a series of joins and COALESCE functions to ensure that null values are handled appropriately. The final value represents the adjusted amounts for regulatory capital calculations, specifically for the December reporting period. This process is crucial for maintaining compliance with regulatory requirements.

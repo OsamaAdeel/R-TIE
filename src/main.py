@@ -33,7 +33,9 @@ from src.agents.orchestrator import (
     function_exists_in_graph,
     find_similar_function_names,
     build_function_not_found_response,
+    build_unrecognized_term_response,
     resolve_bi_to_function,
+    _detect_unrecognized_term_query,
 )
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
@@ -1012,6 +1014,54 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             if _graph_redis is not None:
                 with stage_timer("bi_routing", correlation_id):
                     _orchestrator.apply_bi_routing(state)
+
+            # --- W87 unrecognized-term gate. When the user asked an
+            # entity-seeking question (FUNCTION_LOGIC / COLUMN_LOGIC /
+            # VARIABLE_TRACE) and every orchestrator-stage resolver
+            # failed — no function name extracted, no BI routing, no
+            # W76 anchor, no target_variable column match — short-circuit
+            # with a structured "I don't know what this means" response
+            # instead of feeding the concatenated enriched_query blob
+            # (orchestrator.py:669) into semantic search, where the LLM
+            # would fabricate an anchor on a name-similar but unrelated
+            # function (the stakeholder-test-1 Q11 "G Test" failure).
+            #
+            # Sibling of W37 (function_not_found): pre-search, deterministic
+            # body. UNVERIFIED rather than DECLINED — the system is asking
+            # for clarification, not refusing the query.
+            with stage_timer("w87_unrecognized_term_gate", correlation_id):
+                w87_term = _detect_unrecognized_term_query(
+                    state, request.query, _graph_redis,
+                )
+            if w87_term is not None:
+                schemas_loaded = (
+                    discovered_schemas(_graph_redis)
+                    if _graph_redis is not None
+                    else []
+                )
+                similar = (
+                    find_similar_function_names(
+                        w87_term, _graph_redis, top_n=3,
+                    )
+                    if _graph_redis is not None
+                    else []
+                )
+                logger.info(
+                    "W87 unrecognized-term gate fired: term=%r, "
+                    "schemas_loaded=%s, similar=%s | correlation_id=%s",
+                    w87_term, schemas_loaded, similar, correlation_id,
+                )
+                w87_payload = build_unrecognized_term_response(
+                    term=w87_term,
+                    similar_functions=similar,
+                    schemas_loaded=schemas_loaded,
+                    correlation_id=correlation_id,
+                )
+                async for event in _stream_unrecognized_term_response(
+                    w87_payload
+                ):
+                    yield event
+                return
 
             # Stage 2: Semantic search
             search_stage_msg = (
@@ -2342,6 +2392,37 @@ def _detect_partial_source_for_query(
                 "manifest_description": None,
             }
     return None
+
+
+async def _stream_unrecognized_term_response(payload: Dict[str, Any]):
+    """Yield a W87 UNRECOGNIZED_TERM response as SSE tokens + meta + done events.
+
+    Parallels :func:`_stream_declined_response` (W37 / scope_mismatch shape)
+    but ships an UNVERIFIED badge — the system is asking the user to
+    clarify, not refusing the query. The frontend renders ``warnings`` and
+    ``badge`` the same way it does for any other UNVERIFIED response, plus
+    the message markdown for the structured body.
+    """
+    term = payload.get("requested_term") or ""
+    stage_message = f"Unrecognized term — clarification needed"
+    meta = {
+        "type": payload.get("type", "unrecognized_term"),
+        "status": payload.get("status", "unverified"),
+        "badge": payload.get("badge", "UNVERIFIED"),
+        "validated": payload.get("validated", False),
+        "confidence": payload.get("confidence", 0.2),
+        "warnings": payload.get("warnings") or [],
+        "requested_term": term,
+        "similar_functions": payload.get("similar_functions") or [],
+        "schemas_searched": payload.get("schemas_searched") or [],
+        "correlation_id": payload.get("correlation_id"),
+    }
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': stage_message})}\n\n"
+    yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
+    message = payload.get("message") or ""
+    for chunk in _chunk_text(message):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
 
 
 async def _stream_declined_response(payload: Dict[str, Any]):
