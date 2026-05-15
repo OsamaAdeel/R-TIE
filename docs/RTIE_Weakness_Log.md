@@ -108,7 +108,81 @@ vs asked-about name) and doesn't require source-content analysis.
 
 ---
 
-## W83C. December-gating overgeneralization — Deferred from W83B (2026-05-12)
+## W83C. Calendar-general overgeneralization detection — FIXED (2026-05-15)
+
+**Failure surface.** Stakeholder test 2 (2026-05-14). Query: ``Trace
+N_SIGNIFICANT_INVST_AMT from classification through deduction.``
+RTIE response repeated, on every step: ``This entire function ONLY
+runs when the reporting month is March 2026, specifically on the
+date March 31, 2026.`` Source has only ``D_CALENDAR_DATE =
+TO_DATE('20260331', ...)`` — a single calendar-date filter, NOT a
+month-3 gate.
+
+**Why W83B didn't catch it.** W83B's structure is polarity-correct
+for any calendar period, but its Class C prose patterns and its
+``_W57_DECEMBER_GATE_PATTERNS`` source-content gate were
+December-only. "March" / "Q1" / "June" claims slipped through Class
+C unrecognised even though W83B's firing rule and source-content
+strategy would have caught the fabrication.
+
+**Fix.** Mechanical pattern-set widening of W83B's Class C + a
+strict per-claim source-content gate:
+
+  - Class C extended to cover all 12 months, all 4 quarters,
+    year-end variants, and month-end-date claims. Each token tagged
+    with ``(period_id, claim_type, label)``. Bare month names
+    (``march``, ``may``, ``june``, etc.) use ``\b``-bounded regex
+    to avoid English-homonym false positives
+    (``demarcation``, modal ``may run``).
+  - New ``_w57_calendar_gate_supports_claim`` two-track gate:
+      * **Month claims** require MONTH/EXTRACT logic for the
+        specific month. A single in-month date literal does NOT
+        suffice. (Closes the stakeholder case: the March-31 date
+        does not support the "ONLY runs in March" claim.)
+      * **Date claims** accept matching date literals.
+      * **Quarter claims** accept QUARTER/MONTH evidence covering
+        any member month, or any quarter-month-end date literal
+        (lenient).
+      * **Year-end claims** accept December month evidence OR any
+        year-end date literal (preserves W83a's lenient gate for
+        backward compat — `_w57_source_has_december_gate` is
+        unchanged).
+  - Firing rule, 80-char proximity window, anchor resolution
+    (W70→W76→no-op), and dedup vs Check 5 / W83a are all
+    preserved from W83B.
+  - Warning message names the actual detected period (``March``,
+    ``Q3``, ``year-end / fiscal year-end``), lists up to two when
+    a body claims multiple unsupported periods, and keeps the
+    ``GROUNDING-CALENDAR-HIGH`` code so existing W83B benchmark
+    attribution still works.
+
+**v1 scope-deferred (W83D).** OVERGENERALIZATION class — source
+contains a *localized* calendar predicate (e.g., one IF branch),
+prose claims whole-function gating. Requires AST control-flow
+position analysis to distinguish "predicate gates function body"
+from "predicate gates one nested block". Tracked as W83D below.
+
+**Implementation.** ``src/agents/logic_explainer.py`` —
+``_W57_MONTHS_META`` / ``_W57_QUARTERS_META`` /
+``_W57_MONTH_END_DAYS`` metadata; generated
+``_W83B_C_TOKEN_TAG_PAIRS`` / ``_W83B_CALENDAR_REFERENT``;
+``_W57_MONTH_EVIDENCE_BY_NUM`` /
+``_W57_QUARTER_EVIDENCE_BY_ID`` / ``_W57_YEAR_END_EVIDENCE``;
+``_w57_calendar_gate_supports_claim`` /
+``_w83b_collect_claim_tags`` helpers; updated
+``_w57_check_calendar_gating_grounded`` to use claim-driven flow.
+
+**Tests.** ``tests/unit/agents/test_w83c_calendar_overgeneralization.py``
+(47 tests — stakeholder reproduction, every-month parameterized
+smoke, quarter coverage, year-end regression, source-content gate
+strict semantics, dedup, message format, end-to-end via
+``w57_enforce_grounding``).
+
+**Merge SHA.** _pending_
+
+---
+
+## W83D. December-gating overgeneralization (AST-based) — Deferred from W83B (2026-05-12), renamed from prior W83C (2026-05-15)
 
 **Failure surface.** Run 9 B3 (`FN_LOAD_OPS_RISK_DATA`, CBA branch
 question). Body claims `"This entire function ONLY runs when the
@@ -118,13 +192,14 @@ December conditional (`IF TO_NUMBER (EXTRACT (MONTH FROM TO_DATE
 not the whole function body. The function has branches outside the
 IF that run regardless of month.
 
-**Why W83B doesn't catch this.** W83B's source-content gate
-(`_w57_source_has_december_gate`) is a binary presence check: any
-month-12 logic anywhere in the source → claim is grounded → no fire.
-Localized vs whole-function gating is not distinguishable without
-control-flow position analysis of the predicate (does the IF wrap
-the function body, or does it wrap one branch?). RTIE has the AST
-infrastructure for this (`src/parsing/query_engine.py`) but
+**Why W83B / W83C don't catch this.** Both source-content gates
+(W83B's ``_w57_source_has_december_gate`` and W83C's
+``_w57_calendar_gate_supports_claim``) are binary presence checks:
+any month-12 logic anywhere in the source → claim is grounded → no
+fire. Localized vs whole-function gating is not distinguishable
+without control-flow position analysis of the predicate (does the IF
+wrap the function body, or does it wrap one branch?). RTIE has the
+AST infrastructure for this (`src/parsing/query_engine.py`) but
 wiring it into a W57 sub-check is non-trivial.
 
 **Detection sketch (for future work).**
@@ -134,17 +209,23 @@ wiring it into a W57 sub-check is non-trivial.
    runs only … December" — a stronger claim than W83B's hedged
    forms.
 2. Locate the December predicate in source (using
-   `_W57_DECEMBER_GATE_PATTERNS`).
+   `_W57_DECEMBER_GATE_PATTERNS` or the W83C per-month evidence
+   patterns).
 3. Walk the AST from the predicate up: if the enclosing block
    includes the function's RETURN/COMMIT/end, the predicate gates
    the whole function — claim is grounded. Otherwise the predicate
    wraps a nested block — claim is overgeneralization → fire.
 
-**Trade-off.** W83C's complexity is significantly higher than W83B's.
-Run 9 evidence is one case (B3). Defer until either (a) the same
-class shows up in another benchmark run, or (b) the AST utilities
-are needed for an unrelated piece of work and W83C becomes
-cheap-to-add as a side benefit.
+**Trade-off.** W83D's complexity is significantly higher than W83B's
+or W83C's. Defer until either (a) the same class shows up in another
+benchmark run, or (b) the AST utilities are needed for an unrelated
+piece of work and W83D becomes cheap-to-add as a side benefit.
+
+**Naming history.** Originally logged as W83C (2026-05-12). Renamed
+to W83D when the W83C ticket was retargeted (2026-05-15) at
+calendar-general pattern-set widening — a strictly mechanical fix
+that landed in a single PR — to keep the smaller scope on the
+faster path.
 
 **Status.** Deferred. Not assigned to a sprint.
 
@@ -286,3 +367,41 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 - **Fix:** New `_detect_unrecognized_term_query` gate at [src/agents/orchestrator.py:1339](src/agents/orchestrator.py#L1339), wired between `apply_bi_routing` and the embedding call at [src/main.py:1018-1064](src/main.py#L1018-L1064). Fires when `query_type ∈ {FUNCTION_LOGIC, COLUMN_LOGIC, VARIABLE_TRACE}` AND `extract_function_candidates(raw_query)` is empty AND `state["bi_routing"]` is absent AND the W76 anchor record has no function AND any classifier-set `target_variable` fails `schemas_for_column` lookup. Builds a deterministic UNVERIFIED clarification body via `build_unrecognized_term_response` ([orchestrator.py:1404](src/agents/orchestrator.py#L1404)) — mirrors W37's `build_function_not_found_response` shape but with `badge="UNVERIFIED"`, `confidence=0.2`, and a `UNRECOGNIZED_TERM: '{term}' not in indexed corpus` warning. Streamed via `_stream_unrecognized_term_response` at [src/main.py:2397](src/main.py#L2397) (stage → meta → tokens → done). W87 is an architectural sibling of W37 (pre-search, deterministic body) — NOT W45/W49 (which are post-retrieval). Term extraction prefers the classifier's `target_variable`, falls back to quoted phrase, then multi-word capitalized run, then longest single capitalized non-stopword token; returns None when no term can be isolated, which falls through to the existing classifier-`partial_flag` clarification path.
 - **Tests:** 35 unit tests in [tests/unit/agents/test_w87_unrecognized_term.py](tests/unit/agents/test_w87_unrecognized_term.py) cover the gate (positive G-Test reproduction, target_variable-vs-heuristic priority, VARIABLE_TRACE query type, quoted phrase, unfindable business concept) and negatives (known function, CAP-code BI routing, W76 anchor, empty W76 anchor, resolved column, DATA_QUERY / UNSUPPORTED / VALUE_TRACE / empty query types, mixed-with-known-function, column-check raises). Term-extraction edge cases and variation-generation are pinned. Response-builder shape pinned (badge, validated, confidence, warnings, type, status, requested_term, message vs explanation.markdown sync, honest naming of indices RTIE actually consults). 3 integration tests appended to [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) — fires on Q11 reproduction, no-fire on FN_LOAD_OPS_RISK_DATA, no-fire on CAP973. All pass against live backend. Manual canaries captured at [scratch/w87_canary_a.txt](scratch/w87_canary_a.txt) / [b.txt](scratch/w87_canary_b.txt) / [c.txt](scratch/w87_canary_c.txt).
 - **Merge SHA:** pending.
+
+---
+
+## Operational observations — surfaced during W83C canary run (2026-05-15)
+
+Two pre-existing items observed while running [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) against the live backend for W83C verification. Neither was introduced by W83C; logged here so they don't get lost.
+
+### Integration suite has 8 unrelated pre-existing failures
+
+The full live-stream integration suite reports **PASS 27 / FAIL 8 / Total 35** on the post-W87 main. Failing tests, by ID:
+
+- TEST 2 — Named function IS in graph: FN_LOAD_OPS_RISK_DATA (asserts no GROUNDING warning but a `pass-through` template-phrase warning fires)
+- TEST 4 — Business identifier IS in a loaded function (asserts no GROUNDING warning; ungrounded-citation + template-phrase warnings fire)
+- TEST 6 — New module folder discovery (asserts `graph:OFSMDM:TEST_SIMPLE` exists in Redis; key missing)
+- TEST 7 — OFSERM file parsing with warning (asserts `graph:OFSERM:ABL_DEF_PENSION_FUND_ASSET_NET_DTL` exists; key missing)
+- TEST 11 — W45 CAP973 structured response (asserts ungrounded warning + W45 `next_step` markdown; gets a different anchor + missing markdown sections)
+- TEST 12 — W45 regression: grounded VARIABLE_TRACE (asserts VERIFIED; gets UNVERIFIED with multiple unrelated warnings)
+- TEST 14 — W49 ABL_Def_Pension partial-source structure (gets `function_not_found` / DECLINED instead of UNVERIFIED partial-source markdown)
+- TEST 16 — W49 regression: CAP973 W45 branch wins (gets a different anchor + missing W45 markdown markers)
+
+Many of these stem from incremental warning growth (multiple W57 sub-checks now firing on the same body that previously had one) and from Redis/state expectations from earlier tickets that have drifted. None block the W83C merge — they are not regressions introduced by W83C — but they suggest the integration suite needs a calibration pass against current pipeline behavior. Not yet ticketed.
+
+### Windows cp1252 encoding crash in the integration runner
+
+`python tests/integration/test_live_stream.py` crashes mid-suite on Windows (PowerShell / cmd default code page 1252) when a test result contains the U+2192 arrow character (`→`):
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode character '→' in position N: character maps to <undefined>
+```
+
+Workaround: set `$env:PYTHONIOENCODING = "utf-8"` before invocation. Affects the W84 cross-flow VARIABLE_TRACE test (and any later test in the run, since the crash terminates the process).
+
+Permanent fix would be one of:
+- Replace `→` with the ASCII `->` in test names / strings (lowest-risk single-line change in the test file).
+- Add `sys.stdout.reconfigure(encoding='utf-8')` at the top of [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) so the runner is encoding-safe regardless of host shell.
+- Document the `PYTHONIOENCODING=utf-8` requirement in the Windows onboarding doc.
+
+Not blocking; the suite runs to completion under `PYTHONIOENCODING=utf-8`. Not yet ticketed.

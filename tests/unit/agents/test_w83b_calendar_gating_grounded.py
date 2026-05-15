@@ -139,8 +139,13 @@ def test_sentence_does_not_match_december_alone_no_b():
 
 
 def test_sentence_does_not_match_b_without_c():
-    """No calendar referent → no fire even with A and B."""
-    sentence = "the function executes only in march"
+    """No calendar referent → no fire even with A and B.
+
+    Note (W83C, 2026-05-15): "march" is no longer a valid sentinel
+    for "non-calendar referent" — it's now a Class C month token.
+    Substituted "batch mode" which has no calendar semantics.
+    """
+    sentence = "the function executes only in batch mode"
     assert not _w83b_sentence_matches(sentence)
 
 
