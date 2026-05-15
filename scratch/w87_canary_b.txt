@@ -1,0 +1,1132 @@
+=== W87_CANARY_B ===
+QUERY: How does FN_LOAD_OPS_RISK_DATA work?
+
+--- event sequence ---
+stage, stage, stage, meta, stage, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, done
+
+--- meta event (verbatim) ---
+{
+  "schema": "OFSMDM",
+  "object_name": "How does FN_LOAD_OPS_RISK_DATA work? Explain the logic and purpose of the PL/SQL function FN_LOAD_OP",
+  "query_type": "COLUMN_LOGIC",
+  "functions_analyzed": [
+    "OPS_RISK_DATA_POPULATION_CSTM",
+    "OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP",
+    "ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM",
+    "CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT",
+    "T2T_FCT_CCP_DETAILS_STD_ACCT_HEAD_POP",
+    "FN_LOAD_OPS_RISK_DATA",
+    "TLX_LOB_MAPPING",
+    "TLX_LOAD_DELETE_OFSMDM",
+    "MAP_999999_ENTRIES_EXPO",
+    "TLX_OPS_ADJ_MISDATE"
+  ],
+  "schema_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "schema_scope": "ALL",
+  "correlation_id": "98997559-58a6-444c-ba4c-acb4cc2c80a1"
+}
+
+--- done event (verbatim) ---
+{
+  "confidence": 0.4,
+  "validated": false,
+  "badge": "UNVERIFIED",
+  "source_citations": [
+    {
+      "line": 198,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 199,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 200,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 201,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 202,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 203,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 204,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 205,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 206,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 207,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 208,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 209,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 210,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 211,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 212,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 213,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 214,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 215,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 216,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 217,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 218,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 219,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 220,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 221,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 222,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 223,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 224,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 225,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 226,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 227,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 228,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 229,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 230,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 231,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 232,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 233,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 234,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 235,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 236,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 237,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 238,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 239,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 240,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 241,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 242,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 243,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 244,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 245,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 246,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 247,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 248,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 249,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 250,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 251,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 252,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 253,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 254,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 255,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 256,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 257,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 258,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 259,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 260,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 261,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 262,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 263,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 264,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 265,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 266,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 267,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 268,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 269,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 270,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 271,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 272,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 273,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 274,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 275,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 276,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 277,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 278,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 279,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 280,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 281,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 282,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 283,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 284,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 285,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 286,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 287,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 288,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 289,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 290,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 291,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 292,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 293,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 294,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 295,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 296,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 297,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 298,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 299,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 300,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 301,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 302,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 303,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 304,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 305,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 306,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 307,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 308,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 309,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 310,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 311,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 312,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 313,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 314,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 315,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 316,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 317,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 318,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 319,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 320,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 321,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 322,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 323,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 324,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 325,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 326,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 327,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 328,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 329,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 330,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 331,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 332,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 333,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 334,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 335,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 336,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 337,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 338,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 339,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 340,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 341,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 342,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 343,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 344,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 345,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 346,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 347,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 348,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 349,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 350,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 351,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 352,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 353,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 354,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 355,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 356,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 357,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 358,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 359,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 360,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 361,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 362,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 363,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 364,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 365,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 366,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 367,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 368,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    },
+    {
+      "line": 369,
+      "text": "",
+      "context": "inline reference",
+      "source": "markdown"
+    }
+  ],
+  "warnings": [
+    "GROUNDING-HIGH: response contains template phrase 'pass-through' but cited source for 'FN_LOAD_OPS_RISK_DATA' does not support it"
+  ],
+  "functions_analyzed": [
+    "OPS_RISK_DATA_POPULATION_CSTM",
+    "OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP",
+    "ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM",
+    "CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT",
+    "T2T_FCT_CCP_DETAILS_STD_ACCT_HEAD_POP",
+    "FN_LOAD_OPS_RISK_DATA",
+    "TLX_LOB_MAPPING",
+    "TLX_LOAD_DELETE_OFSMDM",
+    "MAP_999999_ENTRIES_EXPO",
+    "TLX_OPS_ADJ_MISDATE"
+  ],
+  "schema_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "schema_scope": "ALL",
+  "correlation_id": "98997559-58a6-444c-ba4c-acb4cc2c80a1",
+  "explanation": {
+    "markdown": "## FN_LOAD_OPS_RISK_DATA Overview\n\nThis entire function ONLY runs when the reporting month is December. The primary purpose of the `FN_LOAD_OPS_RISK_DATA` function is to load operational risk data into the system while ensuring that historical records are date-adjusted appropriately. \n\n### Step 1: Initial Insert (Lines 198-369)\n\n```sql\n-- This section handles the pass-through of data\nINSERT INTO ABL_OPS_RISK_DATA\nSELECT * FROM STG_OPS_RISK_DATA\nWHERE <conditions>;\n```\n\nIn this step, the function copies data from the staging table `STG_OPS_RISK_DATA` into the target table `ABL_OPS_RISK_DATA`. \n\n- **What is the value at this point?** The value consists of all records from `STG_OPS_RISK_DATA`.\n- **Where did it come from?** It originates from the `STG_OPS_RISK_DATA` table, which serves as a temporary holding area for operational risk data before it is finalized in the main operational risk table.\n- **Why is it being changed?** The function is designed to load this data into a permanent table while ensuring that it is appropriately adjusted for the reporting period, specifically for December.\n- **What does the result mean in business terms?** This step ensures that the operational risk data is accurately reflected in the main database, allowing for reliable reporting and analysis of risk exposure.\n\n### Data Flow and Transformation\n\nThe function does not transform the data during this pass-through; it simply copies it unchanged. This means that the values in `ABL_OPS_RISK_DATA` will directly reflect those in `STG_OPS_RISK_DATA`, maintaining the integrity of the data as it moves into the operational risk framework.\n\n- **The value is passed through without modification.** This ensures that any calculations or adjustments that need to be made are handled in subsequent steps or functions, preserving the original data for reference.\n\n### Summary\n\nThe `FN_LOAD_OPS_RISK_DATA` function is responsible for loading operational risk data from the staging area into the main operational risk table. It does this by passing the data unchanged, ensuring that the historical records are accurately date-adjusted for the reporting month of December. The final value in `ABL_OPS_RISK_DATA` represents the operational risk data that will be used for regulatory capital calculations and risk assessments.",
+    "summary": "## FN_LOAD_OPS_RISK_DATA Overview\n\nThis entire function ONLY runs when the reporting month is December. The primary purpose of the `FN_LOAD_OPS_RISK_DATA` function is to load operational risk data int"
+  },
+  "diagnostic": {
+    "w81_suppressed": true,
+    "w70_anchor": "FN_LOAD_OPS_RISK_DATA",
+    "w76_anchor": null
+  }
+}
+
+--- rendered markdown body ---
+## FN_LOAD_OPS_RISK_DATA Overview
+
+This entire function ONLY runs when the reporting month is December. The primary purpose of the `FN_LOAD_OPS_RISK_DATA` function is to load operational risk data into the system while ensuring that historical records are date-adjusted appropriately. 
+
+### Step 1: Initial Insert (Lines 198-369)
+
+```sql
+-- This section handles the pass-through of data
+INSERT INTO ABL_OPS_RISK_DATA
+SELECT * FROM STG_OPS_RISK_DATA
+WHERE <conditions>;
+```
+
+In this step, the function copies data from the staging table `STG_OPS_RISK_DATA` into the target table `ABL_OPS_RISK_DATA`. 
+
+- **What is the value at this point?** The value consists of all records from `STG_OPS_RISK_DATA`.
+- **Where did it come from?** It originates from the `STG_OPS_RISK_DATA` table, which serves as a temporary holding area for operational risk data before it is finalized in the main operational risk table.
+- **Why is it being changed?** The function is designed to load this data into a permanent table while ensuring that it is appropriately adjusted for the reporting period, specifically for December.
+- **What does the result mean in business terms?** This step ensures that the operational risk data is accurately reflected in the main database, allowing for reliable reporting and analysis of risk exposure.
+
+### Data Flow and Transformation
+
+The function does not transform the data during this pass-through; it simply copies it unchanged. This means that the values in `ABL_OPS_RISK_DATA` will directly reflect those in `STG_OPS_RISK_DATA`, maintaining the integrity of the data as it moves into the operational risk framework.
+
+- **The value is passed through without modification.** This ensures that any calculations or adjustments that need to be made are handled in subsequent steps or functions, preserving the original data for reference.
+
+### Summary
+
+The `FN_LOAD_OPS_RISK_DATA` function is responsible for loading operational risk data from the staging area into the main operational risk table. It does this by passing the data unchanged, ensuring that the historical records are accurately date-adjusted for the reporting month of December. The final value in `ABL_OPS_RISK_DATA` represents the operational risk data that will be used for regulatory capital calculations and risk assessments.

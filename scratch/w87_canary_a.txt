@@ -1,0 +1,76 @@
+=== W87_CANARY_A ===
+QUERY: what is the threshold value for G Test
+
+--- event sequence ---
+stage, stage, meta, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, token, done
+
+--- meta event (verbatim) ---
+{
+  "type": "unrecognized_term",
+  "status": "unverified",
+  "badge": "UNVERIFIED",
+  "validated": false,
+  "confidence": 0.2,
+  "warnings": [
+    "UNRECOGNIZED_TERM: 'G Test' not in indexed corpus"
+  ],
+  "requested_term": "G Test",
+  "similar_functions": [],
+  "schemas_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "correlation_id": "524f202e-92b4-461c-8305-a9e8dfd0ea66"
+}
+
+--- done event (verbatim) ---
+{
+  "type": "unrecognized_term",
+  "status": "unverified",
+  "requested_term": "G Test",
+  "similar_functions": [],
+  "validated": false,
+  "badge": "UNVERIFIED",
+  "confidence": 0.2,
+  "source_citations": [],
+  "warnings": [
+    "UNRECOGNIZED_TERM: 'G Test' not in indexed corpus"
+  ],
+  "schemas_searched": [
+    "OFSERM",
+    "OFSMDM"
+  ],
+  "message": "## Unrecognized Term: \"G Test\"\n\nI couldn't resolve \"G Test\" against the indexed corpus.\n\n### What I searched\n\n- Loaded function names in OFSERM, OFSMDM\n- Column indexes across OFSERM, OFSMDM\n- Business-identifier literal index (CAP codes)\n- Named-function anchor patterns (`In <FunctionName>, ...`)\n\nNo match was found for \"G Test\". Common spelling variations like 'G_Test', 'G TEST', 'GTest' would also have matched if they existed in the indexed corpus.\n\n### What you can do\n\nIf \"G Test\" is local terminology or shorthand, please clarify what it maps to:\n\n- A specific function name (e.g., `CS_Threshold_Treatment_*`)\n- A CAP code (e.g., `CAP973`)\n- A column name (e.g., `N_EOP_BAL_NPL`)\n- A standard account head code or other identifier RTIE indexes\n\n### Related items I searched\n\nNo close name-similarity matches found.",
+  "explanation": {
+    "markdown": "## Unrecognized Term: \"G Test\"\n\nI couldn't resolve \"G Test\" against the indexed corpus.\n\n### What I searched\n\n- Loaded function names in OFSERM, OFSMDM\n- Column indexes across OFSERM, OFSMDM\n- Business-identifier literal index (CAP codes)\n- Named-function anchor patterns (`In <FunctionName>, ...`)\n\nNo match was found for \"G Test\". Common spelling variations like 'G_Test', 'G TEST', 'GTest' would also have matched if they existed in the indexed corpus.\n\n### What you can do\n\nIf \"G Test\" is local terminology or shorthand, please clarify what it maps to:\n\n- A specific function name (e.g., `CS_Threshold_Treatment_*`)\n- A CAP code (e.g., `CAP973`)\n- A column name (e.g., `N_EOP_BAL_NPL`)\n- A standard account head code or other identifier RTIE indexes\n\n### Related items I searched\n\nNo close name-similarity matches found.",
+    "summary": "## Unrecognized Term: \"G Test\"\n\nI couldn't resolve \"G Test\" against the indexed corpus.\n\n### What I searched\n\n- Loaded function names in OFSERM, OFSMDM\n- Column indexes across OFSERM, OFSMDM\n- Busines"
+  },
+  "correlation_id": "524f202e-92b4-461c-8305-a9e8dfd0ea66"
+}
+
+--- rendered markdown body ---
+## Unrecognized Term: "G Test"
+
+I couldn't resolve "G Test" against the indexed corpus.
+
+### What I searched
+
+- Loaded function names in OFSERM, OFSMDM
+- Column indexes across OFSERM, OFSMDM
+- Business-identifier literal index (CAP codes)
+- Named-function anchor patterns (`In <FunctionName>, ...`)
+
+No match was found for "G Test". Common spelling variations like 'G_Test', 'G TEST', 'GTest' would also have matched if they existed in the indexed corpus.
+
+### What you can do
+
+If "G Test" is local terminology or shorthand, please clarify what it maps to:
+
+- A specific function name (e.g., `CS_Threshold_Treatment_*`)
+- A CAP code (e.g., `CAP973`)
+- A column name (e.g., `N_EOP_BAL_NPL`)
+- A standard account head code or other identifier RTIE indexes
+
+### Related items I searched
+
+No close name-similarity matches found.

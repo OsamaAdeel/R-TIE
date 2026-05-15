@@ -1224,3 +1224,272 @@ def build_function_not_found_response(
         "explanation": {"markdown": message, "summary": message[:200]},
         "correlation_id": correlation_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# W87 — Unrecognized-term clarification gate
+# ---------------------------------------------------------------------------
+#
+# W87 fires when the orchestrator's entity-extraction paths all fail on an
+# entity-seeking query type (FUNCTION_LOGIC / COLUMN_LOGIC / VARIABLE_TRACE).
+# Without W87 the pipeline would pass the concatenated enriched_query blob
+# from classify_query (line 669) into semantic search, which then ranks
+# unrelated functions by name-similarity and the narrative LLM fabricates an
+# anchor on one of them. Stakeholder-test-1 Q11 ("what is the threshold value
+# for G Test") is the canonical failure case.
+#
+# Architectural sibling of W37 (function_not_found): pre-search, deterministic
+# body, _stream_unrecognized_term_response emits it. Unlike W37 the badge is
+# UNVERIFIED — the query was not declined, the system has simply asked the
+# user to clarify what they meant.
+
+# English question / command words that pass the W87 single-capitalized-token
+# heuristic but are never the unknown term the user is asking about.
+_W87_QUERY_STOPWORDS = frozenset({
+    "WHAT", "HOW", "WHY", "WHEN", "WHERE", "WHICH", "WHO", "WHOSE",
+    "FIND", "SHOW", "TELL", "EXPLAIN", "DESCRIBE", "GIVE", "LIST",
+    "THE", "AND", "OR", "BUT", "FOR", "WITH", "FROM", "INTO", "OVER",
+    "TRUE", "FALSE", "NULL", "NONE",
+})
+
+# Query types that ask about a specific entity. W87 only fires on these —
+# DATA_QUERY has its own clarification path, UNSUPPORTED short-circuits,
+# VALUE_TRACE / DIFFERENCE_EXPLANATION route through Phase 2.
+_W87_ENTITY_SEEKING_TYPES = frozenset({
+    "FUNCTION_LOGIC", "COLUMN_LOGIC", "VARIABLE_TRACE",
+})
+
+
+def _extract_unrecognized_term(
+    raw_query: str,
+    target_variable: str,
+) -> Optional[str]:
+    """Return the most plausible term the user is asking about, or None.
+
+    Priority:
+      1. The classifier's ``target_variable`` (its best guess at the entity
+         the user named) — already extracted during classification, no need
+         to re-derive.
+      2. The first quoted phrase in the raw query.
+      3. The longest run of consecutive capitalized words.
+      4. The longest single capitalized token that is not a query stopword
+         (What, How, Find, ...).
+
+    Returns None when no heuristic isolates a term — the caller treats this
+    as "W87 cannot identify what the user meant, fall through to the
+    existing classifier-partial_flag clarification path."
+    """
+    if target_variable:
+        return target_variable.strip()
+    if not raw_query:
+        return None
+
+    # Quoted phrase ("G Test", 'CAP973-equivalent', etc.).
+    quoted = re.search(r'["\']([^"\']{2,80})["\']', raw_query)
+    if quoted:
+        candidate = quoted.group(1).strip()
+        if candidate:
+            return candidate
+
+    # Multi-word capitalized run ("G Test", "Hypothetical Calculation").
+    multiword = re.findall(
+        r"\b(?:[A-Z][A-Za-z0-9_]*)(?:\s+[A-Z][A-Za-z0-9_]*)+\b",
+        raw_query,
+    )
+    if multiword:
+        return max(multiword, key=len).strip()
+
+    # Single capitalized token, filtered against query stopwords.
+    single = re.findall(r"\b([A-Z][A-Za-z0-9_]{2,})\b", raw_query)
+    single = [t for t in single if t.upper() not in _W87_QUERY_STOPWORDS]
+    if single:
+        return max(single, key=len).strip()
+
+    return None
+
+
+def _generate_term_variations(term: str) -> List[str]:
+    """Return up to 5 spelling variations of *term* a user might mean.
+
+    Variations are presented in the W87 response body so the user knows
+    which alternate spellings RTIE would have matched if they existed in
+    the indexed corpus. The variations are NOT actually searched —
+    listing them is honest about the kind of normalization RTIE would
+    apply on a re-ask with the canonical spelling.
+    """
+    if not term:
+        return []
+    seen: set[str] = {term}
+    out: List[str] = []
+
+    def _maybe_add(v: str) -> None:
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+
+    upper = term.upper()
+    # space <-> underscore swaps
+    if " " in term:
+        _maybe_add(term.replace(" ", "_"))
+    if "_" in term:
+        _maybe_add(term.replace("_", " "))
+    # case
+    _maybe_add(upper)
+    # collapsed (no separators)
+    collapsed = re.sub(r"[\s_]+", "", term)
+    _maybe_add(collapsed)
+    # _TEST suffix common in OFSAA validation routines
+    if not upper.endswith("TEST"):
+        _maybe_add(f"{upper.replace(' ', '_')}_TEST")
+    return out[:5]
+
+
+def _detect_unrecognized_term_query(
+    state: LogicState,
+    raw_query: str,
+    redis_client,
+) -> Optional[str]:
+    """W87 gate. Return the unrecognized term when every entity-extraction
+    path failed AND the classifier routed this as an entity-seeking query.
+
+    Fires when ALL of the following hold:
+      (a) ``state["query_type"]`` is FUNCTION_LOGIC / COLUMN_LOGIC /
+          VARIABLE_TRACE
+      (b) ``extract_function_candidates(raw_query)`` returned empty (so the
+          W37 function precheck did NOT fire either)
+      (c) BI routing did not fire — ``state["bi_routing"]`` is absent
+      (d) The W76 named-function anchor did not fire — either
+          ``state["w76_anchor"]`` is absent or its ``function`` field is
+          empty
+      (e) If the classifier set ``target_variable``, that column does NOT
+          resolve in any indexed schema's column index
+
+    Returns the extracted term, or None — None means "fall through, let the
+    normal pipeline run" (W87 does not gate when no term can be isolated;
+    that falls to the classifier-partial_flag clarification path).
+    """
+    if state.get("query_type") not in _W87_ENTITY_SEEKING_TYPES:
+        return None
+    if not raw_query:
+        return None
+
+    # (b) Function-name extraction. Non-empty list means W37 already had a
+    # chance to fire and either fired (in which case we never reached
+    # here) or the function exists and the pipeline should continue.
+    if extract_function_candidates(raw_query):
+        return None
+
+    # (c) BI routing fired.
+    if state.get("bi_routing"):
+        return None
+
+    # (d) W76 anchored on an explicit function.
+    w76 = state.get("w76_anchor") or {}
+    if w76.get("function"):
+        return None
+
+    # (e) Column resolves in some schema's index.
+    target_var = (state.get("target_variable") or "").strip()
+    if target_var and redis_client is not None:
+        try:
+            # Imported lazily to keep the orchestrator module import-graph
+            # narrow — schema_discovery already imports store, and store
+            # already imports orchestrator-adjacent helpers elsewhere.
+            from src.parsing.schema_discovery import schemas_for_column
+            if schemas_for_column(target_var, redis_client):
+                return None
+        except Exception as exc:
+            # Lookup failure should not block the W87 gate — log and
+            # treat as "did not resolve."
+            logger.warning(
+                "W87 column-resolution check failed for %r: %s",
+                target_var, exc,
+            )
+
+    term = _extract_unrecognized_term(raw_query, target_var)
+    if term is None:
+        return None
+    return term
+
+
+def build_unrecognized_term_response(
+    term: str,
+    similar_functions: List[str],
+    schemas_loaded: List[str],
+    correlation_id: str,
+) -> Dict[str, Any]:
+    """Assemble the W87 UNVERIFIED clarification payload.
+
+    Deterministic markdown — no LLM call. Mirrors W37's
+    :func:`build_function_not_found_response` shape: the same SSE emitter
+    delivers stage / meta / token / done events. The structural fields
+    let automated checks assert the W87 outcome.
+    """
+    variations = _generate_term_variations(term)
+    schemas_block = ", ".join(sorted(schemas_loaded)) if schemas_loaded else "(none discovered)"
+
+    parts: List[str] = [
+        f'## Unrecognized Term: "{term}"',
+        "",
+        f'I couldn\'t resolve "{term}" against the indexed corpus.',
+        "",
+        "### What I searched",
+        "",
+        f"- Loaded function names in {schemas_block}",
+        f"- Column indexes across {schemas_block}",
+        "- Business-identifier literal index (CAP codes)",
+        "- Named-function anchor patterns (`In <FunctionName>, ...`)",
+        "",
+    ]
+    if variations:
+        parts.append(
+            f'No match was found for "{term}". Common spelling variations '
+            f"like {', '.join(repr(v) for v in variations)} would also have "
+            "matched if they existed in the indexed corpus."
+        )
+        parts.append("")
+
+    parts.extend([
+        "### What you can do",
+        "",
+        f'If "{term}" is local terminology or shorthand, please clarify '
+        "what it maps to:",
+        "",
+        "- A specific function name (e.g., `CS_Threshold_Treatment_*`)",
+        "- A CAP code (e.g., `CAP973`)",
+        "- A column name (e.g., `N_EOP_BAL_NPL`)",
+        "- A standard account head code or other identifier RTIE indexes",
+        "",
+        "### Related items I searched",
+        "",
+    ])
+    if similar_functions:
+        for name in similar_functions:
+            parts.append(
+                f"- `{name}` — retrieved by name-similarity only; "
+                "NOT the answer to your question."
+            )
+        parts.append("")
+        parts.append(
+            "(Listed in case one of them is what you meant. None were "
+            f'confirmed to be the answer to "{term}".)'
+        )
+    else:
+        parts.append("No close name-similarity matches found.")
+
+    message = "\n".join(parts)
+    return {
+        "type": "unrecognized_term",
+        "status": "unverified",
+        "requested_term": term,
+        "similar_functions": similar_functions,
+        "validated": False,
+        "badge": "UNVERIFIED",
+        "confidence": 0.2,
+        "source_citations": [],
+        "warnings": [f"UNRECOGNIZED_TERM: '{term}' not in indexed corpus"],
+        "schemas_searched": list(schemas_loaded) if schemas_loaded else [],
+        "message": message,
+        "explanation": {"markdown": message, "summary": message[:200]},
+        "correlation_id": correlation_id,
+    }

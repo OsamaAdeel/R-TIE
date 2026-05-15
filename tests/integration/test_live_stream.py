@@ -884,6 +884,112 @@ def w89_data_query_shape_unchanged():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W87 — Unrecognized-term gate
+# ---------------------------------------------------------------------------
+
+@test("W87 — fires on G Test query (stakeholder-test-1 Q11 reproduction)")
+def w87_fires_on_g_test_query():
+    """Q11 — 'what is the threshold value for G Test'. Before W87 the
+    classifier's enriched_query blob ('what is the threshold value for G
+    Test Find the threshold value used for the G Test check G Test G_T')
+    was passed to semantic search; the narrative LLM then anchored on
+    CS_THRESHOLD_TREATMENT_AGGREGATE_THRESHOLD_ASSIGNMENT and fabricated a
+    December gate. W87 short-circuits before semantic search with a
+    structured clarification."""
+    r = run_query("what is the threshold value for G Test")
+    d = r["done"] or {}
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "type_is_unrecognized_term": d.get("type") == "unrecognized_term",
+        "status_unverified": d.get("status") == "unverified",
+        "badge_unverified": d.get("badge") == "UNVERIFIED",
+        "validated_false": d.get("validated") is False,
+        "warning_present": any(
+            "UNRECOGNIZED_TERM" in w and "G Test" in w for w in warnings
+        ),
+        "markdown_has_unrecognized_header": (
+            '## Unrecognized Term: "G Test"' in markdown
+        ),
+        "markdown_names_what_was_searched": (
+            "Loaded function names" in markdown
+            and "Column indexes" in markdown
+            and "Business-identifier" in markdown
+        ),
+        "markdown_does_not_anchor_on_unrelated_function": (
+            "ONLY runs when the reporting month is December" not in markdown
+            and "CS_THRESHOLD_TREATMENT_AGGREGATE_THRESHOLD_ASSIGNMENT"
+                not in markdown
+        ),
+        "requested_term_field_set": d.get("requested_term") == "G Test",
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("W87 — must NOT fire on known function (FN_LOAD_OPS_RISK_DATA)")
+def w87_no_fire_on_known_function():
+    """Regression check: a query naming a function present in the graph
+    must NOT trigger W87. The normal pipeline runs end-to-end; whatever
+    badge it produces (VERIFIED / UNVERIFIED from W57 grounding overlay)
+    is independent of W87. W87's assertion is narrow: type must NOT be
+    'unrecognized_term' and warnings must NOT include UNRECOGNIZED_TERM."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "type_is_not_unrecognized_term": d.get("type") != "unrecognized_term",
+        "no_unrecognized_term_warning": not any(
+            "UNRECOGNIZED_TERM" in w for w in warnings
+        ),
+        "no_unrecognized_header": (
+            "## Unrecognized Term:"
+                not in (d.get("explanation") or {}).get("markdown", "")
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
+@test("W87 — must NOT fire on CAP-code query (CAP973 BI routing)")
+def w87_no_fire_on_cap_code():
+    """Regression check: CAP973 triggers BI routing (apply_bi_routing
+    runs at main.py:1014), which writes state['bi_routing'] and satisfies
+    the gate's condition (c). W87 must stay silent and allow the
+    pre-existing W45 ungrounded-identifier flow to run."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+
+    checks = {
+        "type_is_not_unrecognized_term": d.get("type") != "unrecognized_term",
+        "no_unrecognized_term_warning": not any(
+            "UNRECOGNIZED_TERM" in w for w in warnings
+        ),
+        "no_unrecognized_header": (
+            "## Unrecognized Term:"
+                not in (d.get("explanation") or {}).get("markdown", "")
+        ),
+    }
+    passed = all(checks.values())
+    failed_checks = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed_checks:
+        extra += f" FAILED_CHECKS={failed_checks}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
