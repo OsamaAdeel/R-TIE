@@ -10,7 +10,7 @@ switching per request.
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -1045,20 +1045,24 @@ _W57_DECEMBER_PARAPHRASE_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in 
     r"only\s+fires?\s+(?:in|during)\s+(?:q4|the\s+fourth\s+quarter)",
 ))
 
-# Genuine month-12 / year-end gate detection in source code. If any of
-# these patterns matches the asked-about function's source, the December
-# claim in the response is grounded and no warning fires. Designed to
-# err on the side of "source supports it" so we don't false-positive on
-# legitimate December-gated functions. The hex-date pattern catches
-# year-end calendar literals (``TO_DATE('YYYY1231', ...)``) which are a
-# common OFSAA pattern for explicit year-end runs.
+# Genuine month-12 / year-end gate detection in source code. Consulted
+# by W83a's source-content check (:func:`_w57_source_has_december_gate`)
+# — kept verbatim from pre-W83C for backward compat with W83a's test
+# suite, which exercises a deliberately lenient gate (any
+# ``EXTRACT(MONTH FROM`` form, any ``MONTH = 12`` predicate including
+# the identifier-prefixed ``v_month = 12``, any year-end date literal,
+# or any explicit ``'DECEMBER'`` comparison). W83C uses a stricter
+# claim-type-aware check (:func:`_w57_calendar_gate_supports_claim`)
+# built on the per-period evidence catalog further below — that gate
+# does NOT accept date literals as evidence for month-wide claims, the
+# discriminator stakeholder test 2 needs.
 _W57_DECEMBER_GATE_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"EXTRACT\s*\(\s*MONTH\s+FROM",
     r"TO_CHAR\s*\([^)]{0,80},\s*['\"]MM['\"]\s*\)\s*=\s*['\"]12['\"]",
     # Catches both bare ``MONTH = 'DECEMBER'`` and the TO_CHAR form
-    # ``TO_CHAR(..., 'MONTH') = 'DECEMBER'`` (where ``'MONTH')`` precedes
-    # the ``=``). The leading ``['"]?`` makes the opening quote
-    # optional; ``\)?`` makes the closing paren optional.
+    # ``TO_CHAR(..., 'MONTH') = 'DECEMBER'`` (where ``'MONTH')``
+    # precedes the ``=``). The leading ``['"]?`` makes the opening
+    # quote optional; ``\)?`` makes the closing paren optional.
     r"['\"]?MONTH['\"]?\s*\)?\s*=\s*['\"]DECEMBER['\"]",
     r"MONTH\s*=\s*12\b",
     r"D_CALENDAR_DATE\s*=\s*TO_DATE\s*\(\s*['\"]\d{4}12\d{2}",
@@ -1133,17 +1137,194 @@ _W83B_RESTRICTIVE_QUALIFIER = (
     "is run when",
 )
 
-# Class C — calendar referent (the December-ness).
-_W83B_CALENDAR_REFERENT = (
-    "december",
-    "reporting month is december", "reporting month being december",
-    "month of december", "the month is december",
-    "month 12", "month = 12", "month=12",
-    "year-end", "year end", "yearend",
-    "fiscal year-end", "fiscal year end",
-    "q4", "fourth quarter", "4th quarter",
-    "calendar year-end",
+# Class C — calendar referent. W83C (2026-05-15) extends the original
+# December-only token set to cover all months, quarters, year-end
+# variants, and month-end-date claims, with each token carrying a
+# (period_id, claim_type, label) tag for per-period source-content
+# validation. Stakeholder test 2 surfaced the gap: a March-2026
+# overgeneralization slipped through W83B because "march" was not in
+# Class C. The fix is mechanical pattern-set widening; the firing
+# rule, proximity window, dedup ordering, and anchor resolution are
+# all preserved from W83B.
+#
+# Token shape:
+#   - Literal substrings for unambiguous tokens ("december",
+#     "year-end", "fourth quarter", "month of march", "march 31")
+#   - Compiled regex with ``\b`` boundaries for bare month names
+#     ("march", "may", "june", "july", "august" — risky because they
+#     are common English words). December stays literal so the legacy
+#     ``"december" in _W83B_CALENDAR_REFERENT`` sanity test keeps
+#     working.
+#
+# Claim types — drive the source-content gate's evidence requirement:
+#   - "month": MONTH/EXTRACT logic for the named month required;
+#     date literals do NOT suffice. (Strict semantic — closes
+#     stakeholder test 2.)
+#   - "quarter": QUARTER/MONTH evidence covering any month of the
+#     quarter, OR a quarter-month-end date literal. (Lenient.)
+#   - "year-end": December month evidence OR any year-end date
+#     literal. (Preserves W83a's December-gate semantic.)
+#   - "date": a specific date literal matching the claimed
+#     (month, day). (Lenient — accepts a single matching date.)
+
+# Per-month metadata: (month_num, lower_name, upper_name,
+# two-digit-str, quarter_id). Used to generate Class C tokens and
+# source-content evidence patterns.
+_W57_MONTHS_META: Tuple[Tuple[int, str, str, str, str], ...] = (
+    (1,  "january",   "JANUARY",   "01", "q1"),
+    (2,  "february",  "FEBRUARY",  "02", "q1"),
+    (3,  "march",     "MARCH",     "03", "q1"),
+    (4,  "april",     "APRIL",     "04", "q2"),
+    (5,  "may",       "MAY",       "05", "q2"),
+    (6,  "june",      "JUNE",      "06", "q2"),
+    (7,  "july",      "JULY",      "07", "q3"),
+    (8,  "august",    "AUGUST",    "08", "q3"),
+    (9,  "september", "SEPTEMBER", "09", "q3"),
+    (10, "october",   "OCTOBER",   "10", "q4"),
+    (11, "november",  "NOVEMBER",  "11", "q4"),
+    (12, "december",  "DECEMBER",  "12", "q4"),
 )
+
+# Per-quarter metadata: (quarter_id, label, member-months).
+_W57_QUARTERS_META: Tuple[Tuple[str, str, Tuple[int, ...]], ...] = (
+    ("q1", "Q1", (1, 2, 3)),
+    ("q2", "Q2", (4, 5, 6)),
+    ("q3", "Q3", (7, 8, 9)),
+    ("q4", "Q4", (10, 11, 12)),
+)
+
+# Month-end day per month (non-leap-year baseline; Feb 29 is
+# evidence-only and appears alongside Feb 28 in the date-evidence
+# regex set).
+_W57_MONTH_END_DAYS: Dict[int, str] = {
+    1: "31", 2: "28", 3: "31", 4: "30", 5: "31", 6: "30",
+    7: "31", 8: "31", 9: "30", 10: "31", 11: "30", 12: "31",
+}
+
+# Bare month names that need word-boundary matching to avoid
+# homonym false positives (modal "may", verb "march", proper noun
+# "august", etc.). "december" is unambiguous and stays as a literal
+# substring so the legacy sanity test on
+# ``_W83B_CALENDAR_REFERENT`` keeps passing.
+_W83B_BARE_MONTH_REGEX_NAMES = frozenset({
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november",
+})
+
+
+def _w83b_make_month_tokens(lower_name: str) -> List[tuple]:
+    """Generate Class C token+tag pairs for a single-month claim."""
+    label = lower_name.capitalize()
+    tag = (lower_name, "month", label)
+    pairs: List[tuple] = []
+    # Bare month name — regex for ambiguity-prone names; literal for
+    # December.
+    if lower_name in _W83B_BARE_MONTH_REGEX_NAMES:
+        pairs.append((re.compile(rf"\b{lower_name}\b", re.IGNORECASE), tag))
+    else:
+        pairs.append((lower_name, tag))
+    for phrase in (
+        f"reporting month is {lower_name}",
+        f"reporting month being {lower_name}",
+        f"the reporting month is {lower_name}",
+        f"month of {lower_name}",
+        f"the month is {lower_name}",
+        f"month is {lower_name}",
+    ):
+        pairs.append((phrase, tag))
+    return pairs
+
+
+def _w83b_make_month_date_tokens(lower_name: str, day: str) -> List[tuple]:
+    """Generate Class C token+tag pairs for a date claim (e.g. 'march 31')."""
+    label = f"{lower_name.capitalize()} {day}"
+    tag = (f"{lower_name}-{day}", "date", label)
+    return [
+        (f"{lower_name} {day}", tag),
+        (f"on {lower_name} {day}", tag),
+    ]
+
+
+def _w83b_make_quarter_tokens(quarter_id: str, label: str) -> List[tuple]:
+    """Generate Class C token+tag pairs for a quarter claim."""
+    tag = (quarter_id, "quarter", label)
+    q_num = quarter_id[1]
+    ord_word = {"1": "first", "2": "second", "3": "third", "4": "fourth"}[q_num]
+    ord_short = {"1": "1st", "2": "2nd", "3": "3rd", "4": "4th"}[q_num]
+    return [
+        (quarter_id, tag),
+        (f"{ord_word} quarter", tag),
+        (f"the {ord_word} quarter", tag),
+        (f"{ord_short} quarter", tag),
+        (f"end of {quarter_id}", tag),
+    ]
+
+
+def _w83b_build_c_token_tag_pairs() -> Tuple[tuple, ...]:
+    """Assemble the full Class C token list. December and Q4 tokens
+    keep their legacy literal forms so the existing W83B sanity tests
+    (``"december" in _W83B_CALENDAR_REFERENT``, ``"q4" in
+    _W83B_CALENDAR_REFERENT``) keep passing.
+    """
+    pairs: List[tuple] = []
+    # Legacy December month tokens (literal substrings).
+    dec_tag = ("december", "month", "December")
+    for tok in (
+        "december",
+        "reporting month is december", "reporting month being december",
+        "the reporting month is december",
+        "month of december", "the month is december",
+        "month is december",
+        "month 12", "month = 12", "month=12",
+    ):
+        pairs.append((tok, dec_tag))
+    # December date tokens.
+    pairs.extend(_w83b_make_month_date_tokens("december", "31"))
+    # Year-end tokens.
+    ye_tag = ("year-end", "year-end", "year-end / fiscal year-end")
+    for tok in (
+        "year-end", "year end", "yearend",
+        "fiscal year-end", "fiscal year end", "fiscal yearend",
+        "calendar year-end", "calendar year end",
+    ):
+        pairs.append((tok, ye_tag))
+    # Legacy Q4 tokens.
+    q4_tag = ("q4", "quarter", "Q4")
+    for tok in (
+        "q4", "fourth quarter", "4th quarter",
+        "the fourth quarter", "end of q4",
+    ):
+        pairs.append((tok, q4_tag))
+    # W83C extension: months 1-11 (bare name + phrase forms).
+    for month_num, lower_name, _upper, _two, _q in _W57_MONTHS_META:
+        if month_num == 12:
+            continue
+        pairs.extend(_w83b_make_month_tokens(lower_name))
+    # W83C extension: month-end dates for all 12 months.
+    for month_num, lower_name, _upper, _two, _q in _W57_MONTHS_META:
+        if month_num == 12:
+            continue
+        day = _W57_MONTH_END_DAYS[month_num]
+        pairs.extend(_w83b_make_month_date_tokens(lower_name, day))
+        if month_num == 2:
+            pairs.extend(_w83b_make_month_date_tokens(lower_name, "29"))
+    # W83C extension: quarters Q1-Q3.
+    for quarter_id, label, _members in _W57_QUARTERS_META:
+        if quarter_id == "q4":
+            continue
+        pairs.extend(_w83b_make_quarter_tokens(quarter_id, label))
+    return tuple(pairs)
+
+
+# (token, claim_tag) pairs, where token is either a literal substring
+# or a compiled regex pattern and claim_tag is (period_id,
+# claim_type, label).
+_W83B_C_TOKEN_TAG_PAIRS: Tuple[tuple, ...] = _w83b_build_c_token_tag_pairs()
+
+# Flat Class C token tuple — preserved as `_W83B_CALENDAR_REFERENT`
+# for backward compat with the existing sanity tests asserting
+# membership of literal strings ("december", "year-end", "q4").
+_W83B_CALENDAR_REFERENT: Tuple[Any, ...] = tuple(p[0] for p in _W83B_C_TOKEN_TAG_PAIRS)
 
 # Proximity window for the co-occurrence rule. Within a sentence,
 # both B-to-A and C-to-A distances must be ≤ this many characters.
@@ -1161,21 +1342,30 @@ _W83B_SENTENCE_END_RE = re.compile(r"[.!?]+\s+")
 def _w83b_find_token_spans(text: str, tokens) -> List[tuple]:
     """Return sorted (start, end) span list for any *tokens* in *text*.
 
-    *text* is expected lowercased; *tokens* are matched as literal
-    substrings (not regex). Overlapping matches of the same token are
-    kept — each token's positions are independent so multiple
-    occurrences within a sentence all participate in the proximity
-    rule.
+    *text* is expected lowercased. Each token may be a literal
+    substring (``str``) or a compiled regex pattern (``re.Pattern``).
+    Regex tokens are used by W83C for bare month names (``\\bmarch\\b``,
+    ``\\bmay\\b``) where word-boundary matching is needed to avoid
+    false positives on English homonyms (e.g. ``demarcation`` →
+    ``march``, modal ``may run`` → ``may``).
+
+    Overlapping matches of the same token are kept — each token's
+    positions are independent so multiple occurrences within a
+    sentence all participate in the proximity rule.
     """
     spans: List[tuple] = []
     for tok in tokens:
-        start = 0
-        while True:
-            idx = text.find(tok, start)
-            if idx == -1:
-                break
-            spans.append((idx, idx + len(tok)))
-            start = idx + 1
+        if isinstance(tok, str):
+            start = 0
+            while True:
+                idx = text.find(tok, start)
+                if idx == -1:
+                    break
+                spans.append((idx, idx + len(tok)))
+                start = idx + 1
+        else:
+            for m in tok.finditer(text):
+                spans.append((m.start(), m.end()))
     spans.sort()
     return spans
 
@@ -1260,6 +1450,13 @@ def _w57_source_has_december_gate(source_text: str) -> bool:
     gate: if the asked-about function's source actually has December
     logic, a "executes only in December" claim is grounded and no
     warning fires. If not, the claim is fabricated.
+
+    Preserved verbatim (lenient) for W83a backward compat: any
+    EXTRACT(MONTH FROM ...) construct, any year-end-shaped date
+    literal, or any explicit MONTH = 12 / 'DECEMBER' comparison
+    counts as December evidence. W83C uses a stricter per-period
+    evidence check (:func:`_w57_calendar_gate_supports_claim`) that
+    does NOT accept date literals as MONTH-claim evidence.
     """
     if not source_text:
         return False
@@ -1267,6 +1464,213 @@ def _w57_source_has_december_gate(source_text: str) -> bool:
         if pat.search(source_text):
             return True
     return False
+
+
+# ===========================================================================
+# W83C: per-period source-content evidence catalog
+# ===========================================================================
+#
+# Each Class C claim type pulls evidence from a different pattern set:
+#
+#   - month claim:    `_W57_MONTH_EVIDENCE_BY_NUM[N]` — MONTH/EXTRACT
+#                     comparison against the specific month N. Date
+#                     literals are deliberately excluded so that
+#                     "ONLY runs in March" + `D_CALENDAR_DATE = '20260331'`
+#                     fires (the stakeholder-test-2 case).
+#   - quarter claim:  `_W57_QUARTER_EVIDENCE_BY_ID[q_id]` —
+#                     QUARTER/MONTH evidence covering any quarter
+#                     month, plus quarter-month-end date literals
+#                     (lenient — a function that gates one month of
+#                     a quarter is treated as supporting the quarter
+#                     claim, matching W83a's lenient gate for the
+#                     equivalent year-end ↔ Dec-31 case).
+#   - year-end claim: December month evidence OR any year-end date
+#                     literal (preserves W83a's "year-end date
+#                     literal counts as December evidence" semantic).
+#   - date claim:     a date literal matching the specific
+#                     (month, day) pair (e.g., `TO_DATE('20260331',
+#                     ...)`, `'2026-03-31'`).
+
+
+def _w57_build_month_evidence_patterns(
+    month_num: int, upper_name: str, two_digit: str,
+) -> Tuple["re.Pattern[str]", ...]:
+    """Compile MONTH/EXTRACT evidence regex set for a specific month.
+
+    Patterns require the comparison target to be the given month
+    (e.g. ``= 3``, ``= '03'``, ``= 'MARCH'``). Date literals are
+    excluded — they are owned by the date-claim evidence builder.
+
+    The inter-paren spans use lazy-bounded ``[\\s\\S]{{0,200}}?``
+    rather than strict ``[^)]*`` so nested calls like
+    ``EXTRACT(MONTH FROM TO_DATE(CQD, 'DD-MON-RR'))) = 12`` — the
+    canonical W83B test fixture — match. 200-char span is generous
+    enough for typical OFSAA SQL without bridging unrelated EXTRACTs.
+    """
+    num = str(month_num)
+    return tuple(re.compile(p, re.IGNORECASE) for p in (
+        rf"EXTRACT\s*\(\s*MONTH\s+FROM[\s\S]{{0,200}}?=\s*['\"]?{num}\b['\"]?",
+        rf"EXTRACT\s*\(\s*MONTH\s+FROM[\s\S]{{0,200}}?=\s*['\"]{two_digit}['\"]",
+        rf"TO_CHAR\s*\([\s\S]{{0,200}}?['\"]MM['\"]\s*\)\s*=\s*['\"]{two_digit}['\"]",
+        rf"TO_CHAR\s*\([\s\S]{{0,200}}?['\"]MONTH['\"]\s*\)\s*=\s*['\"]\s*{upper_name}\s*['\"]",
+        rf"\bMONTH\b\s*=\s*['\"]?{num}\b['\"]?",
+        rf"\bMONTH\b\s*=\s*['\"]{two_digit}['\"]",
+        rf"\bMONTH\s*\([\s\S]{{0,80}}?\)\s*=\s*['\"]?{num}\b['\"]?",
+        rf"['\"]?MONTH['\"]?\s*\)?\s*=\s*['\"]{upper_name}['\"]",
+    ))
+
+
+def _w57_build_date_evidence_patterns(
+    month_two_digit: str, day_two_digit: str,
+) -> Tuple["re.Pattern[str]", ...]:
+    """Compile date-literal evidence regex set for a (month, day) pair.
+
+    Matches compact (``YYYYMMDD``) and dashed (``YYYY-MM-DD``)
+    formats inside SQL string literals and ``TO_DATE`` calls. The
+    4-digit year is captured generically so the pattern works across
+    reporting cycles.
+    """
+    return tuple(re.compile(p, re.IGNORECASE) for p in (
+        rf"['\"]\d{{4}}{month_two_digit}{day_two_digit}['\"]",
+        rf"['\"]\d{{4}}-{month_two_digit}-{day_two_digit}['\"]",
+        rf"TO_DATE\s*\(\s*['\"]\d{{4}}{month_two_digit}{day_two_digit}",
+        rf"TO_DATE\s*\(\s*['\"]\d{{4}}-{month_two_digit}-{day_two_digit}",
+    ))
+
+
+def _w57_build_quarter_only_evidence_patterns(
+    quarter_num: int,
+) -> Tuple["re.Pattern[str]", ...]:
+    """Compile quarter-specific evidence (EXTRACT(QUARTER...), TO_CHAR Q)."""
+    return tuple(re.compile(p, re.IGNORECASE) for p in (
+        rf"EXTRACT\s*\(\s*QUARTER\s+FROM[\s\S]{{0,200}}?=\s*['\"]?{quarter_num}\b['\"]?",
+        rf"TO_CHAR\s*\([\s\S]{{0,200}}?['\"]Q['\"]\s*\)\s*=\s*['\"]{quarter_num}['\"]",
+    ))
+
+
+_W57_MONTH_EVIDENCE_BY_NUM: Dict[int, Tuple["re.Pattern[str]", ...]] = {
+    m[0]: _w57_build_month_evidence_patterns(m[0], m[2], m[3])
+    for m in _W57_MONTHS_META
+}
+
+_W57_MONTH_END_DATE_EVIDENCE_BY_NUM: Dict[int, Tuple["re.Pattern[str]", ...]] = {
+    m[0]: _w57_build_date_evidence_patterns(m[3], _W57_MONTH_END_DAYS[m[0]])
+    for m in _W57_MONTHS_META
+}
+# Feb 29 (leap-year) is pooled with Feb 28 evidence so a function
+# gating on Feb-29 reporting still counts as supporting a Feb date
+# claim.
+_W57_MONTH_END_DATE_EVIDENCE_BY_NUM[2] = (
+    _W57_MONTH_END_DATE_EVIDENCE_BY_NUM[2]
+    + _w57_build_date_evidence_patterns("02", "29")
+)
+
+_W57_QUARTER_EVIDENCE_BY_ID: Dict[str, Tuple["re.Pattern[str]", ...]] = {
+    q[0]: (
+        _w57_build_quarter_only_evidence_patterns(int(q[0][1]))
+        + tuple(p for m in q[2] for p in _W57_MONTH_EVIDENCE_BY_NUM[m])
+        + tuple(p for m in q[2] for p in _W57_MONTH_END_DATE_EVIDENCE_BY_NUM[m])
+    )
+    for q in _W57_QUARTERS_META
+}
+
+# Year-end: December MONTH/EXTRACT evidence OR any year-end date
+# literal. Mirrors W83a's `_W57_DECEMBER_GATE_PATTERNS` semantic so a
+# year-end-only function (source = `TO_DATE('YYYY1231', ...)`)
+# suppresses both W83a's December gate and a W83C "year-end" claim.
+_W57_YEAR_END_EVIDENCE: Tuple["re.Pattern[str]", ...] = (
+    _W57_MONTH_EVIDENCE_BY_NUM[12]
+    + _W57_MONTH_END_DATE_EVIDENCE_BY_NUM[12]
+)
+
+
+def _w57_calendar_gate_supports_claim(
+    claim_tag: tuple, source_text: str,
+) -> bool:
+    """Per-claim source-evidence check.
+
+    Returns True iff *source_text* contains the kind of evidence
+    required by the claim type:
+
+      * ``month``: MONTH/EXTRACT comparison against the claimed month
+      * ``quarter``: QUARTER/MONTH evidence or quarter-month-end date
+      * ``year-end``: December month evidence OR year-end date
+      * ``date``: a matching (month, day) date literal
+
+    Returns False on empty source or unknown claim types.
+    """
+    if not source_text:
+        return False
+    period_id, claim_type, _label = claim_tag
+    if claim_type == "month":
+        for num, lower_name, _u, _t, _q in _W57_MONTHS_META:
+            if lower_name == period_id:
+                return any(
+                    p.search(source_text)
+                    for p in _W57_MONTH_EVIDENCE_BY_NUM[num]
+                )
+        return False
+    if claim_type == "quarter":
+        patterns = _W57_QUARTER_EVIDENCE_BY_ID.get(period_id, ())
+        return any(p.search(source_text) for p in patterns)
+    if claim_type == "year-end":
+        return any(p.search(source_text) for p in _W57_YEAR_END_EVIDENCE)
+    if claim_type == "date":
+        # period_id is "<lower_month>-<day>" — split and look up.
+        if "-" not in period_id:
+            return False
+        month_name, day = period_id.rsplit("-", 1)
+        for _num, lower_name, _u, two_digit, _q in _W57_MONTHS_META:
+            if lower_name == month_name:
+                return any(
+                    p.search(source_text)
+                    for p in _w57_build_date_evidence_patterns(two_digit, day)
+                )
+        return False
+    return False
+
+
+def _w83b_collect_claim_tags(body_lower: str) -> List[tuple]:
+    """Return the deduped list of claim tags (period_id, claim_type,
+    label) raised by *body_lower*.
+
+    A Class C token contributes a tag iff:
+      (1) it occurs in a sentence whose B/C tokens fired the
+          co-occurrence rule (i.e. the sentence already matches
+          :func:`_w83b_sentence_matches`), AND
+      (2) the token itself has a B-token within
+          :data:`_W83B_PROXIMITY_CHARS` of one of its span
+          occurrences.
+
+    (2) prevents a descriptive mention of an unrelated period
+    (``"... uses January as input ..."``) from being treated as a
+    gating claim just because another C-token in the same sentence
+    fired the rule.
+
+    Returns an empty list when no sentence fires.
+    """
+    collected: List[tuple] = []
+    seen: set = set()
+    for sentence in _w83b_split_sentences(body_lower):
+        if not _w83b_sentence_matches(sentence):
+            continue
+        b_spans = _w83b_find_token_spans(sentence, _W83B_RESTRICTIVE_QUALIFIER)
+        if not b_spans:
+            continue
+        for tok, tag in _W83B_C_TOKEN_TAG_PAIRS:
+            tok_spans = _w83b_find_token_spans(sentence, (tok,))
+            if not tok_spans:
+                continue
+            for t_s, t_e in tok_spans:
+                if any(
+                    _w83b_within_window(b_s, b_e, t_s, t_e, _W83B_PROXIMITY_CHARS)
+                    for b_s, b_e in b_spans
+                ):
+                    if tag not in seen:
+                        seen.add(tag)
+                        collected.append(tag)
+                    break
+    return collected
 
 
 # Check 6 caveat triggers: phrases that the system itself emits when it
@@ -1931,17 +2335,49 @@ def _w57_check_calendar_gating_grounded(
         if pat.search(body):
             return []
 
-    if not _w83b_body_has_hedged_calendar_gating(body_lower):
+    # W83C: collect every period claim raised by the prose (each tag
+    # is (period_id, claim_type, label)). Empty result = the firing
+    # rule didn't fire on any sentence — no warning.
+    claim_tags = _w83b_collect_claim_tags(body_lower)
+    if not claim_tags:
         return []
 
     target_source = _concat_multi_source({target_fn: multi_source[target_fn]})
-    if _w57_source_has_december_gate(target_source):
+
+    # Per-period evidence check. A claim is supported iff its
+    # claim-type-specific evidence appears in the asked-about
+    # function's source. Month claims require MONTH/EXTRACT logic;
+    # date claims accept matching date literals; year-end accepts
+    # both (preserving W83a's December-gate semantic).
+    unsupported_labels: List[str] = []
+    seen_labels: set = set()
+    for tag in claim_tags:
+        if _w57_calendar_gate_supports_claim(tag, target_source):
+            continue
+        _period_id, _claim_type, label = tag
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        unsupported_labels.append(label)
+
+    if not unsupported_labels:
         return []
+
+    # Name up to two unsupported periods in the warning. More than
+    # two is rare and would just clutter the banner; an enforce-level
+    # dedup collapses any duplicate messages anyway.
+    if len(unsupported_labels) <= 2:
+        period_str = " / ".join(unsupported_labels)
+    else:
+        period_str = (
+            " / ".join(unsupported_labels[:2])
+            + f" (+{len(unsupported_labels) - 2} more)"
+        )
 
     return [
         f"GROUNDING-CALENDAR-HIGH: response claims '{target_fn}' is "
-        f"gated on December / year-end / Q4 (hedged form), but cited "
-        f"source contains no month-12 gate"
+        f"gated on {period_str} (hedged form), but cited source "
+        f"contains no supporting {period_str} gate"
     ]
 
 

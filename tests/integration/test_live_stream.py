@@ -990,6 +990,107 @@ def w87_no_fire_on_cap_code():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W83C — calendar-general overgeneralization detection
+# ---------------------------------------------------------------------------
+
+@test("W83C — fires on March overgeneralization (stakeholder test 2)")
+def w83c_fires_on_march_overgeneralization():
+    """Reproduction of stakeholder test 2 (2026-05-14). Query traces
+    N_SIGNIFICANT_INVST_AMT; pre-W83C RTIE response asserts
+    "ONLY runs when the reporting month is March 2026" with a source
+    that has only a March-31 date filter, not a month gate.
+
+    Expected: badge UNVERIFIED + a GROUNDING-CALENDAR-HIGH warning
+    naming "March". W83C catches the fabrication of the March gate
+    even though the W80 retrieval miss (separate work) and the
+    response-shape issues are unchanged.
+
+    Tolerant of two outcomes: (a) W83C fires with March named, or
+    (b) the response now anchors on a function with genuine March
+    logic and W83C suppresses (no fabrication present). We assert
+    "no false-VERIFIED outcome with March-only-date evidence" —
+    the badge must NOT be VERIFIED if the response contains an
+    unsupported March-month claim."""
+    r = run_query(
+        "Trace N_SIGNIFICANT_INVST_AMT from classification "
+        "through deduction."
+    )
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+
+    # The response should NOT badge VERIFIED if the body contains a
+    # March-month gating claim. Conservative check: if a March
+    # gating claim is present, badge must be UNVERIFIED.
+    has_march_gating_claim = (
+        "reporting month is March" in markdown
+        or "ONLY runs" in markdown and "March" in markdown
+    )
+    has_w83c_warning = any(
+        "GROUNDING-CALENDAR-HIGH" in w and "March" in w
+        for w in warnings
+    )
+    badge_is_unverified = d.get("badge") == "UNVERIFIED"
+
+    if has_march_gating_claim:
+        # Fabrication-present path: W83C must fire AND badge must
+        # be UNVERIFIED.
+        passed = has_w83c_warning and badge_is_unverified
+    else:
+        # No fabrication present (e.g. W80 retrieval improved or
+        # response no longer claims March-month gating). W83C
+        # correctly stays silent.
+        passed = True
+    extra = (
+        summarize_done(d)
+        + f" has_march_claim={has_march_gating_claim}"
+        + f" has_w83c_warn={has_w83c_warning}"
+    )
+    return passed, extra
+
+
+@test("W83C — W83B December canary unchanged (CS_Goodwill_Calculation)")
+def w83c_w83b_december_regression():
+    """W83B's canonical A2 case must keep firing under W83C. Query
+    asks about CS_Goodwill_Calculation, whose source has no month-12
+    logic. Expected: SOME calendar grounding warning fires — could be
+    Check 5's GROUNDING-HIGH (literal-phrase form) OR W83a's
+    GROUNDING-HIGH (paraphrase form) OR W83B/W83C's
+    GROUNDING-CALENDAR-HIGH (hedged-form) depending on which patterns
+    in the response body match first per the dedup chain
+    (Check 5 > W83a > W83C). Any of the three is acceptable; the
+    regression we'd want to catch is "no calendar warning fires"
+    when the response clearly fabricates December gating."""
+    r = run_query("How does CS_Goodwill_Calculation work?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+
+    has_december_claim = (
+        "reporting month is December" in markdown
+        or "year-end" in markdown.lower()
+    )
+    # Any of the three dedup-chain warning codes counts as the
+    # December detector firing.
+    has_any_calendar_warning = any(
+        ("GROUNDING-HIGH" in w or "GROUNDING-CALENDAR-HIGH" in w)
+        and ("december" in w.lower() or "year-end" in w.lower())
+        for w in warnings
+    )
+
+    if has_december_claim:
+        passed = has_any_calendar_warning and d.get("badge") == "UNVERIFIED"
+    else:
+        passed = True
+    extra = (
+        summarize_done(d)
+        + f" has_dec_claim={has_december_claim}"
+        + f" has_cal_warn={has_any_calendar_warning}"
+    )
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
