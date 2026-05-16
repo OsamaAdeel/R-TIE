@@ -210,13 +210,14 @@ class VectorStore:
         module: str,
         function_name: str,
         description: str,
-        embedding: List[float],
+        embedding: Optional[List[float]],
         tables_read: List[str],
         tables_written: List[str],
         key_columns: List[str],
         source_hash: str,
         status: str = "approved",
         schema: Optional[str] = None,
+        failure_reason: Optional[str] = None,
     ) -> bool:
         """Store or update a function's description and embedding.
 
@@ -225,17 +226,27 @@ class VectorStore:
                 scoped searches).
             function_name: PL/SQL function name.
             description: LLM-generated rich description.
-            embedding: Float vector from embedding model.
+            embedding: Float vector from embedding model. W93: ``None``
+                is accepted when ``status="failed"`` — the doc still
+                lands in Redis for operator visibility but is omitted
+                from KNN results (RediSearch silently excludes docs
+                missing the indexed VECTOR field).
             tables_read: List of tables the function reads.
             tables_written: List of tables the function writes.
             key_columns: List of key columns referenced.
             source_hash: SHA256 of the source code.
-            status: 'approved' or 'pending'. Defaults to 'approved'.
+            status: ``approved`` for successful indexing, ``failed`` (W93)
+                when the validation gate rejected the description.
+                Defaults to ``approved``.
             schema: Phase 3 — Oracle owner the function belongs to (e.g.
                 ``OFSMDM`` or ``OFSERM``). Stored as the new ``schema``
                 TAG and used to namespace the doc key under
                 ``rtie:vec:<schema>:<fn>``. ``None`` is accepted for
                 back-compat but logged as a warning so the gap is visible.
+            failure_reason: W93 — when ``status="failed"``, the validator's
+                rejection category (e.g. ``sentinel_prefix``,
+                ``too_short``). Written to the ``failure_reason`` field
+                for operator diagnostics. ``None`` for approved docs.
 
         Returns:
             True if stored successfully, False on error.
@@ -255,6 +266,17 @@ class VectorStore:
         else:
             schema_str = schema
 
+        if status == "approved" and embedding is None:
+            # W93: an approved doc without an embedding is a state-lie —
+            # the same class of bug W93 exists to prevent. Refuse rather
+            # than silently write a non-retrievable "approved" doc.
+            logger.error(
+                "upsert_function: refusing to write %s:%s with "
+                "status=approved and embedding=None (W93 invariant).",
+                schema_str or "?", function_name,
+            )
+            return False
+
         try:
             key = self._doc_key(schema_str, function_name)
             description_hash = hashlib.sha256(description.encode()).hexdigest()[:16]
@@ -270,12 +292,25 @@ class VectorStore:
                 b"generated_at": datetime.utcnow().isoformat().encode(),
                 b"description_hash": description_hash.encode(),
                 b"source_hash": source_hash.encode(),
-                b"embedding": self._float_list_to_bytes(embedding),
             }
+            if embedding is not None:
+                mapping[b"embedding"] = self._float_list_to_bytes(embedding)
+            if failure_reason:
+                mapping[b"failure_reason"] = failure_reason.encode()
             await self._client.hset(key, mapping=mapping)
+            # W93: when replacing an approved doc with a failed one (or
+            # vice versa), stale fields from the prior write linger
+            # because HSET merges rather than replaces. Clean up the two
+            # fields whose presence is meaningful: embedding (must be
+            # absent on failed docs so KNN excludes them) and
+            # failure_reason (must be absent on approved docs).
+            if embedding is None:
+                await self._client.hdel(key, b"embedding")
+            if not failure_reason:
+                await self._client.hdel(key, b"failure_reason")
             logger.info(
-                "Indexed function: %s:%s:%s",
-                schema_str or "?", module, function_name,
+                "Indexed function: %s:%s:%s status=%s",
+                schema_str or "?", module, function_name, status,
             )
             return True
         except Exception as exc:
@@ -435,6 +470,75 @@ class VectorStore:
         except Exception as exc:
             logger.warning(f"Failed to list indexed functions: {exc}")
             return []
+
+    async def scan_for_invalid_approved_docs(
+        self,
+        sentinel_prefix: str,
+        min_description_length: int,
+    ) -> List[Dict[str, str]]:
+        """W93 boot-time regression check. Returns docs that lie about state.
+
+        Iterates every ``rtie:vec:*`` doc and flags any whose
+        ``status == "approved"`` but whose description is one of the
+        shapes the indexer's W93 gate is supposed to reject:
+
+        * starts with ``sentinel_prefix`` (e.g. ``"(indexing failed:"``);
+        * shorter than ``min_description_length`` characters after
+          stripping.
+
+        With the gate in place this should always return an empty list.
+        A non-empty result means either (a) legacy docs from before W93
+        landed, in which case re-running the indexer fixes them, or
+        (b) a regression where a code path bypassed the gate. The
+        caller logs at ``CRITICAL`` so the operator notices on startup.
+
+        Returns:
+            List of ``{"key": ..., "schema": ..., "function_name": ...,
+            "description_length": ..., "reason": ...}`` dicts. Empty list
+            on success or when the vector store is unavailable (degrades
+            gracefully — the check is advisory, not load-bearing).
+        """
+        if not self._client:
+            return []
+        flagged: List[Dict[str, str]] = []
+        try:
+            pattern = f"{self.KEY_PREFIX}*".encode()
+            async for key in self._client.scan_iter(match=pattern):
+                key_str = key.decode("utf-8", errors="replace")
+                # HMGET only the fields we need so we don't pay the
+                # embedding-bytes cost on every doc.
+                fields = await self._client.hmget(
+                    key, b"status", b"description", self.SCHEMA_FIELD.encode(),
+                    b"function_name",
+                )
+                status, description, schema_b, fn_name_b = fields
+                if not status or status.decode() != "approved":
+                    continue
+                desc = (description or b"").decode("utf-8", errors="replace")
+                desc_stripped = desc.strip()
+                reason: Optional[str] = None
+                if desc_stripped.startswith(sentinel_prefix):
+                    reason = "sentinel_prefix"
+                elif len(desc_stripped) < min_description_length:
+                    reason = "too_short"
+                if reason is None:
+                    continue
+                flagged.append({
+                    "key": key_str,
+                    "schema": (schema_b or b"").decode("utf-8", errors="replace"),
+                    "function_name": (
+                        fn_name_b or b""
+                    ).decode("utf-8", errors="replace"),
+                    "description_length": str(len(desc_stripped)),
+                    "reason": reason,
+                })
+        except Exception as exc:
+            logger.warning(
+                "scan_for_invalid_approved_docs failed: %s "
+                "(advisory check, continuing)", exc,
+            )
+            return []
+        return flagged
 
     async def get_index_stats(self) -> Dict[str, Any]:
         """Get vector index statistics.

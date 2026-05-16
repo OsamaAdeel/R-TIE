@@ -212,6 +212,42 @@ async def lifespan(app: FastAPI):
     await _vector_store.connect()
     await _vector_store.ensure_index()
 
+    # W93: regression check for indexer state-lies. The indexer's
+    # description-generation LLM failure handler used to write the
+    # sentinel string "(indexing failed: ...)" as the description and
+    # then mark the doc status="approved" — four OFSERM docs landed in
+    # this state, unfindable via KNN but invisible to count-based
+    # health probes. The W93 gate in src/agents/indexer.py prevents
+    # new sentinels, but legacy docs need to be re-indexed and any
+    # future regression in a different code path should fail loudly
+    # here rather than silently degrade retrieval. Logs CRITICAL with
+    # the affected doc keys; does not abort startup so the operator
+    # can remediate without an outage.
+    from src.agents.indexer import (
+        INDEXING_FAILED_SENTINEL_PREFIX,
+        DESCRIPTION_MIN_LENGTH,
+    )
+    w93_invalid_docs = await _vector_store.scan_for_invalid_approved_docs(
+        sentinel_prefix=INDEXING_FAILED_SENTINEL_PREFIX,
+        min_description_length=DESCRIPTION_MIN_LENGTH,
+    )
+    if w93_invalid_docs:
+        logger.critical(
+            "W93: %d approved doc(s) in the vector store fail the "
+            "indexer validation gate. These docs claim status=approved "
+            "but their description is either the indexing-failed "
+            "sentinel or shorter than %d chars — they are unfindable "
+            "via KNN despite looking healthy. Re-run the indexer to "
+            "remediate. Affected: %s",
+            len(w93_invalid_docs),
+            DESCRIPTION_MIN_LENGTH,
+            [
+                f"{d['schema']}:{d['function_name']} ({d['reason']}, "
+                f"len={d['description_length']})"
+                for d in w93_invalid_docs
+            ],
+        )
+
     # Initialize agents
     _orchestrator = Orchestrator(
         temperature=llm_cfg["temperature"],
