@@ -36,6 +36,30 @@ MODULES_DIRS = [
     os.path.join(_RTIE_ROOT, "db", "modules"),
 ]
 
+# W93 — indexer validation gate
+#
+# Pre-W93 the description-generation LLM-failure handler returned a
+# sentinel dict whose ``description`` was the literal string
+# ``(indexing failed: <category>)``. The same call site then embedded
+# that sentinel via OpenAI and upserted the doc with ``status="approved"``,
+# producing four OFSERM docs (ENTITY_INFO_HIER_DATA_POP,
+# PARTY_SHAREHOLDING_PERCENT_CALCULATION_FOR_REPORTING_ENTITY,
+# FSI_STD_CAPITAL_ACCT_HEAD_POP, ABL_CAP_MITIGANT_DATA_POPULATION) that
+# were unfindable via KNN — their embedding was a vector of the error
+# string, uncorrelated with function semantics — yet looked healthy on
+# every count-based probe. The indexer was lying about its state.
+#
+# The W93 gate validates each description before computing the
+# embedding. Rejections write the doc with ``status="failed"`` and no
+# embedding (so KNN naturally excludes it); the boot-time check in
+# main.py flags any approved doc that still carries the sentinel shape.
+# Same architectural pattern as the W87 unrecognized-term gate and the
+# W45 empty-retrieval gate, applied at the indexer rather than at
+# request time.
+INDEXING_FAILED_SENTINEL_PREFIX = "(indexing failed:"
+DESCRIPTION_MIN_LENGTH = 100
+
+
 DESCRIPTION_SYSTEM_PROMPT = """You are a PL/SQL documentation specialist for Oracle OFSAA regulatory systems.
 
 Given a PL/SQL function's source code, produce a rich description optimized for semantic search.
@@ -158,11 +182,18 @@ class IndexerAgent:
             # Check if already indexed with same source. Pre-Phase-3 the
             # lookup keyed off (module, fn_name); Phase 3 keys off
             # (schema, fn_name) since the doc-key prefix moved.
+            # W93: only skip when the existing doc is *approved* — a
+            # ``failed`` doc has the same source_hash by construction
+            # but its description never landed, so we always re-attempt.
             if not force and fn_schema:
                 existing = await self._vector_store.get_function_doc(
                     fn_schema, fn_name
                 )
-                if existing and existing.get("source_hash") == source_hash:
+                if (
+                    existing
+                    and existing.get("source_hash") == source_hash
+                    and existing.get("status") == "approved"
+                ):
                     skipped.append(fn_name)
                     logger.info(
                         f"Skipping {fn_name} — source unchanged | "
@@ -185,6 +216,39 @@ class IndexerAgent:
 
                 # Generate description via LLM
                 desc_result = await self._generate_description(fn_name, truncated_source)
+
+                # W93: validate before paying the embedding API call. A
+                # rejected description means the LLM step failed silently
+                # (sentinel) or returned something too thin to be useful;
+                # mark the doc failed and move on.
+                is_valid, reject_reason = self._validate_description_result(
+                    desc_result
+                )
+                if not is_valid:
+                    logger.error(
+                        "W93 validation rejected %s:%s (%s); marking failed "
+                        "and skipping embedding | correlation_id=%s",
+                        fn_schema or "?", fn_name, reject_reason,
+                        correlation_id,
+                    )
+                    await self._vector_store.upsert_function(
+                        module=module_name,
+                        function_name=fn_name,
+                        description=desc_result.get("description", ""),
+                        embedding=None,
+                        tables_read=desc_result.get("tables_read", []),
+                        tables_written=desc_result.get("tables_written", []),
+                        key_columns=desc_result.get("key_columns", []),
+                        source_hash=source_hash,
+                        status="failed",
+                        schema=fn_schema,
+                        failure_reason=reject_reason,
+                    )
+                    errors.append({
+                        "name": fn_name,
+                        "error": f"description rejected: {reject_reason}",
+                    })
+                    continue
 
                 # Small delay before embedding call
                 await asyncio.sleep(1)
@@ -343,7 +407,15 @@ class IndexerAgent:
                     existing = await self._vector_store.get_function_doc(
                         schema, fn_name
                     )
-                    if existing and existing.get("source_hash") == source_hash:
+                    # W93: same retry-on-failed rule as index_module — a
+                    # status="failed" doc is by definition something we
+                    # want to retry next pass; only "approved" docs with
+                    # matching source_hash are truly up-to-date.
+                    if (
+                        existing
+                        and existing.get("source_hash") == source_hash
+                        and existing.get("status") == "approved"
+                    ):
                         skipped.append(fn_name)
                         continue
 
@@ -372,6 +444,40 @@ class IndexerAgent:
                     desc_result = await self._generate_description(
                         fn_name, truncated_source
                     )
+
+                    # W93: validate before embedding. See index_module
+                    # for rationale.
+                    is_valid, reject_reason = self._validate_description_result(
+                        desc_result
+                    )
+                    if not is_valid:
+                        logger.error(
+                            "W93 validation rejected %s:%s (%s); marking "
+                            "failed and skipping embedding | "
+                            "correlation_id=%s",
+                            schema, fn_name, reject_reason, correlation_id,
+                        )
+                        await self._vector_store.upsert_function(
+                            module=module_tag,
+                            function_name=fn_name,
+                            description=desc_result.get("description", ""),
+                            embedding=None,
+                            tables_read=desc_result.get("tables_read", []),
+                            tables_written=desc_result.get(
+                                "tables_written", []
+                            ),
+                            key_columns=desc_result.get("key_columns", []),
+                            source_hash=source_hash,
+                            status="failed",
+                            schema=schema,
+                            failure_reason=reject_reason,
+                        )
+                        errors.append({
+                            "name": fn_name,
+                            "error": f"description rejected: {reject_reason}",
+                        })
+                        continue
+
                     await asyncio.sleep(1)
                     embedding = await self._get_embedding(
                         desc_result["description"]
@@ -536,6 +642,39 @@ class IndexerAgent:
                 "tables_written": [],
                 "key_columns": [],
             }
+
+    @staticmethod
+    def _validate_description_result(
+        desc_result: Dict[str, Any],
+    ) -> Tuple[bool, str]:
+        """W93 validation gate. Returns ``(is_valid, reason)``.
+
+        Rejects descriptions that would make a doc unretrievable while
+        still being marked approved. The two rejection categories caught
+        today:
+
+        * ``sentinel_prefix`` — the LLM-failure handler at
+          :meth:`_generate_description` returns ``(indexing failed: …)``.
+          Embedding this string produces a vector uncorrelated with
+          function semantics.
+        * ``too_short`` — anything under
+          :data:`DESCRIPTION_MIN_LENGTH` characters. The floor is set
+          well below the 500-char real-but-stunted bucket (47 OFSERM
+          functions live there) but well above the 42-char sentinel,
+          so legitimate-if-thin descriptions are still accepted while
+          future failure shapes are caught.
+
+        Order matters: ``sentinel_prefix`` is checked first because the
+        sentinel is also under the length floor — checking it explicitly
+        gives operators a specific reason rather than a generic
+        "too_short".
+        """
+        description = (desc_result.get("description") or "").strip()
+        if description.startswith(INDEXING_FAILED_SENTINEL_PREFIX):
+            return False, "sentinel_prefix"
+        if len(description) < DESCRIPTION_MIN_LENGTH:
+            return False, "too_short"
+        return True, ""
 
     async def _get_embedding(self, text: str) -> List[float]:
         """Generate an embedding vector for the given text.
