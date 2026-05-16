@@ -1,70 +1,192 @@
 # RTIE — Regulatory Trace & Intelligence Engine
 
-RTIE is a read-only multi-agent system that answers questions about an Oracle OFSAA FSAPPS deployment — explaining PL/SQL logic, tracing column lineage, classifying row origins (PL/SQL vs ETL), and executing validated SELECT-only SQL for aggregation questions. Built for Techlogix engineers working on Basel III/IV regulatory capital computations, it grounds every answer in parsed code or fetched data and declines explicitly when it can't.
+A read-only Oracle OFSAA regulatory analysis tool. Trace Basel III/IV capital calculations through PL/SQL, explain function logic with line citations, classify row origins (PL/SQL versus ETL), execute validated SELECT-only SQL — every answer grounded in parsed code or fetched data, every claim source-cited, every uncertain response explicitly declined.
 
-This README is the onboarding entry point for a Techlogix engineer landing on RTIE for the first time. It assumes Python and Docker baseline familiarity and that Oracle access has been arranged. It does not cover provisioning OFSAA-shaped Oracle schemas or loading regulatory data — that is multi-day infrastructure work owned by the DBA team.
+Built for Techlogix engineers working on bank-side regulatory capital computations.
 
 ---
 
-## What RTIE isn't
+## Why RTIE exists
 
-RTIE deliberately refuses several adjacent capabilities. These are scope choices, not backlog items:
+Regulatory analysts at banks need to answer a specific kind of question: *"How is this number calculated?"* — and they need to defend the answer to a regulator. A confidently wrong answer is worse than no answer. The architecture prioritizes refusal over guessing.
 
-| Out of scope | Why |
+RTIE turns natural-language questions about OFSAA regulatory calculations into verified, source-cited explanations. Three guarantees define what shipping means:
+
+1. **Every claim cites source.** A response that asserts "Function X computes Y on line N" is mechanically verified against the parsed source before the user sees it.
+2. **Read-only against Oracle, always.** The application layer and the Oracle service account both refuse writes.
+3. **No silent wrong answers.** The badge on every response (`VERIFIED` / `UNVERIFIED` / `DECLINED`) is what a deterministic validation layer concluded after inspecting the LLM's output — not what the LLM claimed about itself.
+
+---
+
+## Features
+
+### Core capabilities
+
+- **Function logic explanation** — explain what a PL/SQL function does, with line-numbered citations into the actual source code.
+- **Variable / column tracing** — trace how a column flows through the calculation pipeline, walking writer functions in execution order as declared by the OFSAA batch manifest.
+- **Row-level value lineage** — given a specific row in a staging fact, classify whether its value was computed by PL/SQL or loaded from an external ETL system, and explain why.
+- **Data queries via validated SQL** — translate natural-language questions into SELECT statements, validate them against a guardian (SELECT-only, bind variables, no privileged tables), execute read-only against Oracle, return both the result and the SQL.
+- **Business-identifier routing** — recognize regulatory codes (CAP series, standard account heads) and route to the functions that reference them via a literal index.
+- **Schema-aware retrieval** — supports OFSMDM (staging/master data) and OFSERM (Basel runtime tables) as first-class schemas; cross-schema chains are handled with explicit schema attribution.
+
+### Trust enforcement (the W-ticket detector stack)
+
+RTIE's defining property is that the badge means something. A series of deterministic Python gates inspects LLM output and either passes it (`VERIFIED`), flags it (`UNVERIFIED` with structured warnings), or declines it (`DECLINED`). None of the detectors ask the LLM to validate its own work.
+
+| Gate | Stage | What it catches |
+|---|---|---|
+| Scope mismatch | pre-search | query asks about something outside RTIE's parsed scope |
+| W37 function precheck | pre-search | user named a function not in the loaded graph; DECLINED with "did you mean?" |
+| W45 ungrounded identifier | pre-search | user named a CAP code / business identifier with no literal-index match |
+| W49 partial-source function | pre-search | function metadata indexed but source body unavailable |
+| W87 unrecognized term | pre-search | no entity resolved through any extraction path; structured clarification |
+| W57 grounding overlay | post-generation | citations exist and resolve; cited function present in retrieved sources; no padding |
+| W83a / W83B / W83C | post-generation | LLM fabricated month/quarter/year-end gating not supported by source |
+| W85 anchor mismatch | post-generation | LLM anchored on a different function than the one the user asked about |
+| W78a fabricated function name | post-generation | LLM cited a function name not in retrieved sources |
+| W33 / W86 sanity checks | post-execution | DATA_QUERY returned zero rows on a populated table, or metric columns were entirely NULL |
+| W89 chain ordering | retrieval | VARIABLE_TRACE chain reordered by manifest `task_order` before narrative |
+
+Detectors are additive. Each ticket closes a specific failure class. The detector stack composes — no single gate is load-bearing alone, but together they enforce the trust contract.
+
+### Streaming response format
+
+Every response streams as Server-Sent Events:
+
+| Event | Purpose |
 |---|---|
-| Write operations of any kind | The Oracle service account is SELECT-only. `SqlGuardian` rejects DML/DDL at the application layer as a second defense. |
-| Forecasting or prediction | RTIE is read-only introspection. "Which accounts will fail next quarter?" routes to UNSUPPORTED and declines. |
-| Cross-table reconciliation against FCT / result tables | FCT lives in the OFSAA Results schema, which is outside RTIE's parsed graph scope. |
-| References to tables not in `db/modules/*/functions/` | If a table isn't parsed into the graph, RTIE returns a capability-limitation response rather than guessing. |
-| Speculation about upstream ETL systems | For rows with `V_DATA_ORIGIN = T24` / `OF` / `IBG` / `CBS`, RTIE states the origin and suggests where to investigate. It does not speculate about why the upstream value is what it is. |
-| Proactive batch detection | RTIE is reactive — engineers ask, the system answers. No watchers, no alerts. |
+| `stage` | progress indicator (classify / route / retrieve / generate / validate) |
+| `meta` | function list, schema scope, SQL (for DATA_QUERY), bind parameters |
+| `token` | incremental markdown content |
+| `done` | final payload: `badge`, `validated`, `warnings`, `explanation`, `functions_analyzed`, `source_citations`, `meta`, `diagnostic` |
 
-A confidently wrong answer is worse than no answer. The architecture prioritizes refusal over guessing.
+The frontend's `ValidationHeader` (W46) renders the badge and warnings above the response body so the trust signal is visible before the user reads the prose.
 
 ---
 
-## Prerequisites
+## Quick start — Docker (recommended)
+
+Three-command setup, assuming Docker Desktop is installed and an Oracle FSAPPS instance is reachable.
+
+```bash
+git clone https://github.com/ToheedAsghar/R-TIE.git
+cd R-TIE/RTIE
+cp .env.example .env.dev
+# Edit .env.dev — fill ORACLE_HOST/PORT/SID/USER/PASSWORD, OPENAI_API_KEY, POSTGRES_PASSWORD.
+docker compose up -d --build
+```
+
+Watch the cold start:
+
+```bash
+docker compose logs -f rtie-backend
+```
+
+**Access points after startup:**
+
+| Service | URL |
+|---|---|
+| Frontend (chat UI) | <http://localhost:5173> |
+| Backend (direct API) | <http://localhost:8000/health> |
+| RedisInsight (dev only) | <http://localhost:8001> |
+
+**Four containers:**
+
+| Container | Role |
+|---|---|
+| `rtie-backend` | FastAPI + LangGraph orchestrator + corpus baked into the image |
+| `rtie-frontend` | nginx-served Vite build of the React UI |
+| `rtie-redis` | Redis Stack with RediSearch (vector store + graph store + indexes) |
+| `rtie-postgres` | LangGraph checkpointer + correlation tracking + conversation memory |
+
+Oracle is external — the backend dials it via the DSN you put in `.env.dev`.
+
+### What to expect on first boot
+
+- **~5–30 minutes of indexing.** The lifespan walks `db/modules/` (the Techlogix corpus baked into the image), populates the Redis graph, generates LLM descriptions, builds the vector index. Watch the log for lines like `Module ABL_CAR_CSTM_V4: loaded N, skipped 0, failed 0` and `Auto-index OFSMDM: N indexed`.
+- After indexing, `/health` returns 200 and the frontend becomes usable.
+- Subsequent `docker compose down && up -d` (without `-v`) is seconds — the Redis volume is warm and the loader/indexer skip everything.
+
+### Common Docker operations
+
+```bash
+docker compose down              # stop, preserve volumes (fast restart next time)
+docker compose down -v           # stop and wipe volumes (re-runs the indexer)
+docker compose up -d --build     # rebuild after Dockerfile / source changes
+docker compose logs -f rtie-backend
+docker compose exec rtie-backend bash
+docker compose restart rtie-backend
+```
+
+### Docker-specific notes
+
+- **Oracle host from inside containers:** if Oracle runs on the same laptop, set `ORACLE_HOST=host.docker.internal` (Windows / macOS) — not `localhost`. On Linux, use the host bridge IP.
+- **Embeddings always go through OpenAI**, regardless of `DEFAULT_LLM_PROVIDER`. An `OPENAI_API_KEY` is mandatory even if you're routing generation to Claude.
+- **Redis must stay Redis Stack** — RediSearch is load-bearing. Plain `redis:alpine` will fail `FT.CREATE` at startup.
+- **`REDIS_HOST` and `POSTGRES_HOST` in `.env.dev` are ignored by compose** — the compose file overrides them to `rtie-redis` / `rtie-postgres`. The same `.env.dev` works for bare-metal `python run.py` (where `localhost` is the right value).
+
+### Validating the containerized stack
+
+A full cold-start → canary → warm-restart validation that proves the stack works end-to-end:
+
+```bash
+docker compose down -v
+docker compose up -d
+docker compose logs -f rtie-backend   # wait until /health returns 200
+```
+
+Then in the UI ask:
+
+> What is the total `N_EOP_BAL` for `V_LV_CODE='ABL'` on 2025-12-31?
+
+Expect a **VERIFIED** badge with `SUM(N_EOP_BAL) = -24,179,237,139.63`. If the response matches, the stack is working end-to-end. Anything else means investigate before declaring deployable.
+
+---
+
+## Quick start — Manual setup
+
+Two variants below for Linux/macOS and Windows. Use this when you want to iterate on backend code without rebuilding container images.
+
+### Prerequisites
 
 | Tool | Version | Notes |
 |---|---|---|
-| Python | 3.11+ (`pyproject.toml` declares `^3.11`) | 3.12 / 3.13 also fine |
-| Poetry | 1.x or 2.x | Install via `pip install poetry`. There is no `requirements.txt`. |
-| Docker Desktop (Windows) or Docker Engine (Linux) | Recent | Used for Redis Stack + PostgreSQL |
-| Node.js + npm | LTS (20.x / 22.x) | For the React/Vite frontend |
-| Oracle access | OFSAA FSAPPS with OFSMDM and OFSERM schemas | Read-only credentials. Provisioning is out of scope — assumed arranged by the DBA team. |
-| OpenAI API key | — | Required: classification, embeddings, indexing, generation |
-| Anthropic API key | — | Optional: frontend model selector can pick Claude |
-| LangSmith API key | — | Optional: tracing/observability |
+| Python | 3.11+ (`pyproject.toml` declares `^3.11`) | 3.12 / 3.13 also work |
+| Poetry | 1.x or 2.x | `pip install poetry`; no `requirements.txt` |
+| Docker Desktop (Windows) or Docker Engine (Linux) | recent | for Redis Stack + PostgreSQL |
+| Node.js + npm | LTS (20.x / 22.x) | for the React/Vite frontend |
+| Oracle access | OFSAA FSAPPS with OFSMDM + OFSERM | read-only credentials; provisioning is out of scope |
+| OpenAI API key | — | required: classification, embeddings, indexing, generation |
+| Anthropic API key | — | optional: model selector can route generation to Claude |
+| LangSmith API key | — | optional: tracing / observability |
 
-A standalone Windows-from-scratch walkthrough (Git install, WSL 2, Docker Desktop, every download link) lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md). The Windows quick start below assumes those prerequisites are already in place.
+A standalone Windows walkthrough (Git, WSL 2, Docker Desktop, every download link) lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md).
 
----
+### Linux / macOS
 
-## Quick start — Linux / macOS
-
-All commands run from inside the `RTIE/` directory (the repo root containing `pyproject.toml`, `run.py`, `docker-compose.yml`).
+All commands run from inside `RTIE/`.
 
 ```bash
 # 1. Install Python dependencies
 poetry install
 poetry shell                       # or prefix every command with `poetry run`
 
-# 2. Create .env.dev from the template, fill in secrets
+# 2. Create .env.dev from template, fill in secrets
 cp .env.example .env.dev
 $EDITOR .env.dev                   # set ORACLE_*, OPENAI_API_KEY, etc.
 
-# 3. Start Redis Stack + PostgreSQL
-docker-compose up -d
+# 3. Start Redis Stack + PostgreSQL only
+docker compose up -d rtie-redis rtie-postgres
 docker ps                          # expect rtie-redis and rtie-postgres, both Up
 
-# 4. Verify Redis (RediSearch is required for vector search)
+# 4. Verify Redis
 docker exec -it rtie-redis redis-cli PING        # → PONG
 
-# 5. Verify Postgres (used as the LangGraph checkpointer)
-docker exec -it rtie-postgres pg_isready -U postgres   # → accepting connections
+# 5. Verify Postgres
+docker exec -it rtie-postgres pg_isready -U postgres
 
-# 6. Place PL/SQL sources under db/modules/<MODULE>/functions/*.sql
-#    (skip if a teammate has already populated db/modules/)
+# 6. (One-time, if db/modules/ is not already populated) place PL/SQL sources
+#    under db/modules/<MODULE>/functions/*.sql
 
 # 7. One-time index — parses sources, generates descriptions, builds vectors
 python cli.py index --force
@@ -78,15 +200,11 @@ npm install
 npm run dev                        # serves http://localhost:5173
 ```
 
-Open [http://localhost:5173](http://localhost:5173) in the browser. The chat UI streams responses from `/v1/stream`.
+Open <http://localhost:5173>. The chat UI streams responses from `/v1/stream`.
 
-**Why `python run.py` and not `uvicorn`.** [run.py](run.py) sets `WindowsSelectorEventLoopPolicy` on Windows before importing uvicorn. The psycopg async driver requires `SelectorEventLoop`; Windows' default `ProactorEventLoop` is incompatible. The launcher is a no-op on Linux but harmless to use everywhere.
+**Why `python run.py` and not `uvicorn`.** `run.py` sets `WindowsSelectorEventLoopPolicy` on Windows before importing uvicorn. The psycopg async driver requires `SelectorEventLoop`; Windows' default `ProactorEventLoop` is incompatible. The launcher is a no-op on Linux but harmless to use everywhere.
 
----
-
-## Quick start — Windows (PowerShell)
-
-Same flow, with PowerShell-specific paths and environment-variable syntax. If you're starting from a clean Windows 11 machine, follow [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) first; the steps below assume Python, Docker Desktop, Node.js, and Git are already installed.
+### Windows (PowerShell)
 
 ```powershell
 # All commands run inside the RTIE folder.
@@ -101,149 +219,60 @@ Copy-Item .env.example .env.dev
 notepad .env.dev
 
 # 3. Start infrastructure (Docker Desktop must be running first)
-docker compose up -d
-docker ps                          # expect rtie-redis and rtie-postgres, both Up
+docker compose up -d rtie-redis rtie-postgres
 
-# 4. Verify Redis
-docker exec -it rtie-redis redis-cli PING        # → PONG
-
-# 5. Verify Postgres
+# 4. Verify Redis + Postgres
+docker exec -it rtie-redis redis-cli PING
 docker exec -it rtie-postgres pg_isready -U postgres
 
-# 6. Index sources
+# 5. Index sources
 python cli.py index --force
 
-# 7. Start backend
+# 6. Start backend
 python run.py
 
-# 8. In a second PowerShell window — start frontend
+# 7. In a second PowerShell window — start frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-**Restarting the backend on Windows — never blanket-kill Python.** `taskkill /F /IM python.exe` kills every Python process on the machine, including agent workers in other terminals. Find the specific PID and kill only it:
+**Restarting the backend on Windows — never blanket-kill Python.** `taskkill /F /IM python.exe` kills every Python process on the machine, including agent workers in other terminals. Find the specific PID:
 
 ```powershell
-netstat -ano | findstr :8000      # find the PID owning port 8000
+netstat -ano | findstr :8000      # find PID owning port 8000
 taskkill /PID <pid> /F             # kill only that PID
 python run.py                      # restart
 ```
 
 ---
 
-## Running RTIE locally (Docker)
-
-The compose stack runs four services: backend, frontend (nginx-served Vite build), Redis Stack, and Postgres. Oracle stays external — configure it in `.env.dev`. The Techlogix corpus is baked into the backend image; no bind-mount required.
-
-### Prerequisites
-
-- Docker Desktop ≥ 4.30 (or Docker Engine ≥ 24 + `docker compose` v2 on Linux).
-- Network reachability to your Oracle host. If Oracle runs on the same laptop, use `host.docker.internal` for `ORACLE_HOST` on Windows / macOS, or the host bridge IP on Linux.
-- An OpenAI API key (required for embeddings — `EMBEDDING_MODEL` must be an OpenAI model regardless of `DEFAULT_LLM_PROVIDER`).
-
-### One-time setup
-
-```bash
-git clone <repo-url> RTIE
-cd RTIE
-cp .env.example .env.dev
-# Edit .env.dev: fill ORACLE_*, OPENAI_API_KEY, POSTGRES_PASSWORD, and optionally ANTHROPIC_API_KEY.
-# REDIS_HOST and POSTGRES_HOST are overridden by compose — you can leave the localhost defaults.
-```
-
-### Start the stack
-
-```bash
-docker compose up -d --build
-docker compose logs -f rtie-backend
-```
-
-**First-run cold start.** On a brand-new volume the backend lifespan loads the corpus graph and builds the vector index. Expect **5–30 minutes** of startup work before `/health` returns ready. Watch the log for messages like `Module ABL_CAR_CSTM_V4: loaded N, skipped 0, failed 0` and `Auto-index OFSMDM: N indexed, ...`. On subsequent boots the Redis volume is warm and these steps are skipped — startup is seconds.
-
-### Access
-
-- Frontend: <http://localhost:5173>
-- Backend (direct): <http://localhost:8000/health>
-- RedisInsight UI: <http://localhost:8001> (dev only)
-
-### Common commands
-
-```bash
-# Stop the stack (volumes preserved → fast restart)
-docker compose down
-
-# Stop and wipe volumes (re-runs the indexer on next boot)
-docker compose down -v
-
-# Rebuild after Dockerfile / source changes
-docker compose up -d --build
-
-# Tail backend logs
-docker compose logs -f rtie-backend
-
-# Open a shell in the backend container
-docker compose exec rtie-backend bash
-
-# Restart just the backend
-docker compose restart rtie-backend
-```
-
-### Troubleshooting
-
-- **Backend healthcheck stays "starting" past 30 min.** Cold-start indexing is taking longer than expected. Tail `docker compose logs -f rtie-backend` — if the loader/indexer log lines aren't progressing, your OpenAI key is likely missing or rate-limited.
-- **Oracle connection fails.** Confirm `ORACLE_HOST` is reachable from inside the container: `docker compose exec rtie-backend curl -v telnet://$ORACLE_HOST:$ORACLE_PORT`. From a developer laptop where Oracle runs locally, use `host.docker.internal` (Windows / macOS) instead of `localhost`.
-- **Port 5173 / 8000 / 6379 / 5432 already in use.** Either stop the conflicting process or remap the host-side port in `docker-compose.yml` (`"5174:80"` etc.).
-- **RediSearch errors at startup.** Make sure the Redis image is `redis/redis-stack:latest` — plain `redis:alpine` does NOT include RediSearch and the vector store will fail at `FT.CREATE`.
-- **Frontend shows API errors.** Confirm `rtie-backend` is healthy: `docker compose ps`. If healthy, the nginx proxy in `deploy/frontend/nginx.conf` may need adjustment for your environment.
-
----
-
-## Verifying it works — the canary triple
-
-Three queries exercise the three core capabilities. Run them from the UI (or via `python cli.py ask "…"`) after the backend is up. The expected outcomes below are the trust contract — if any one diverges, something in the setup or the index is wrong.
-
-| # | Query | Expected outcome |
-|---|---|---|
-| 1 | `How does FN_LOAD_OPS_RISK_DATA work?` | **UNVERIFIED** badge. Body explains the function. Warnings array contains a `GROUNDING-HIGH:` entry catching either the "pass-through" template phrase or the line-198-369 padding fabrication. Route: `COLUMN_LOGIC`, schema `OFSMDM`. |
-| 2 | `What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?` | **VERIFIED** badge. `SUM(N_EOP_BAL) = -24,179,237,139.63` (exact). Route: `DATA_QUERY`, schema `OFSMDM`. SQL contains `V_LV_CODE` and `FIC_MIS_DATE`. |
-| 3 | `How is CAP973 calculated?` | **UNVERIFIED** badge. Body anchors on `CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT`. Warnings array contains a `GROUNDING-HIGH:` entry from the W57 enforcer. |
-
-The first and third are deliberate trust-contract tests: the body looks plausible but contains a fabrication that W57's grounding overlay catches and downgrades. The middle one is the deterministic data path — the SUM is exact, not approximate, and stamps the SQL into the response.
-
-The formal canary suite lives at [tests/canary/canaries.yaml](tests/canary/canaries.yaml) (18 queries across 3 tiers); run it with:
-
-```bash
-python tests/canary/run_canaries.py --tier 1     # backend must be running on :8000
-make canary-tier1                                # Makefile wrapper, same thing
-```
-
----
-
 ## Architecture
 
-### High-Level System Overview
+### High-level system
 
 ```mermaid
 graph TB
     UI["React + Vite Frontend<br/><i>localhost:5173</i>"]
-    API["FastAPI Backend<br/><i>localhost:8000 &bull; /v1/stream</i>"]
-    ORC["Orchestrator<br/><i>classify + route (7 query types)</i>"]
-    GP["Graph Pipeline<br/><i>query engine (Phase 1)</i>"]
-    VT["Value Tracer<br/><i>row-first trace (Phase 2)</i>"]
-    DQ["Data Query Agent<br/><i>SQL gen + safeguards (Option A)</i>"]
-    LLM["LLM Layer<br/><i>OpenAI / Claude</i>"]
-    SS["Semantic Search<br/><i>embeddings + KNN</i>"]
-    MI["Metadata Interpreter<br/><i>fetch source code</i>"]
-    REDIS[("Redis<br/><i>Graph store &bull; Column index<br/>Origins catalog &bull; Source cache</i>")]
-    PG[("PostgreSQL<br/><i>LangGraph checkpointer</i>")]
-    ORACLE[("Oracle OFSAA<br/><i>read-only</i>")]
+    API["FastAPI Backend<br/><i>localhost:8000 • /v1/stream</i>"]
+    ORC["Orchestrator<br/><i>classify + entity extraction + route</i>"]
+    DET["Detector Stack<br/><i>11 deterministic gates</i>"]
+    GP["Graph Pipeline<br/><i>FUNCTION_LOGIC / COLUMN_LOGIC<br/>(Phase 1)</i>"]
+    VT["Value Tracer<br/><i>VALUE_TRACE / DIFFERENCE<br/>(Phase 2)</i>"]
+    DQ["Data Query Agent<br/><i>DATA_QUERY<br/>(Option A)</i>"]
+    LLM["LLM Layer<br/><i>OpenAI gpt-4o-mini / Claude</i>"]
+    SS["Retrieval Layer<br/><i>5 paths: anchor, BI, column,<br/>vector KNN, lexical fallback</i>"]
+    MI["Metadata Interpreter<br/><i>graph:source fetch</i>"]
+    REDIS[("Redis Stack<br/><i>Graph • Vector index • Column index<br/>BI literals • Manifest hierarchy</i>")]
+    PG[("PostgreSQL<br/><i>LangGraph checkpointer<br/>Correlation • Memory</i>")]
+    ORACLE[("Oracle OFSAA<br/><i>EXTERNAL • read-only</i>")]
 
     UI -- "SSE streaming" --> API
     API --> ORC
-    ORC --> GP
-    ORC --> VT
-    ORC --> DQ
+    ORC --> DET
+    DET --> GP
+    DET --> VT
+    DET --> DQ
     ORC --> SS
     SS --> MI
     GP --> REDIS
@@ -251,7 +280,10 @@ graph TB
     VT --> ORACLE
     DQ --> ORACLE
     DQ --> LLM
-    LLM --> API
+    GP --> LLM
+    VT --> LLM
+    LLM --> DET
+    DET --> API
     MI --> REDIS
     MI --> ORACLE
     API --> PG
@@ -259,6 +291,7 @@ graph TB
     style UI fill:#4f46e5,color:#fff,stroke:none
     style API fill:#0f766e,color:#fff,stroke:none
     style ORC fill:#7c3aed,color:#fff,stroke:none
+    style DET fill:#dc2626,color:#fff,stroke:none
     style GP fill:#0369a1,color:#fff,stroke:none
     style VT fill:#059669,color:#fff,stroke:none
     style DQ fill:#b45309,color:#fff,stroke:none
@@ -270,82 +303,190 @@ graph TB
     style ORACLE fill:#9333ea,color:#fff,stroke:none
 ```
 
-### LLM Provider
+### Full request pipeline — every stage
 
-All LLM calls use **OpenAI gpt-4o-mini** by default. Anthropic Claude is also supported — switch from the frontend model selector dropdown. Classification and embeddings use small payloads (<2KB); source analysis uses the graph pipeline payload (~2-4KB); SQL generation prompts are ~1-2KB.
-
-### Query Types and Routing
-
-The orchestrator ([src/agents/orchestrator.py](src/agents/orchestrator.py)) classifies every query into one of seven types and routes to the matching handler. This is the single decision that determines which capability answers the question.
-
-| Query Type | Example | Handler | Phase |
-|------------|---------|---------|-------|
-| VARIABLE_TRACE | "How is EAD_AMOUNT calculated?" | Logic Explainer | 1 |
-| COLUMN_LOGIC | "What does N_EOP_BAL do?" | Logic Explainer | 1 |
-| FUNCTION_LOGIC | "Explain FN_LOAD_OPS_RISK_DATA" | Logic Explainer | 1 |
-| VALUE_TRACE | "Why is N_EOP_BAL -10 for account X?" | Value Tracer | 2 |
-| DIFFERENCE_EXPLANATION | "Bank says 52M, we show 50M for account X" | Value Tracer | 2 |
-| DATA_QUERY | "Total N_EOP_BAL for V_LV_CODE='ABL'" | Data Query Agent | Option A |
-| UNSUPPORTED | "FCT vs STG reconciliation" / forecasting | Capability decline | — |
-
-**Ambiguity rule:** When unclear, the orchestrator defaults to VALUE_TRACE (which handles single-row questions correctly including breakdown requests). Mis-routing aggregation queries to VALUE_TRACE was the original silent-failure bug, so the classifier requires explicit aggregation keywords ("total", "sum", "count", "how many", "which accounts") AND absence of a specific account number to route to DATA_QUERY.
-
-### Request Pipeline (SSE Streaming)
-
-When a user asks a question, the `/v1/stream` endpoint processes it through stages, streaming Server-Sent Events (SSE) to the frontend at each stage:
+This diagram shows every stage a question passes through, including every pre-search gate and every post-generation validation overlay. No stages skipped.
 
 ```mermaid
 flowchart TD
-    Q(["User Query"])
-    C["1. CLASSIFY<br/><i>Orchestrator LLM call<br/>7 query types</i>"]
-    R{"Query<br/>type?"}
+    User["User Question<br/>(React frontend)"] --> Entry["POST /v1/stream<br/>(FastAPI)"]
+    Entry --> Classify["Stage 1: Classify<br/><b>LLM CALL #1</b><br/>bounded: query_type + entities"]
+    Classify --> AnchorEx["Stage 2: Anchor extraction<br/>W76 prefix detector,<br/>BI routing (CAP literal index),<br/>function-name regex"]
 
-    GP["Phase 1<br/><i>Graph trace<br/>(logic only)</i>"]
-    VT["Phase 2<br/><i>Row-first value trace</i>"]
-    DQ["Option A<br/><i>SQL generation + execution</i>"]
-    UN["UNSUPPORTED<br/><i>Explicit decline</i>"]
+    AnchorEx --> PreChecks["Stage 3: Pre-checks<br/>(6 deterministic gates, sequential)"]
+    PreChecks --> G1{"Scope<br/>mismatch?"}
+    G1 -->|"yes"| Decline
+    G1 -->|"no"| G2{"BI scope<br/>mismatch?"}
+    G2 -->|"yes"| Decline
+    G2 -->|"no"| G3{"W37<br/>function<br/>not found?"}
+    G3 -->|"yes"| Decline
+    G3 -->|"no"| G4{"W45<br/>ungrounded<br/>identifier?"}
+    G4 -->|"yes"| Decline
+    G4 -->|"no"| G5{"W49<br/>partial-source<br/>function?"}
+    G5 -->|"yes"| Decline
+    G5 -->|"no"| G6{"W87<br/>no entity<br/>resolved?"}
+    G6 -->|"yes"| Decline
+    G6 -->|"no"| Route{"Stage 4: Route<br/>by query_type"}
 
-    E["STREAM<br/><i>LLM streams markdown tokens</i>"]
-    V["W57 GROUNDING OVERLAY<br/><i>evaluate_grounding()<br/>8 sub-checks</i>"]
-    D(["Done event<br/><i>badge + warnings + diagnostic</i>"])
+    Decline["Structured decline<br/><b>DECLINED or UNVERIFIED</b><br/>deterministic template"]
 
-    Q --> C
-    C --> R
-    R -- "VARIABLE_TRACE<br/>COLUMN_LOGIC<br/>FUNCTION_LOGIC" --> GP
-    R -- "VALUE_TRACE<br/>DIFFERENCE_EXPLANATION" --> VT
-    R -- "DATA_QUERY" --> DQ
-    R -- "UNSUPPORTED" --> UN
+    Route -->|"FUNCTION_LOGIC<br/>COLUMN_LOGIC"| F4a["Stage 5a — Logic Explainer<br/>retrieve source from Redis<br/>build hierarchy header (W39)<br/><b>LLM CALL #2</b>: narrative streaming"]
 
-    GP --> E
-    VT --> E
-    DQ --> E
-    UN --> E
-    E --> V --> D
+    Route -->|"VARIABLE_TRACE"| F4b["Stage 5b — Variable Tracer<br/>retrieve writer chain<br/>sort by manifest task_order (W89)<br/>extract relevant lines<br/><b>LLM CALL #2</b>: narrative streaming"]
 
-    style Q fill:#4f46e5,color:#fff,stroke:none
-    style C fill:#7c3aed,color:#fff,stroke:none
-    style R fill:#0f766e,color:#fff,stroke:none
-    style GP fill:#0369a1,color:#fff,stroke:none
-    style VT fill:#059669,color:#fff,stroke:none
-    style DQ fill:#b45309,color:#fff,stroke:none
-    style UN fill:#6b7280,color:#fff,stroke:none
-    style E fill:#d97706,color:#fff,stroke:none
-    style V fill:#dc2626,color:#fff,stroke:none
-    style D fill:#4f46e5,color:#fff,stroke:none
+    Route -->|"VALUE_TRACE<br/>DIFFERENCE_EXPLANATION"| F4d["Stage 5d — Value Tracer<br/>row inspect → origin classify<br/>graph/ETL/unknown path<br/>evidence build → explainer LLM"]
+
+    Route -->|"DATA_QUERY"| F4c["Stage 5c — Data Query<br/><b>LLM CALL #3</b>: SQL generation<br/>SQL Guardian validate<br/>classify shape (aggregate/row/series)<br/>execute on Oracle<br/>format deterministically"]
+
+    Route -->|"UNSUPPORTED"| Unsupp["Capability decline<br/>explicit DECLINED"]
+
+    F4a --> Overlays["Stage 6: Validation overlays<br/>(post-generation, deterministic)"]
+    F4b --> Overlays
+    F4d --> Overlays
+    F4c --> Sanity["DATA_QUERY sanity checks<br/>W33: suspicious zero result<br/>W86: all-null metric columns"]
+    Sanity --> Overlays
+
+    Overlays --> O1{"W57<br/>citations<br/>valid?"}
+    Overlays --> O2{"W83a/B/C<br/>calendar<br/>fabrication?"}
+    Overlays --> O3{"W85<br/>anchor<br/>mismatch?"}
+    Overlays --> O4{"W78a<br/>fabricated<br/>function?"}
+    O1 -->|"any check fails"| Unverified
+    O2 -->|"fires"| Unverified
+    O3 -->|"fires"| Unverified
+    O4 -->|"fires"| Unverified
+    O1 -->|"clean"| Verified
+    O2 -->|"silent"| Verified
+    O3 -->|"silent"| Verified
+    O4 -->|"silent"| Verified
+
+    Verified["Badge: <b>VERIFIED</b>"]
+    Unverified["Badge: <b>UNVERIFIED</b><br/>+ warnings array"]
+
+    Verified --> Stream["Stage 7: SSE stream to user<br/>tokens + final done event<br/>(badge, warnings, citations,<br/>functions_analyzed, diagnostic)"]
+    Unverified --> Stream
+    Decline --> Stream
+    Unsupp --> Stream
+
+    Stream --> Frontend["React frontend<br/>ValidationHeader (W46)<br/>renders badge + warnings"]
+    Frontend --> Display["User reads response"]
+
+    style Classify fill:#f59e0b,color:#000,stroke:none
+    style F4a fill:#f59e0b,color:#000,stroke:none
+    style F4b fill:#f59e0b,color:#000,stroke:none
+    style F4c fill:#f59e0b,color:#000,stroke:none
+    style F4d fill:#f59e0b,color:#000,stroke:none
+    style PreChecks fill:#3b82f6,color:#fff,stroke:none
+    style G1 fill:#3b82f6,color:#fff,stroke:none
+    style G2 fill:#3b82f6,color:#fff,stroke:none
+    style G3 fill:#3b82f6,color:#fff,stroke:none
+    style G4 fill:#3b82f6,color:#fff,stroke:none
+    style G5 fill:#3b82f6,color:#fff,stroke:none
+    style G6 fill:#3b82f6,color:#fff,stroke:none
+    style Overlays fill:#3b82f6,color:#fff,stroke:none
+    style O1 fill:#3b82f6,color:#fff,stroke:none
+    style O2 fill:#3b82f6,color:#fff,stroke:none
+    style O3 fill:#3b82f6,color:#fff,stroke:none
+    style O4 fill:#3b82f6,color:#fff,stroke:none
+    style Sanity fill:#3b82f6,color:#fff,stroke:none
+    style Decline fill:#dc2626,color:#fff,stroke:none
+    style Unsupp fill:#6b7280,color:#fff,stroke:none
+    style Verified fill:#10b981,color:#000,stroke:none
+    style Unverified fill:#fbbf24,color:#000,stroke:none
 ```
 
-The W57 grounding overlay runs after generation and only on `/v1/stream` — see the [Trust contract](#trust-contract--what-badges-mean) and [API endpoints](#api-endpoints--v1stream-vs-v1query) sections below.
+**Legend.** Amber = LLM call (bounded). Blue = deterministic gate. Green = VERIFIED. Yellow = UNVERIFIED. Red = DECLINED. Gray = capability decline.
 
-### Phase 1 — Graph Pipeline (Startup + Query Time)
+**Three LLM calls, all bounded:**
+
+1. Classification (pick a query_type from a fixed list)
+2. Narrative generation (explain a function or trace, given pre-retrieved sources)
+3. SQL generation (translate to SELECT, given the schema catalog)
+
+The LLM never decides what to look at next; the orchestrator does.
+
+### Function retrieval — five paths
+
+How the orchestrator turns a question into a concrete set of functions to retrieve.
+
+```mermaid
+flowchart TD
+    Query["User query"] --> Orchestrator["Orchestrator + Entity Extraction"]
+
+    Orchestrator --> P1{"Path 1<br/>Named function?<br/>W76 anchor or<br/>function regex"}
+    Orchestrator --> P2{"Path 2<br/>CAP code or<br/>business identifier?<br/>BI literal index"}
+    Orchestrator --> P3{"Path 3<br/>Named column?<br/>schemas_for_column"}
+    Orchestrator --> P4{"Path 4<br/>Anchorless?<br/>semantic fallback"}
+
+    P1 -->|"yes"| K1["Direct key fetch<br/>graph:source:&lt;schema&gt;:&lt;fn&gt;"]
+    P2 -->|"yes"| K2["BI lookup →<br/>function name →<br/>graph fetch"]
+    P3 -->|"yes"| K3["Column index →<br/>writer / reader functions →<br/>graph fetch"]
+    P4 -->|"yes"| Vec["Semantic search<br/>OpenAI embeddings<br/>→ vector store KNN<br/>top_K per schema"]
+
+    Vec --> Names["Function names<br/>+ schemas + scores"]
+    Names --> Graph["graph:source fetch<br/>per name"]
+
+    K1 --> Merge["state[multi_source]<br/>= {fn → source body}"]
+    K2 --> Merge
+    K3 --> Merge
+    Graph --> Merge
+
+    Merge --> Sort["Sort by manifest<br/>task_order (W89)<br/>for VARIABLE_TRACE"]
+    Sort --> Narrative["LLM narrative<br/>generation"]
+
+    Lex["Path 5<br/>Lexical similarity<br/>find_similar_function_names<br/>(difflib, cutoff 0.5)"] -.->|"W37 / W87<br/>did-you-mean suggestions"| DeclineSurface["Structured<br/>declines"]
+
+    GraphStore[("Redis: graph layer<br/>━━━━━━━━━━━<br/>graph:meta<br/>graph:source<br/>column index<br/>BI literal index<br/>manifest hierarchy")]
+    VecStore[("Redis: vector layer<br/>━━━━━━━━━━━<br/>idx:rtie_vectors<br/>rtie:vec:&lt;schema&gt;:&lt;fn&gt;<br/>function descriptions<br/>+ embeddings")]
+
+    K1 -.-> GraphStore
+    K2 -.-> GraphStore
+    K3 -.-> GraphStore
+    Graph -.-> GraphStore
+    Vec -.-> VecStore
+
+    Indexer["Boot-time indexer<br/>━━━━━━━━━━━━━━━━<br/>1. Parse PL/SQL → typed nodes<br/>2. Write to graph<br/>3. LLM generates descriptions<br/>4. Embed descriptions<br/>5. Write to vector store<br/>6. Build column index<br/>7. Build BI literal index"] -.->|"populates"| GraphStore
+    Indexer -.->|"populates"| VecStore
+
+    style P1 fill:#3b82f6,color:#fff,stroke:none
+    style P2 fill:#3b82f6,color:#fff,stroke:none
+    style P3 fill:#3b82f6,color:#fff,stroke:none
+    style P4 fill:#3b82f6,color:#fff,stroke:none
+    style Vec fill:#f59e0b,color:#000,stroke:none
+    style Sort fill:#10b981,color:#000,stroke:none
+    style Narrative fill:#f59e0b,color:#000,stroke:none
+    style GraphStore fill:#6b7280,color:#fff,stroke:none
+    style VecStore fill:#6b7280,color:#fff,stroke:none
+    style Indexer fill:#6b7280,color:#fff,stroke:none
+```
+
+Path 1 (direct anchor) is highest precision and handles most anchored queries. Path 4 (vector KNN) is the catchall for anchorless questions and is the most fragile — retrieval quality there depends on description-embedding quality. Path 5 produces suggestions only, never answers.
+
+### Query types and routing
+
+The orchestrator classifies every query into one of seven types and routes to the matching handler.
+
+| Query type | Example | Handler | Phase |
+|---|---|---|---|
+| `FUNCTION_LOGIC` | "Explain `FN_LOAD_OPS_RISK_DATA`" | Logic Explainer | 1 |
+| `COLUMN_LOGIC` | "What does `N_EOP_BAL` do?" | Logic Explainer | 1 |
+| `VARIABLE_TRACE` | "How is `EAD_AMOUNT` calculated?" | Variable Tracer | 1 |
+| `VALUE_TRACE` | "Why is `N_EOP_BAL` -10 for account X?" | Value Tracer | 2 |
+| `DIFFERENCE_EXPLANATION` | "Bank says 52M, we show 50M for account X" | Value Tracer | 2 |
+| `DATA_QUERY` | "Total `N_EOP_BAL` for `V_LV_CODE='ABL'`" | Data Query Agent | Option A |
+| `UNSUPPORTED` | "FCT vs STG reconciliation" / forecasting | Capability decline | — |
+
+**Ambiguity rule.** When unclear, the orchestrator defaults to `VALUE_TRACE` (which handles single-row questions correctly including breakdown requests). Mis-routing aggregation queries to `VALUE_TRACE` was the original silent-failure bug, so the classifier requires explicit aggregation keywords (`total`, `sum`, `count`, `how many`, `which accounts`) AND absence of a specific account number to route to `DATA_QUERY`.
+
+### Phase 1 — Graph pipeline (startup + query time)
 
 On application startup, the graph pipeline parses all `.sql` files into structured JSON graphs stored in Redis. A 1,500-line function (67,721 chars) compresses to ~288 lines (9,084 chars) — **86.6% reduction**. At query time, only the relevant subgraph is sent to the LLM (~300 tokens instead of ~17,000).
 
 ```mermaid
 flowchart TD
     SQL[(".sql files")]
-    P["1. PARSER<br/><i>parser.py</i><br/>Regex block extraction<br/>Comment stripping"]
-    B["2. BUILDER<br/><i>builder.py</i><br/>Typed nodes + column_maps<br/>Per-function column_index"]
-    I["3. INDEXER<br/><i>indexer.py</i><br/>Cross-function edges<br/>Global column index<br/>Topological sort"]
+    P["1. PARSER<br/><i>parser.py</i><br/>regex block extraction<br/>comment stripping"]
+    B["2. BUILDER<br/><i>builder.py</i><br/>typed nodes + column_maps<br/>per-function column_index"]
+    I["3. INDEXER<br/><i>indexer.py</i><br/>cross-function edges<br/>global column index<br/>topological sort"]
     R[("4. REDIS STORE<br/><i>MessagePack compressed</i><br/>graph:{schema}:{fn}<br/>graph:full:{schema}<br/>graph:index:{schema}")]
 
     SQL --> P --> B --> I --> R
@@ -357,14 +498,14 @@ flowchart TD
     style R fill:#dc2626,color:#fff,stroke:none
 ```
 
-**Node types:** INSERT, UPDATE, MERGE, DELETE, SCALAR_COMPUTE, WHILE_LOOP, FOR_LOOP, SELECT_INTO
+**Node types:** `INSERT`, `UPDATE`, `MERGE`, `DELETE`, `SCALAR_COMPUTE`, `WHILE_LOOP`, `FOR_LOOP`, `SELECT_INTO`
 
-**Calculation types:** DIRECT, ARITHMETIC, CONDITIONAL, FALLBACK, OVERRIDE
+**Calculation types:** `DIRECT`, `ARITHMETIC`, `CONDITIONAL`, `FALLBACK`, `OVERRIDE`
 
-**Parser handles these patterns:**
+**Patterns the parser handles:**
 
 | Pattern | What it captures |
-|---------|-----------------|
+|---|---|
 | Function-level execution conditions | `IF EXTRACT(MONTH...) = 12` — December-only functions |
 | Intermediate variable calculations | `SELECT INTO` and `:=` assignments (SCALAR_COMPUTE nodes) |
 | Composite key overrides | `DECODE(V_GL_CODE \|\| '-' \|\| V_BRANCH_CODE, ...)` |
@@ -373,22 +514,22 @@ flowchart TD
 | Transaction boundaries | `committed_after` flag on every node for failure analysis |
 | Commented-out blocks | Flagged as `commented_out_nodes` — never treated as active logic |
 
-**Schema awareness (W35 in flight).** `schema` is a first-class parameter throughout the loader, indexer, store, agents, and streaming layer. Redis keys are namespaced (`graph:OFSMDM:*`, `graph:OFSERM:*`). Phases 0-4 of the refactor have landed; Phases 5-8 (business-identifier indexing + routing) remain. See `docs/w35_architecture.md` and the `docs/w35_phaseN_summary.md` series before touching parsing, store, agents, or `main.py`.
+**Schema awareness (W35 in flight).** `schema` is a first-class parameter throughout the loader, indexer, store, agents, and streaming layer. Redis keys are namespaced (`graph:OFSMDM:*`, `graph:OFSERM:*`). Phases 0–4 of the schema-aware refactor have landed; Phases 5–8 (business-identifier indexing + routing) remain. See `docs/w35_architecture.md` and the `docs/w35_phaseN_summary.md` series before touching parsing, store, agents, or `main.py`.
 
-### Query Engine (Query-Time Subgraph)
+### Query engine — subgraph resolution
 
 When a Phase 1 query arrives, the query engine resolves it to a compact structured payload in microseconds.
 
 ```mermaid
 flowchart TD
-    TV(["Target Variable<br/><i>e.g. N_ANNUAL_GROSS_INCOME</i>"])
-    AR["1. ALIAS RESOLUTION<br/><i>Business terms to column names</i>"]
-    CI["2. COLUMN INDEX LOOKUP<br/><i>Microsecond: column -> node_ids</i>"]
-    CF["3. CROSS-FUNCTION TRAVERSAL<br/><i>Column-aware edge following</i>"]
-    RF["4. RELEVANCE FILTER<br/><i>Drop nodes without target variable</i>"]
-    UD["5. UPSTREAM DISCOVERY<br/><i>SCALAR_COMPUTE text-matching<br/>Transitive variable lookup</i>"]
-    PA["6. PAYLOAD ASSEMBLY<br/><i>Pass-through consolidation<br/>Intermediate vars + conditions</i>"]
-    OUT(["Structured payload ~2-4KB<br/><i>sent to LLM</i>"])
+    TV(["Target variable<br/><i>e.g. N_ANNUAL_GROSS_INCOME</i>"])
+    AR["1. ALIAS RESOLUTION<br/>business terms to column names"]
+    CI["2. COLUMN INDEX LOOKUP<br/>microsecond: column → node_ids"]
+    CF["3. CROSS-FUNCTION TRAVERSAL<br/>column-aware edge following"]
+    RF["4. RELEVANCE FILTER<br/>drop nodes without target variable"]
+    UD["5. UPSTREAM DISCOVERY<br/>SCALAR_COMPUTE text-matching<br/>transitive variable lookup"]
+    PA["6. PAYLOAD ASSEMBLY<br/>pass-through consolidation<br/>intermediate vars + conditions"]
+    OUT(["Structured payload ~2-4KB<br/>sent to LLM"])
 
     TV --> AR --> CI --> CF --> RF --> UD --> PA --> OUT
 
@@ -402,17 +543,17 @@ flowchart TD
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
 
-**Example: "How is N_ANNUAL_GROSS_INCOME calculated?"**
+**Example — "How is `N_ANNUAL_GROSS_INCOME` calculated?"**
 
 | Step | Tool | Time | Cost |
 |---|---|---|---|
-| Alias resolution | Redis | < 1ms | Free |
-| Column index lookup | Redis | < 1ms | Free |
-| Fetch 6 nodes + edges | Redis | < 1ms | Free |
-| Assemble payload | Python | < 1ms | Free |
-| LLM explanation | GPT-4o (1 call, ~500 tokens) | ~2s | ~$0.005 |
+| Alias resolution | Redis | < 1ms | free |
+| Column index lookup | Redis | < 1ms | free |
+| Fetch 6 nodes + edges | Redis | < 1ms | free |
+| Assemble payload | Python | < 1ms | free |
+| LLM explanation | gpt-4o-mini (1 call, ~500 tokens) | ~2s | ~$0.005 |
 
-### Phase 2 — Value Lineage (Row-First Pipeline)
+### Phase 2 — Value lineage (row-first)
 
 Phase 2 answers questions about actual data values: *"Why is this value X?"* It starts from the row, not the graph. The row's `V_DATA_ORIGIN` column reveals whether the value was computed by PL/SQL or loaded from external ETL — and that single fact determines the entire trace strategy.
 
@@ -420,27 +561,27 @@ Phase 2 answers questions about actual data values: *"Why is this value X?"* It 
 flowchart TD
     Q(["Why is N_EOP_BAL<br/>-10 for account X<br/>on 2025-12-31?"])
 
-    S1["1. RowInspector<br/><i>row_inspector.py</i><br/>Fetch actual row from Oracle"]
+    S1["1. RowInspector<br/><i>row_inspector.py</i><br/>fetch actual row from Oracle"]
     M{"Row<br/>exists?"}
-    NR["row_not_found<br/><i>Explicit decline</i>"]
+    NR["row_not_found<br/><i>explicit decline</i>"]
 
-    S2["2. OriginClassifier<br/><i>origin_classifier.py</i><br/>Check V_DATA_ORIGIN<br/>Check GL block list<br/>Check EOP overrides"]
+    S2["2. OriginClassifier<br/><i>origin_classifier.py</i><br/>check V_DATA_ORIGIN<br/>check GL block list<br/>check EOP overrides"]
 
     S3{"Origin<br/>category?"}
 
-    S4A["PLSQL origin<br/><i>graph_trace</i><br/>Walk graph path<br/>Fetch value at each node"]
-    S4B["ETL origin<br/><i>etl_explain</i><br/>Identify source system<br/>List PL/SQL non-modifications"]
-    S4C["UNKNOWN origin<br/><i>diagnose</i><br/>Surface row facts<br/>Suggest investigation"]
+    S4A["PL/SQL origin<br/><i>graph_trace</i><br/>walk graph path<br/>fetch value at each node"]
+    S4B["ETL origin<br/><i>etl_explain</i><br/>identify source system<br/>list PL/SQL non-modifications"]
+    S4C["UNKNOWN origin<br/><i>diagnose</i><br/>surface row facts<br/>suggest investigation"]
 
-    S5["3. EvidenceBuilder<br/><i>evidence_builder.py</i><br/>Assemble verified facts only"]
+    S5["3. EvidenceBuilder<br/><i>evidence_builder.py</i><br/>assemble verified facts only"]
 
-    S6["4. Phase2Explainer<br/><i>explainer.py</i><br/>Hallucination-forbidden LLM prompt<br/>Sanity check output"]
+    S6["4. Phase2Explainer<br/><i>explainer.py</i><br/>hallucination-forbidden prompt<br/>sanity check output"]
 
-    OUT(["Response with row facts,<br/>SQL verification, and<br/>actionable fix path"])
+    OUT(["Response with row facts,<br/>SQL verification,<br/>and actionable fix path"])
 
     Q --> S1 --> M
-    M -- "No" --> NR
-    M -- "Yes" --> S2 --> S3
+    M -- "no" --> NR
+    M -- "yes" --> S2 --> S3
     S3 -- "PLSQL" --> S4A --> S5
     S3 -- "ETL" --> S4B --> S5
     S3 -- "UNKNOWN" --> S4C --> S5
@@ -460,34 +601,34 @@ flowchart TD
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
 
-**Row-first matters.** A row in STG_PRODUCT_PROCESSOR can arrive via at least four different paths:
+**Why row-first.** A row in `STG_PRODUCT_PROCESSOR` can arrive via at least four different paths:
 
 1. PL/SQL function execution (traceable through the graph)
 2. Direct ETL load from an external system (T24, IBG, CBS, ODF)
 3. Manual upload processes
 4. Other OFSAA modules outside the current batch
 
-A graph-first trace assumes every row flows through PL/SQL and breaks when it doesn't. The row-first approach handles all four paths because classification comes from the row's `V_DATA_ORIGIN` column — not from assumptions about the pipeline shape.
+A graph-first trace assumes every row flows through PL/SQL and breaks when it doesn't. Row-first handles all four paths because classification comes from the row's `V_DATA_ORIGIN` column, not from assumptions about pipeline shape.
 
-### Origins Catalog (Auto-Derived from Graph)
+### Origins catalog (auto-derived)
 
-The origins catalog maps `V_DATA_ORIGIN` values to what produced them, tracks GL codes in hardcoded block lists, and records hardcoded overrides (e.g. `N_EOP_BAL = 0` for specific GL codes). It is **built automatically at startup** by scanning the parsed graph in Redis. No hardcoded batch-specific knowledge.
+The origins catalog maps `V_DATA_ORIGIN` values to what produced them, tracks GL codes in hardcoded block lists, and records hardcoded overrides (e.g. `N_EOP_BAL = 0` for specific GL codes). It is built automatically at startup by scanning the parsed graph in Redis. No hardcoded batch-specific knowledge.
 
 ```mermaid
 flowchart LR
-    G[("Redis<br/><i>Parsed graph<br/>(Phase 1 output)</i>")]
+    G[("Redis<br/><i>parsed graph<br/>Phase 1 output</i>")]
     CB["build_catalog()<br/><i>origins_catalog.py</i>"]
 
-    E1["Extract V_DATA_ORIGIN literals<br/><i>from column_maps + CASE/DECODE</i>"]
-    E2["Extract GL block list<br/><i>from CONDITIONAL on F_EXPOSURE_ENABLED_IND</i>"]
-    E3["Extract EOP overrides<br/><i>from OVERRIDE calculations</i>"]
-    E4["Seed ETL origins<br/><i>BOOTSTRAP_ETL_ORIGINS<br/>(OF, T24, IBG, CBS, SWIFT)</i>"]
+    E1["Extract V_DATA_ORIGIN literals<br/>from column_maps + CASE/DECODE"]
+    E2["Extract GL block list<br/>from CONDITIONAL on F_EXPOSURE_ENABLED_IND"]
+    E3["Extract EOP overrides<br/>from OVERRIDE calculations"]
+    E4["Seed ETL origins<br/>BOOTSTRAP_ETL_ORIGINS<br/>(OF, T24, IBG, CBS, SWIFT)"]
 
-    V["_validate_completeness()<br/><i>Ensure all bootstrap keys present<br/>Functions match graph key count</i>"]
+    V["_validate_completeness()<br/>ensure all bootstrap keys present<br/>functions match graph key count"]
 
-    SW["Atomic swap<br/><i>_catalog = new_catalog<br/>(only after build success)</i>"]
+    SW["Atomic swap<br/>_catalog = new_catalog<br/>(only after build success)"]
 
-    C[("Module global<br/><i>OriginsCatalog<br/>(served by get_catalog())</i>")]
+    C[("Module global<br/>OriginsCatalog<br/>(served by get_catalog())")]
 
     G --> CB
     CB --> E1 --> V
@@ -507,36 +648,38 @@ flowchart LR
     style C fill:#d97706,color:#fff,stroke:none
 ```
 
-**Hardened against partial initialization.** `build_catalog()` builds into a local variable first. The module global is only swapped in after `build()` succeeds AND `_validate_completeness()` passes. On any failure, the previous working catalog remains in memory (or stays `None` on first-time failure, causing clean `RuntimeError` on requests). No half-initialized catalog ever serves traffic.
+**Hardened against partial initialization.** `build_catalog()` builds into a local variable first. The module global is only swapped in after `build()` succeeds AND `_validate_completeness()` passes. On any failure, the previous working catalog remains in memory; on first-time failure, requests get a clean `RuntimeError` rather than half-formed answers. No half-initialized catalog ever serves traffic.
 
-**Adding a new batch:** Drop new `.sql` files under `db/modules/<NEW_MODULE>/functions/`, restart. The graph pipeline re-parses everything, the catalog rebuilds, new V_DATA_ORIGIN values and GL codes are picked up automatically. Zero code changes.
+**Adding a new batch.** Drop new `.sql` files under `db/modules/<NEW_MODULE>/functions/`, restart. The graph pipeline re-parses everything, the catalog rebuilds, new `V_DATA_ORIGIN` values and GL codes are picked up automatically. Zero code changes.
 
-### Option A — Data Query Handler
+### Option A — Data Query handler
 
-Option A handles questions where the answer is in the database, not in the code. Aggregation, filter, count, time series — these are raw data questions that need SQL execution, not graph tracing.
+Option A handles questions where the answer is in the database, not in the code. Aggregation, filter, count, time series — raw data questions that need SQL execution, not graph tracing.
 
 ```mermaid
 flowchart TD
     Q(["Total N_EOP_BAL<br/>for V_LV_CODE='ABL'<br/>on 2025-12-31?"])
 
-    S1["1. SQL Generator<br/><i>data_query.py</i><br/>LLM translates NL to SQL<br/>Bind variables only<br/>Prefer aggregation"]
+    S1["1. SQL Generator<br/><i>data_query.py</i><br/>LLM translates NL → SQL<br/>bind variables only<br/>prefer aggregation"]
 
-    S2["2. SQL Guardian<br/><i>sql_guardian.py</i><br/>SELECT-only validation<br/>Reject DML/DDL/PL/SQL"]
+    S2["2. SQL Guardian<br/><i>sql_guardian.py</i><br/>SELECT-only validation<br/>reject DML/DDL/PL/SQL"]
 
     S3{"Query<br/>kind?"}
 
-    S4A["AGGREGATION<br/><i>SUM, COUNT, AVG</i><br/>Execute directly"]
-    S4B["ROW_LIST<br/><i>Row count pre-check<br/>(SAFEGUARD 1)</i>"]
-    S4C["TIME_SERIES<br/><i>FIC_MIS_DATE IN (...)<br/>Deterministic delta</i>"]
+    S4A["AGGREGATION<br/>SUM, COUNT, AVG<br/>execute directly"]
+    S4B["ROW_LIST<br/>row count pre-check<br/>(safeguard 1)"]
+    S4C["TIME_SERIES<br/>FIC_MIS_DATE IN (...)<br/>deterministic delta"]
 
     RCC{"Row<br/>count?"}
-    R1["> 10K → reject<br/><i>Narrowing suggestion</i>"]
-    R2["100 to 10K →<br/><i>Ask user confirmation</i>"]
-    R3["< 100 →<br/><i>FETCH FIRST 100<br/>(SAFEGUARD 3)</i>"]
+    R1["&gt; 10K → reject<br/>narrowing suggestion"]
+    R2["100–10K →<br/>ask user confirmation"]
+    R3["&lt; 100 →<br/>FETCH FIRST 100<br/>(safeguard 3)"]
 
     EX["Oracle execute<br/><i>schema_tools.py</i>"]
 
-    F["Result Formatter<br/><i>Deterministic markdown<br/>No LLM speculation</i>"]
+    SAN["W33 / W86 sanity checks<br/>empty rows / all-null metrics"]
+
+    F["Result Formatter<br/>deterministic markdown<br/>no LLM speculation"]
 
     OUT(["Scalar / table<br/>+ SQL + bind params<br/>+ one-line summary"])
 
@@ -544,10 +687,10 @@ flowchart TD
     S3 -- "AGGREGATION / COUNT" --> S4A --> EX
     S3 -- "ROW_LIST" --> S4B --> RCC
     S3 -- "TIME_SERIES" --> S4C --> EX
-    RCC -- "> 10K" --> R1
-    RCC -- "100-10K" --> R2
-    RCC -- "< 100" --> R3 --> EX
-    EX --> F --> OUT
+    RCC -- "&gt; 10K" --> R1
+    RCC -- "100–10K" --> R2
+    RCC -- "&lt; 100" --> R3 --> EX
+    EX --> SAN --> F --> OUT
 
     style Q fill:#4f46e5,color:#fff,stroke:none
     style S1 fill:#7c3aed,color:#fff,stroke:none
@@ -561,31 +704,30 @@ flowchart TD
     style R2 fill:#d97706,color:#fff,stroke:none
     style R3 fill:#059669,color:#fff,stroke:none
     style EX fill:#9333ea,color:#fff,stroke:none
+    style SAN fill:#dc2626,color:#fff,stroke:none
     style F fill:#d97706,color:#fff,stroke:none
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
 
 **Three safeguards prevent large-dataset incidents:**
 
-1. **Row count pre-check** — For row-list queries, run `COUNT(*)` first with the same WHERE clause. Hard limit of 10,000 rows rejects with a narrowing suggestion. Between 100-10,000 asks the user whether to return rows or a summary. Under 100 executes.
+1. **Row count pre-check** — for row-list queries, run `COUNT(*)` first with the same `WHERE` clause. Hard limit of 10,000 rows rejects with a narrowing suggestion. Between 100–10,000 asks the user whether to return rows or a summary. Under 100 executes.
+2. **Aggregation preference in the LLM prompt** — the SQL generator is explicitly instructed to produce `SUM` / `COUNT` / `AVG` queries when the question can be answered aggregately.
+3. **Mandatory row limit injection** — for row-listing queries that pass the count check, `FETCH FIRST 100 ROWS ONLY` is auto-appended after SQL generation, before execution.
 
-2. **Aggregation preference in the LLM prompt** — The SQL generator is explicitly instructed to produce SUM/COUNT/AVG queries when the question can be answered aggregately. "How many" becomes COUNT. "Total" becomes SUM.
+**Sanity checks (W33, W86).** After execution, deterministic checks examine the result for empty rows on populated tables (W33) or metric columns that are entirely NULL (W86). Either finding flips the badge to UNVERIFIED with an explanatory warning.
 
-3. **Mandatory row limit injection** — For row-listing queries that pass the count check, `FETCH FIRST 100 ROWS ONLY` is auto-appended after SQL generation, before execution.
-
-**Time series presentation.** When a query provides `start_date` and `end_date`, the result table shows BOTH dates explicitly. Missing dates display `no data` placeholders — facts only, no speculation about why. When both dates have data and the target column is numeric, a deterministic delta is computed and displayed.
-
-### Variable Tracer (Phase 1 Fallback)
+### Variable Tracer (Phase 1 fallback)
 
 When a logic query has no matches in the graph's column index, the Variable Tracer is the fallback. It extracts relevant lines from raw source using a hybrid LLM + Python approach.
 
 ```mermaid
 flowchart TD
     UQ(["How is EAD_AMOUNT calculated?"])
-    S1["Stage 1: LLM RESOLVER<br/><i>~500 char prompt</i><br/>EAD_AMOUNT -> LN_EXP_AMOUNT, N_EAD"]
-    S2["Stage 2: PYTHON EXTRACTION<br/><i>Pure Python, no LLM</i><br/>Build alias map + extract ~60-80 lines<br/>Tags: SEED, TRANSFORM, COMMENTED_OUT"]
-    S3["Stage 3: LLM EXPLANATION<br/><i>~300 token prompt, streamed via SSE</i><br/>Business meaning, not SQL syntax"]
-    OUT(["Markdown response<br/><i>with citations</i>"])
+    S1["Stage 1: LLM RESOLVER<br/>~500 char prompt<br/>EAD_AMOUNT → LN_EXP_AMOUNT, N_EAD"]
+    S2["Stage 2: PYTHON EXTRACTION<br/>pure Python, no LLM<br/>build alias map + extract ~60-80 lines<br/>tags: SEED, TRANSFORM, COMMENTED_OUT"]
+    S3["Stage 3: LLM EXPLANATION<br/>~300 token prompt, streamed via SSE<br/>business meaning, not SQL syntax"]
+    OUT(["Markdown response<br/>with citations"])
 
     UQ --> S1 --> S2 --> S3 --> OUT
 
@@ -596,69 +738,59 @@ flowchart TD
     style OUT fill:#4f46e5,color:#fff,stroke:none
 ```
 
-**Primary path vs fallback:**
-- **Graph pipeline** (primary) — used when the target variable is found in the column index. Produces a structured ~300 token payload. No raw source sent to LLM.
-- **Variable Tracer** (fallback) — used when the graph has no matches. Extracts relevant lines from raw source using regex + LLM hybrid.
+---
 
-### Frontend Architecture
+## Verification — the canary triple
 
-```
-React + Vite + Tailwind CSS v4
-    |
-    +-- App.jsx              Main app with model selector
-    +-- pages/Chat.jsx       Chat interface, auto-scroll control
-    +-- components/
-    |     MessageBubble.jsx  User messages (edit, retry, copy)
-    |     |                  Assistant messages (streaming markdown)
-    |     |                  AgentThinking (pipeline stage indicator)
-    |     |                  CodeBlockWithCopy (syntax highlighted)
-    |     ResponseCard.jsx   Structured response cards
-    |     CommandResult.jsx  Slash command output
-    +-- api/client.js        SSE streaming via fetch + ReadableStream
-```
+Three queries exercise the three core capabilities. Run them from the UI (or via `python cli.py ask "…"`) after the backend is up. The expected outcomes below are the trust contract — if any one diverges, something in the setup or the index is wrong.
 
-**SSE event flow:**
-```
-event: stage  -> Updates pipeline stage indicator (classify/trace/stream)
-event: meta   -> Populates function list, origin info, SQL, bind params
-event: token  -> Appends to streaming markdown (rendered incrementally)
-event: done   -> Final metadata (badge, validated, warnings, source_citations,
-                 functions_analyzed, meta, diagnostic — see Trust contract below)
-event: error  -> Error display
+| # | Query | Expected outcome |
+|---|---|---|
+| 1 | `How does FN_LOAD_OPS_RISK_DATA work?` | **UNVERIFIED** badge. Body explains the function. Warnings array contains a `GROUNDING-HIGH:` entry catching either the "pass-through" template phrase or line-198–369 padding fabrication. Route: `COLUMN_LOGIC`, schema `OFSMDM`. |
+| 2 | `What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?` | **VERIFIED** badge. `SUM(N_EOP_BAL) = -24,179,237,139.63` (exact). Route: `DATA_QUERY`, schema `OFSMDM`. SQL contains `V_LV_CODE` and `FIC_MIS_DATE`. |
+| 3 | `How is CAP973 calculated?` | **UNVERIFIED** badge. Body anchors on `CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT`. Warnings array contains a `GROUNDING-HIGH:` entry from the W57 enforcer. |
+
+The first and third are deliberate trust-contract tests: the body looks plausible but contains a fabrication that W57's grounding overlay catches and downgrades. The middle is the deterministic data path — the SUM is exact, not approximate, and stamps the SQL into the response.
+
+The formal canary suite lives at [tests/canary/canaries.yaml](tests/canary/canaries.yaml) (18 queries across 3 tiers); run it with:
+
+```bash
+python tests/canary/run_canaries.py --tier 1     # backend must be running on :8000
+make canary-tier1                                # Makefile wrapper, same thing
 ```
 
 ---
 
-## Trust contract — what badges mean
+## Trust contract — what the badges mean
 
-Every response carries a `badge` field in the `event: done` SSE payload. Three values:
+Every response carries a `badge` field in the `event: done` SSE payload.
 
-**VERIFIED.** The response is grounded in the cited source. Citations resolve to lines in retrieved functions, the chain of cited functions is coherent with `functions_analyzed`, no template-phrase fabrications, no caveat triggers ("possible reasons", "might be because"). Trust the answer.
+**VERIFIED.** The response is grounded in the cited source. Citations resolve to lines in retrieved functions, the chain of cited functions is coherent with `functions_analyzed`, no template-phrase fabrications, no caveat triggers. Trust the answer.
 
-**UNVERIFIED.** The validator detected something off — a function name cited but not in retrieved sources, a line range not present in the cited function, an unsupported paraphrase template, a December-only execution claim that doesn't match the source, or a caveat trigger in the rendered text. The body of the response may still be largely correct, but the warnings array names what failed. Read the cited source before trusting.
+**UNVERIFIED.** The validator detected something off — a function name cited but not in retrieved sources, a line range not present in the cited function, an unsupported paraphrase template, a calendar-gating claim unsupported by source, or a caveat trigger in the rendered text. The body may still be largely correct, but the warnings array names what failed. Read the cited source before trusting.
 
-**DECLINED.** RTIE refused to answer. Reasons include: function name not found in the graph (`function_not_found`), ungrounded identifier in an otherwise unanswerable query (W45), classifier routed to `UNSUPPORTED` (forecasting, cross-table reconciliation, unknown tables), or LLM error surfaced sanitized. The body explains why and (where useful) suggests rephrasing.
+**DECLINED.** RTIE refused to answer. Reasons include: function name not found in the graph (`function_not_found`), ungrounded identifier (W45), partial-source function (W49), unrecognized term (W87), classifier routed to `UNSUPPORTED`, or LLM error surfaced sanitized. The body explains why and (where useful) suggests rephrasing.
 
-**Warning categories** (any one of these in `done.warnings` is meaningful):
+**Warning categories** (any one in `done.warnings` is meaningful):
 
 | Prefix / tag | Severity | Meaning |
 |---|---|---|
-| `GROUNDING-HIGH:` | Blocks the badge → forces UNVERIFIED | W57 content-trust failure: fabricated function name, unsupported template phrase, December-claim mismatch, etc. |
-| `GROUNDING-LOW:` | Advisory; badge stays VERIFIED | W57 citation hygiene: repeated citations, excessive line citations, padding patterns. |
-| `UNGROUNDED_IDENTIFIERS` | Blocks the badge | User named an identifier (column / CAP-code / function) that doesn't appear in any indexed source. |
-| `NAMED_FUNCTION_NOT_RETRIEVED` | Blocks the badge | User named a function whose source wasn't retrieved for this query. |
-| `PARTIAL_SOURCE` | Blocks the badge | Function metadata is indexed but the source body isn't loaded (W49 path). |
-| `CONTRADICTION` | Blocks the badge | Generated content contradicts a known fact (e.g. claimed function purpose vs. graph evidence). |
+| `GROUNDING-HIGH:` | blocks badge → forces UNVERIFIED | W57 content-trust failure: fabricated function name, unsupported template phrase, calendar-claim mismatch |
+| `GROUNDING-LOW:` | advisory; badge stays VERIFIED | W57 citation hygiene: repeated citations, excessive line citations, padding patterns |
+| `UNGROUNDED_IDENTIFIERS` | blocks badge | user named an identifier that doesn't appear in any indexed source |
+| `NAMED_FUNCTION_NOT_RETRIEVED` | blocks badge | user named a function whose source wasn't retrieved for this query |
+| `PARTIAL_SOURCE` | blocks badge | function metadata indexed but source body isn't loaded (W49) |
+| `UNRECOGNIZED_TERM` | blocks badge | no entity-extraction path resolved the user's reference (W87) |
+| `CONTRADICTION` | blocks badge | generated content contradicts a known fact |
+| `suspicious_zero_result` / `suspicious_metric_all_null` | blocks badge | DATA_QUERY sanity check (W33 / W86) flagged result as not-meaningful |
 
 ---
 
 ## API endpoints — `/v1/stream` vs `/v1/query`
 
-**`/v1/stream` is the canonical endpoint.** It returns Server-Sent Events with `event: stage`, `event: meta`, `event: token`, and `event: done`. The `done` payload carries `badge`, `validated`, `warnings`, `explanation`, `meta`, `functions_analyzed`, `source_citations`, and (post-W84) a `diagnostic` block with W81/W70/W76 anchor state. This is what the frontend reads. This is what canary harnesses and benchmark drivers must read.
+**`/v1/stream` is the canonical endpoint.** Returns Server-Sent Events with `event: stage`, `event: meta`, `event: token`, and `event: done`. The `done` payload carries `badge`, `validated`, `warnings`, `explanation`, `meta`, `functions_analyzed`, `source_citations`, and (post-W84) a `diagnostic` block with anchor cascade state. This is what the frontend reads. This is what canary harnesses and benchmark drivers must read.
 
-**`/v1/query` returns raw LangGraph state.** It produces `final_state["output"]` directly and **skips the W57 grounding overlay entirely** — no `badge`, no `warnings`, no validator output. It exists for debugging only. Do not probe `/v1/query` for trust signals; the body prose can look like a logic explanation even when the route is correct. Verify route from the `meta` / `done` fields on `/v1/stream` instead.
-
-If you're writing a script that asserts on a response, use `/v1/stream` and parse the `done` SSE event.
+**`/v1/query` returns raw LangGraph state.** Produces `final_state["output"]` directly and **skips the W57 grounding overlay entirely** — no `badge`, no `warnings`, no validator output. Debugging only. Do not probe `/v1/query` for trust signals; the body prose can look like a logic explanation even when the route is wrong.
 
 ---
 
@@ -666,9 +798,9 @@ If you're writing a script that asserts on a response, use `/v1/stream` and pars
 
 The frontend schema dropdown sends `schema_scope` to the backend with three values:
 
-- **`ALL`** (default) — semantic search fans out across both OFSMDM and OFSERM; the result with the highest relevance wins. Use this when you don't know which schema a function lives in.
-- **`OFSMDM`** — retrieval is constrained to `graph:OFSMDM:*`. Use this when you specifically want the staging/MDM layer.
-- **`OFSERM`** — retrieval is constrained to `graph:OFSERM:*`. Use this for the regulatory/risk computation layer (CAP codes, capital structure functions).
+- **`ALL`** (default) — semantic search fans out across both OFSMDM and OFSERM; highest-relevance result wins. Use when you don't know which schema a function lives in.
+- **`OFSMDM`** — retrieval constrained to `graph:OFSMDM:*`. Use for staging / MDM layer.
+- **`OFSERM`** — retrieval constrained to `graph:OFSERM:*`. Use for regulatory / risk computation layer (CAP codes, capital structure functions).
 
 Schema-aware behavior also threads through `DATA_QUERY` (table-name-to-schema pivot) and the column index (multi-schema column ownership). Single-owner columns pivot; multi-schema columns keep the orchestrator's classification.
 
@@ -690,6 +822,7 @@ python cli.py ask "How is N_EOP_BAL calculated?"
 # Redis hygiene
 docker exec -it rtie-redis redis-cli FLUSHDB   # wipe all keys (force full re-index after)
 docker exec -it rtie-redis redis-cli DBSIZE    # current key count
+docker exec -it rtie-redis redis-cli FT._LIST  # list RediSearch indexes
 
 # Tests
 python -m pytest tests/unit/ -v                                # full unit suite
@@ -709,48 +842,10 @@ cd frontend && npm run lint
 
 1. Drop `.sql` files under `db/modules/<NEW_MODULE>/functions/`. One function or procedure per file. Filename should match the function name (case-insensitive).
 2. Re-index: `python cli.py index --force`.
-3. Restart the backend: graph pipeline re-parses everything, origins catalog auto-rebuilds at startup, new `V_DATA_ORIGIN` literals and GL block-list codes get picked up.
+3. Restart the backend: graph pipeline re-parses everything, origins catalog auto-rebuilds, new `V_DATA_ORIGIN` literals and GL block-list codes get picked up.
 4. Verify with `python cli.py status` — function count should reflect the new additions.
 
 No code changes required to add a new module. The catalog system is hardened against partial initialization — if a rebuild fails, the previous catalog stays in memory; on first-time failure, requests get a clean `RuntimeError` rather than half-formed answers.
-
----
-
-## Where to go next
-
-- [CLAUDE.md](../CLAUDE.md) (one level above `RTIE/`) — agent guidance, project conventions, things-not-to-do, where-to-look-first map for common bug surfaces.
-- [docs/](docs/) — W-ticket history. W35 is the active schema-aware refactor; W57 family is the trust contract; W76/W70/W78/W78a/W81/W83a are anchor/grounding work; W84 added diagnostic exposure in `/v1/stream`.
-- [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) — clean-machine Windows walkthrough (Git, WSL 2, Docker Desktop, all download links).
-- [docs/ARCHITECTURE_OVERVIEW.md](docs/ARCHITECTURE_OVERVIEW.md) — the deeper diagrams and pipeline shapes.
-- [docs/RTIE_Weakness_Log.md](docs/RTIE_Weakness_Log.md) — known regressions, brittle paths, fix-vs-paper trade-offs.
-- [tests/canary/canaries.yaml](tests/canary/canaries.yaml) — the full 18-query canary set with assertions and tier annotations.
-- `scratch/` — captured benchmark runs (`v2_benchmark_run*.md`), one-off canary drivers (`w70_canary_*.py`), W-ticket experiments. Useful for "what did W57 actually change?" archaeology.
-
----
-
-## Troubleshooting
-
-**Backend fails to start with `RuntimeError: Cannot run the event loop ...`** — you ran `uvicorn src.main:app` directly. Always use `python run.py` on Windows. `run.py` sets the Selector event loop policy that psycopg requires.
-
-**`.env.dev` missing.** It's gitignored. Copy from `.env.example` and fill in real values. Per the W35 worktree gotchas in `CLAUDE.md`, if you're using a parallel git worktree (`git worktree add ../RTIE-<branch>`), the `.env.dev` does NOT come with it — copy it across explicitly before `python run.py`.
-
-**Oracle connection refused (`oracledb.exceptions.DatabaseError: DPY-6005`).** Check `ORACLE_HOST` / `ORACLE_PORT` / `ORACLE_SID` in `.env.dev`. On Windows test the network path with `Test-NetConnection -ComputerName <ORACLE_HOST> -Port 1521`. If `TcpTestSucceeded: False`, the issue is VPN or firewall, not RTIE.
-
-**`ORA-00942: table or view does not exist` on canary queries.** The current `schema_scope` doesn't have access to the table. Either switch the dropdown to the right schema or set it to `ALL`. If the table genuinely doesn't exist in the deployment, the canary expectation needs adjusting; see `tests/canary/canaries.yaml` `needs_local_data` notes.
-
-**Canary results don't match expected outcomes.** Most often this is a stale Redis index after a parser change or a partial re-index. Wipe and rebuild:
-
-```bash
-docker exec -it rtie-redis redis-cli FLUSHDB
-python cli.py index --force
-python run.py
-```
-
-**Redis container not running (`redis.exceptions.ConnectionError`).** Run `docker ps` — if `rtie-redis` isn't listed, `docker compose up -d` to bring it back. The Redis Stack image (not vanilla Redis) is required because RediSearch powers the vector index.
-
-**Parallel-worktree friction.** Two specific gotchas, per `CLAUDE.md`: (1) `.env.dev` is gitignored, so a new worktree starts with no env file — copy it explicitly. (2) `sys.path` may pin to the original checkout's `src/`. In PowerShell, set `$env:PYTHONPATH = (Get-Location).Path + '\src'` before starting the worktree's backend. Verify the worktree's code is actually running by hitting a query and grepping the *worktree's* `logs/app.log` (not the original's) for a known signature line.
-
-**`event: done` payload has no `badge` field.** You're reading `/v1/query`, not `/v1/stream`. `/v1/query` returns raw LangGraph state and skips the W57 overlay. Switch to `/v1/stream`.
 
 ---
 
@@ -760,7 +855,7 @@ The loader is `load_dotenv(f".env.{ENVIRONMENT}")` in [src/main.py](src/main.py)
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `OPENAI_API_KEY` | OpenAI auth | (required) |
+| `OPENAI_API_KEY` | OpenAI auth (required for embeddings even with Claude generation) | (required) |
 | `OPENAI_MODEL` | Default OpenAI model | `gpt-4o-mini` |
 | `ANTHROPIC_API_KEY` | Anthropic auth | (optional) |
 | `ANTHROPIC_MODEL` | Default Claude model | `claude-sonnet-4-20250514` |
@@ -773,3 +868,64 @@ The loader is `load_dotenv(f".env.{ENVIRONMENT}")` in [src/main.py](src/main.py)
 | `ENVIRONMENT` | Selects `.env.{ENVIRONMENT}` | `dev` |
 
 The `docker-compose.yml` hardcodes `POSTGRES_PASSWORD=postgres123`; either match that in `.env.dev` or edit the compose file.
+
+---
+
+## Troubleshooting
+
+**Backend fails to start with `RuntimeError: Cannot run the event loop ...`** — you ran `uvicorn src.main:app` directly. Always use `python run.py` on Windows. `run.py` sets the Selector event loop policy that psycopg requires.
+
+**`.env.dev` missing.** It's gitignored. Copy from `.env.example` and fill in real values. If you're using a parallel git worktree (`git worktree add ../RTIE-<branch>`), `.env.dev` does NOT come with it — copy it across explicitly before `python run.py`.
+
+**Oracle connection refused (`oracledb.exceptions.DatabaseError: DPY-6005`).** Check `ORACLE_HOST` / `ORACLE_PORT` / `ORACLE_SID` in `.env.dev`. On Windows, test the network path with `Test-NetConnection -ComputerName <ORACLE_HOST> -Port 1521`. If `TcpTestSucceeded: False`, the issue is VPN or firewall, not RTIE.
+
+**`ORA-00942: table or view does not exist` on canary queries.** The current `schema_scope` doesn't have access to the table. Switch the dropdown to the right schema or set it to `ALL`. If the table genuinely doesn't exist in the deployment, the canary expectation needs adjusting; see `tests/canary/canaries.yaml` `needs_local_data` notes.
+
+**Canary results don't match expected outcomes.** Most often this is a stale Redis index after a parser change or a partial re-index. Wipe and rebuild:
+
+```bash
+docker exec -it rtie-redis redis-cli FLUSHDB
+python cli.py index --force
+python run.py
+```
+
+**Redis container not running (`redis.exceptions.ConnectionError`).** `docker ps` — if `rtie-redis` isn't listed, `docker compose up -d rtie-redis` to bring it back. The Redis Stack image (not vanilla Redis) is required because RediSearch powers the vector index.
+
+**Parallel-worktree friction.** Two specific gotchas: (1) `.env.dev` is gitignored, so a new worktree starts with no env file — copy it explicitly. (2) `sys.path` may pin to the original checkout's `src/`. In PowerShell, set `$env:PYTHONPATH = (Get-Location).Path + '\src'` before starting the worktree's backend. Verify the worktree's code is actually running by hitting a query and grepping the *worktree's* `logs/app.log` for a known signature line.
+
+**`event: done` payload has no `badge` field.** You're reading `/v1/query`, not `/v1/stream`. `/v1/query` returns raw LangGraph state and skips the W57 overlay. Switch to `/v1/stream`.
+
+**Docker backend healthcheck stays "starting" past 30 minutes.** Cold-start indexing is taking longer than expected. Tail `docker compose logs -f rtie-backend` — if the loader/indexer log lines aren't progressing, OpenAI key is likely missing or rate-limited.
+
+**Docker Oracle connection fails.** Confirm `ORACLE_HOST` is reachable from inside the container: `docker compose exec rtie-backend curl -v telnet://$ORACLE_HOST:$ORACLE_PORT`. From a developer laptop where Oracle runs locally, use `host.docker.internal` (Windows / macOS) instead of `localhost`.
+
+**Docker port conflicts (5173 / 8000 / 6379 / 5432 already in use).** Either stop the conflicting process or remap the host-side port in `docker-compose.yml` (`"5174:80"` etc.).
+
+**RediSearch errors at startup in Docker.** Confirm the Redis image is `redis/redis-stack:latest` — plain `redis:alpine` does NOT include RediSearch and the vector store will fail at `FT.CREATE`.
+
+---
+
+## Where to go next
+
+- [CLAUDE.md](../CLAUDE.md) — agent guidance, project conventions, things-not-to-do, where-to-look-first map for common bug surfaces.
+- [docs/](docs/) — W-ticket history. W35 is the active schema-aware refactor; W57 family is the trust contract; W76/W70/W78/W78a/W81/W83a/W83B/W83C are anchor/grounding work; W84 added diagnostic exposure in `/v1/stream`; W87 is the unrecognized-term gate; W89 is chain ordering.
+- [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) — clean-machine Windows walkthrough.
+- [docs/ARCHITECTURE_OVERVIEW.md](docs/ARCHITECTURE_OVERVIEW.md) — deeper diagrams and pipeline shapes.
+- [docs/RTIE_Weakness_Log.md](docs/RTIE_Weakness_Log.md) — known regressions, brittle paths, fix-vs-paper trade-offs, priority queue.
+- [tests/canary/canaries.yaml](tests/canary/canaries.yaml) — the full 18-query canary set with assertions and tier annotations.
+- `scratch/` — captured benchmark runs (`v2_benchmark_run*.md`), one-off canary drivers, W-ticket experiments. Useful for "what did W57 actually change?" archaeology.
+
+---
+
+## Project status
+
+RTIE is under active development. The architecture is stable; correctness work is ongoing.
+
+- **OFSMDM** schema — fully indexed, production-ready. Most current canaries pass against OFSMDM.
+- **OFSERM** schema — half-indexed. Functions are parsed (W38), hierarchy works (W39), Phase 1-4 of W35 shipped schema-aware foundations + per-schema indexes + source retrieval + orchestrator routing. Phases 5-7 (business-identifier indexing and routing for CAP codes, named-computation pre-router) are the remaining unlocks for OFSERM regulatory-calculation queries.
+
+See `docs/RTIE_Weakness_Log.md` for the current priority queue.
+
+---
+
+*RTIE is built at Techlogix for bank-side OFSAA regulatory analysis. The architecture prioritizes verifiability over flexibility; the trust contract is non-negotiable.*
