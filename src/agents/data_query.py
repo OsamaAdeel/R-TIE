@@ -27,6 +27,12 @@ from src.agents.ambiguity import (
     build_identifier_ambiguous_response,
     detect_identifier_ambiguity,
 )
+from src.agents.computation_router import (
+    build_anchor_plan,
+    build_decline_payload,
+    detect_named_computation,
+    resolve_skey_for_anchor,
+)
 from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
@@ -313,63 +319,132 @@ class DataQueryAgent:
                 schema, target_schema,
             )
 
-        yield ("stage", "search", "Building schema catalog...")
-        try:
-            with stage_timer("data_query_schema_catalog_build", correlation_id):
-                catalog_text, tables_to_columns, column_types = self._build_schema_catalog(
-                    target_schema, qualify_in_prompt=(target_schema != _DEFAULT_LEGACY_SCHEMA)
-                )
-        except Exception as exc:
-            logger.warning("DataQuery catalog build failed: %s", exc)
-            catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
+        # W88: named regulatory computation pre-router. When the query
+        # names a Basel-defined computation (BIA, CET1, CAR, ...), short-
+        # circuit LLM SQL generation with canonical SQL against the known
+        # fact table, or emit an honest-decline payload for items that
+        # aren't answerable from the loaded data (Leverage Ratio, LCR,
+        # NSFR). See src/agents/computation_router.py for the registry.
+        w88_match = detect_named_computation(
+            raw_query=user_query,
+            query_type="DATA_QUERY",
+        )
+        w88_plan: Optional[dict] = None
+        if w88_match is not None:
+            logger.info(
+                "W88 pre-router matched | computation=%s arm=%s pattern=%r",
+                w88_match.definition.name,
+                w88_match.definition.arm,
+                w88_match.matched_pattern,
+            )
+            if w88_match.definition.arm == "decline":
+                yield ("result", build_decline_payload(
+                    anchor=w88_match,
+                    user_query=user_query,
+                    correlation_id=correlation_id,
+                ))
+                return
+            # Anchor arm — resolve SKEY (no-op for cap_code anchors)
+            # then build canonical SQL plan. SKEY lookup failure
+            # degrades to decline rather than guessing.
+            skey = await resolve_skey_for_anchor(
+                w88_match, self._schema_tools,
+            )
+            w88_plan = build_anchor_plan(w88_match, skey)
+            if w88_plan is None:
+                yield ("result", build_decline_payload(
+                    anchor=w88_match,
+                    user_query=user_query,
+                    correlation_id=correlation_id,
+                    skey_unresolved=True,
+                ))
+                return
+            yield (
+                "stage", "search",
+                f"W88: routing via canonical anchor for "
+                f"{w88_match.definition.long_name}...",
+            )
+
+        if w88_plan is not None:
+            # Skip catalog build, identifier-ambiguity check, and LLM SQL
+            # generation. The W88 SQL is canonical; column residency and
+            # CHAR-padding checks downstream no-op against empty maps.
+            catalog_text = ""
             tables_to_columns = {}
             column_types = {}
+        else:
+            yield ("stage", "search", "Building schema catalog...")
+            try:
+                with stage_timer("data_query_schema_catalog_build", correlation_id):
+                    catalog_text, tables_to_columns, column_types = self._build_schema_catalog(
+                        target_schema, qualify_in_prompt=(target_schema != _DEFAULT_LEGACY_SCHEMA)
+                    )
+            except Exception as exc:
+                logger.warning("DataQuery catalog build failed: %s", exc)
+                catalog_text = "(schema catalog unavailable — rely on commonly-known OFSAA STG tables)"
+                tables_to_columns = {}
+                column_types = {}
 
         # Identifier-ambiguity check — short-circuits before SQL generation
         # when the target column lives on multiple tables and the user gave
         # only a bare identifier. Detection is a pure catalog lookup.
-        ambiguity_candidates = detect_identifier_ambiguity(
-            target_column=target_variable,
-            filters=filters,
-            tables_to_columns=tables_to_columns,
-            user_query=user_query,
-        )
-        if ambiguity_candidates:
-            logger.info(
-                "DataQuery identifier ambiguous | target=%s candidates=%s",
-                target_variable,
-                [c["table"] for c in ambiguity_candidates],
-            )
-            yield ("result", build_identifier_ambiguous_response(
-                target_column=(target_variable or "").strip().upper(),
+        # Skipped under W88 short-circuit: the anchor's SQL references
+        # only the canonical fact table, so identifier-ambiguity can't
+        # arise by construction.
+        if w88_plan is None:
+            ambiguity_candidates = detect_identifier_ambiguity(
+                target_column=target_variable,
                 filters=filters,
+                tables_to_columns=tables_to_columns,
                 user_query=user_query,
-                candidates=ambiguity_candidates,
-            ))
-            return
-
-        yield ("stage", "generating_sql", "Generating SQL for your question...")
-        try:
-            with stage_timer("llm_api_sql_generate", correlation_id, provider=(provider or "default")):
-                plan = await self._generate_sql(
-                    user_query=user_query,
-                    filters=filters,
-                    catalog_text=catalog_text,
-                    provider=provider,
-                    model=model,
+            )
+            if ambiguity_candidates:
+                logger.info(
+                    "DataQuery identifier ambiguous | target=%s candidates=%s",
+                    target_variable,
+                    [c["table"] for c in ambiguity_candidates],
                 )
-        except Exception as exc:
-            logger.error("DataQuery SQL generation failed: %s", exc)
-            yield ("result", self._error_result(
-                status="generation_error",
-                user_query=user_query,
-                explanation=(
-                    "I couldn't turn your question into a SQL query. "
-                    f"Reason: {exc}. Try rephrasing with explicit column / "
-                    "filter names."
-                ),
-            ))
-            return
+                yield ("result", build_identifier_ambiguous_response(
+                    target_column=(target_variable or "").strip().upper(),
+                    filters=filters,
+                    user_query=user_query,
+                    candidates=ambiguity_candidates,
+                ))
+                return
+
+        if w88_plan is not None:
+            # W88 short-circuit: skip LLM generation entirely. The
+            # canonical SQL is already built; fall through to Guardian
+            # validation + execute.
+            plan = w88_plan
+            yield (
+                "stage", "generating_sql",
+                f"W88: using canonical SQL for "
+                f"{w88_match.definition.long_name}.",
+            )
+        else:
+            yield ("stage", "generating_sql", "Generating SQL for your question...")
+            try:
+                with stage_timer("llm_api_sql_generate", correlation_id, provider=(provider or "default")):
+                    plan = await self._generate_sql(
+                        user_query=user_query,
+                        filters=filters,
+                        catalog_text=catalog_text,
+                        provider=provider,
+                        model=model,
+                    )
+            except Exception as exc:
+                logger.error("DataQuery SQL generation failed: %s", exc)
+                yield ("result", self._error_result(
+                    status="generation_error",
+                    user_query=user_query,
+                    explanation=(
+                        "I couldn't turn your question into a SQL query. "
+                        f"Reason: {exc}. Try rephrasing with explicit column / "
+                        "filter names."
+                    ),
+                ))
+                return
 
         if plan.get("unsupported"):
             yield ("result", {
@@ -680,7 +755,7 @@ class DataQueryAgent:
                 f"{suspicion_reason}\n\n" + explanation
             )
 
-        yield ("result", {
+        result_payload = {
             "status": "answered",
             "query_kind": query_kind,
             "schema": target_schema,
@@ -698,7 +773,14 @@ class DataQueryAgent:
             "suspicion_reason": suspicion_reason if suspicious else None,
             "verification_sql": count_sql or exec_sql,
             "correlation_id": correlation_id,
-        })
+        }
+        # W88: propagate the pre-router anchor metadata onto the
+        # answered-aggregate result so main.py's done-payload builder
+        # can expose it. The plan dict carries `w88_anchor` only when
+        # the W88 short-circuit fired; non-W88 paths leave it absent.
+        if isinstance(plan, dict) and plan.get("w88_anchor"):
+            result_payload["w88_anchor"] = plan["w88_anchor"]
+        yield ("result", result_payload)
 
     # -----------------------------------------------------------------
     # Internal helpers

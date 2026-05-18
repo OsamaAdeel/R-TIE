@@ -1299,6 +1299,304 @@ def w80_cap_code_regression():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W88 — Named regulatory computation pre-router (DATA_QUERY)
+# ---------------------------------------------------------------------------
+#
+# W88 inserts a deterministic pre-router between _resolve_target_schema
+# and _build_schema_catalog in data_query.py. Two arms:
+#
+#   anchor  — emits canonical SQL against OFSERM.FCT_OPS_RISK_DATA
+#             (method-skey filter) or OFSERM.FCT_STANDARD_ACCT_HEAD
+#             (CAP-code filter). Six v1 items: BIA, CREDIT_RWA_AGG,
+#             MARKET_RWA_AGG, CET1, TIER1, CAR.
+#   decline — honest UNVERIFIED payload explaining why the computation
+#             isn't answerable from the loaded data. Three v1 items:
+#             LEVERAGE_RATIO, LCR, NSFR.
+#
+# Pre-W88 every one of these queries fabricated SQL against OFSMDM
+# staging (ABL_OPS_RISK_DATA), returned VERIFIED-but-null, and missed
+# the actual OFSERM fact tables entirely (see docs/w88_diagnostic.md
+# Section 3: "0 of 15 routed to OFSERM").
+
+# Anchor canaries — one per anchor-arm computation. Each asserts:
+#   1. response routed via W88 (w88_anchor.name matches)
+#   2. SQL references the canonical OFSERM fact table
+#   3. result is non-null (the computation IS reachable in the
+#      current Oracle per diagnostic Section 2)
+
+
+def _w88_done_w88_anchor(d):
+    """Extract the w88_anchor metadata from a done payload.
+
+    The anchor block flows through the plan dict into the result
+    payload at the existing serialization layer. If a future change
+    drops this field, every W88 anchor canary will fail with a clear
+    'no w88_anchor in done payload' message rather than a confusing
+    SQL-content assertion miss.
+    """
+    return d.get("w88_anchor") or {}
+
+
+def _w88_done_w88_decline(d):
+    return d.get("w88_decline") or {}
+
+
+@test("W88 — BIA routes to FCT_OPS_RISK_DATA via method-skey anchor")
+def w88_bia_anchor():
+    r = run_query(
+        "What is the operational risk capital charge under "
+        "Basic Indicator Approach on 2025-12-31?"
+    )
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    sql = (d.get("sql") or "").upper()
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_bia": anchor.get("name") == "BIA",
+        "target_table_ops_risk": "FCT_OPS_RISK_DATA" in (anchor.get("target_table") or ""),
+        "sql_uses_method_skey": "N_BASEL_METHOD_SKEY" in sql,
+        "result_non_null": first_value is not None,
+        "type_data_query": d.get("type") == "data_query",
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = (
+        summarize_done(d)
+        + f" anchor={anchor.get('name')!r}"
+        + f" first_value={first_value!r}"
+    )
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — CET1 routes to FCT_STANDARD_ACCT_HEAD via CAP960")
+def w88_cet1_anchor():
+    r = run_query("What is the CET1 ratio on 2025-12-31?")
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    sql = (d.get("sql") or "").upper()
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_cet1": anchor.get("name") == "CET1",
+        "target_table_std_acct_head": "FCT_STANDARD_ACCT_HEAD" in (anchor.get("target_table") or ""),
+        "sql_filters_cap960": "CAP960" in (d.get("params") or {}).get("w88_cap_code", ""),
+        "result_ratio_in_range": isinstance(first_value, (int, float)) and 0 < float(first_value) < 1,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = (
+        summarize_done(d)
+        + f" anchor={anchor.get('name')!r}"
+        + f" cet1_value={first_value!r}"
+    )
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — Tier 1 ratio routes via CAP214")
+def w88_tier1_anchor():
+    r = run_query("What is the Tier 1 capital ratio on 2025-12-31?")
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_tier1": anchor.get("name") == "TIER1",
+        "filter_cap214": "CAP214" in (anchor.get("filter") or ""),
+        "result_ratio_in_range": isinstance(first_value, (int, float)) and 0 < float(first_value) < 1,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" tier1={first_value!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — Total Capital Ratio (CAR) routes via CAP192")
+def w88_car_anchor():
+    # Date phrasing matters: without "on <date>", the classifier
+    # routes "Capital Adequacy Ratio" to FUNCTION_LOGIC / VARIABLE_TRACE
+    # and W87 intercepts before W88 can run. Diagnostic Section 3
+    # tested all 15 queries with dates; we follow that convention.
+    r = run_query("What is the Capital Adequacy Ratio on 2025-12-31?")
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_car": anchor.get("name") == "CAR",
+        "filter_cap192": "CAP192" in (anchor.get("filter") or ""),
+        "result_ratio_present": isinstance(first_value, (int, float)) and float(first_value) > 0,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" car={first_value!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — Credit RWA aggregate routes via CAP169")
+def w88_credit_rwa_anchor():
+    r = run_query("What is the total Credit Risk RWA on 2025-12-31?")
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_credit_rwa": anchor.get("name") == "CREDIT_RWA_AGG",
+        "filter_cap169": "CAP169" in (anchor.get("filter") or ""),
+        "result_non_null": first_value is not None,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" credit_rwa={first_value!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — Market RWA aggregate routes via CAP090")
+def w88_market_rwa_anchor():
+    r = run_query("What is the total Market Risk RWA on 2025-12-31?")
+    d = r["done"] or {}
+    anchor = _w88_done_w88_anchor(d)
+    rows = d.get("rows") or []
+    first_value = (rows[0][0] if rows and rows[0] else None)
+
+    checks = {
+        "anchor_name_market_rwa": anchor.get("name") == "MARKET_RWA_AGG",
+        "filter_cap090": "CAP090" in (anchor.get("filter") or ""),
+        "result_non_null": first_value is not None,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" market_rwa={first_value!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+# Decline canaries — three items not answerable from local Oracle.
+# Each asserts that W88 fires with the right decline metadata, the
+# response is UNVERIFIED, and no SQL was executed (sql=None).
+
+
+@test("W88 — Leverage Ratio decline (placeholder not computed)")
+def w88_leverage_decline():
+    r = run_query("What is the leverage ratio on 2025-12-31?")
+    d = r["done"] or {}
+    decline = _w88_done_w88_decline(d)
+    explanation = d.get("explanation") or ""
+    if isinstance(explanation, dict):
+        explanation = explanation.get("markdown", "")
+
+    checks = {
+        "decline_name_leverage": decline.get("name") == "LEVERAGE_RATIO",
+        "no_sql_executed": d.get("sql") is None,
+        "badge_rejected": d.get("badge") == "REJECTED",
+        "explains_placeholder": "placeholder" in explanation.lower() or "0.0" in explanation,
+        "suggests_alternative": "Tier 1" in explanation,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" decline={decline.get('name')!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — LCR decline (no fact table in this OFSAA module)")
+def w88_lcr_decline():
+    r = run_query("What is the Liquidity Coverage Ratio on 2025-12-31?")
+    d = r["done"] or {}
+    decline = _w88_done_w88_decline(d)
+    explanation = d.get("explanation") or ""
+    if isinstance(explanation, dict):
+        explanation = explanation.get("markdown", "")
+
+    checks = {
+        "decline_name_lcr": decline.get("name") == "LCR",
+        "no_sql_executed": d.get("sql") is None,
+        "badge_rejected": d.get("badge") == "REJECTED",
+        "explains_module_scope": (
+            "OFSAA" in explanation
+            and ("Liquidity Risk Management" in explanation or "not loaded" in explanation.lower())
+        ),
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" decline={decline.get('name')!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+@test("W88 — NSFR decline (no fact table in this OFSAA module)")
+def w88_nsfr_decline():
+    r = run_query("What is the Net Stable Funding Ratio on 2025-12-31?")
+    d = r["done"] or {}
+    decline = _w88_done_w88_decline(d)
+    explanation = d.get("explanation") or ""
+    if isinstance(explanation, dict):
+        explanation = explanation.get("markdown", "")
+
+    checks = {
+        "decline_name_nsfr": decline.get("name") == "NSFR",
+        "no_sql_executed": d.get("sql") is None,
+        "badge_rejected": d.get("badge") == "REJECTED",
+        "explains_module_scope": "OFSAA" in explanation,
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d) + f" decline={decline.get('name')!r}"
+    if failed:
+        extra += f" FAILED_CHECKS={failed}"
+    return passed, extra
+
+
+# Regression canaries — existing DATA_QUERY paths must still work.
+
+
+@test("W88 — regression: F_EXPOSURE_ENABLED_IND query unaffected")
+def w88_regression_w33_canary():
+    """The W33 CHAR-padding canary at TEST 9 — a generic DATA_QUERY
+    that does not name any registered computation. W88's pre-router
+    must be a no-op here: the existing LLM SQL path runs, the W33 CHAR
+    fix still applies, and the response badges VERIFIED with a numeric
+    answer. If W88 over-matches and intercepts this query, the result
+    will lose its data shape — that's the failure mode this test
+    guards against.
+    """
+    r = run_query(
+        "How many accounts have F_EXPOSURE_ENABLED_IND='N' on 2025-12-31?"
+    )
+    d = r["done"] or {}
+    # W88 anchor metadata MUST be absent — this is a non-W88 query.
+    w88_anchor = d.get("w88_anchor")
+    w88_decline = d.get("w88_decline")
+    passed = (
+        d.get("type") == "data_query"
+        and d.get("badge") == "VERIFIED"
+        and d.get("status") == "answered"
+        and w88_anchor is None
+        and w88_decline is None
+    )
+    extra = summarize_done(d) + f" w88_anchor={w88_anchor!r} w88_decline={w88_decline!r}"
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:
