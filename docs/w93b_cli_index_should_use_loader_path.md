@@ -1,6 +1,6 @@
 # W93b — `cli.py index` should default to `index_all_loaded`
 
-**Status:** Backlog — small fix; do before any future indexer work touches the CLI.
+**Status:** RESOLVED 2026-05-18 — default switched to `index_all_loaded`; `--from-disk` preserved as opt-in. Closing entry in [RTIE_Weakness_Log.md](RTIE_Weakness_Log.md) under "W93b". Merge SHA pending.
 **Discovered during:** W93 verification run (2026-05-16).
 
 ## The footgun

@@ -1,10 +1,23 @@
 """RTIE CLI — Test the semantic search pipeline directly.
 
 Usage:
-    python cli.py index                    Index all modules
-    python cli.py index --force            Force re-index all
+    python cli.py index                    Index loader-validated functions (default; safe)
+    python cli.py index --force            Re-embed loader-validated functions (skip cache)
+    python cli.py index --from-disk        Walk db/modules/* on disk (W93b opt-in)
+    python cli.py index --from-disk --force  Same, forcing re-embed
     python cli.py status                   Check index status
     python cli.py ask "your question"      Ask a question
+
+Notes:
+    The default `index` path reads loader-populated ``graph:<schema>:<fn>``
+    keys from Redis (same path the backend lifespan uses at startup) — it
+    requires the loader to have run at least once. Start the backend via
+    ``python run.py`` before first use.
+
+    ``--from-disk`` walks ``db/modules/*`` directly and embeds every .sql
+    file, including functions the loader rejected. Pre-W93b default — kept
+    as an opt-in for rebuilds outside the loader's view; not recommended
+    for normal use.
 """
 
 import asyncio
@@ -39,8 +52,20 @@ async def get_clients():
     return vs, cache
 
 
-async def cmd_index(force: bool = False):
-    """Index all modules."""
+async def cmd_index(force: bool = False, from_disk: bool = False):
+    """Index functions for semantic search.
+
+    Default (`from_disk=False`) — calls :meth:`IndexerAgent.index_all_loaded`,
+    the same Phase-3 path the backend lifespan uses ([main.py:562](src/main.py)).
+    Scans ``graph:<schema>:<fn>`` keys in Redis so the indexed corpus exactly
+    matches the corpus the rest of RTIE serves answers from. Loader must have
+    run at least once (start the backend via ``python run.py`` first).
+
+    ``from_disk=True`` (W93b opt-in) — calls :meth:`IndexerAgent.index_all_modules`,
+    the pre-W93b path that walks ``db/modules/*`` and embeds every .sql file,
+    including functions the loader rejected. Kept as an escape hatch for
+    rebuilds outside the loader's view; not the recommended default.
+    """
     from src.agents.indexer import IndexerAgent
 
     vs, _ = await get_clients()
@@ -52,21 +77,62 @@ async def cmd_index(force: bool = False):
         llm_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     )
 
-    print("Indexing all modules...")
-    result = await indexer.index_all_modules(force=force)
+    if from_disk:
+        print(
+            "Indexing db/modules/* from disk "
+            "(--from-disk; includes loader-rejected files)..."
+        )
+        result = await indexer.index_all_modules(force=force)
 
-    for module, info in result.get("results", {}).items():
-        print(f"\n  Module: {module}")
-        print(f"  Total: {info.get('total_functions', 0)}")
-        print(f"  Indexed: {info.get('indexed', 0)}")
-        print(f"  Skipped: {info.get('skipped', 0)}")
-        print(f"  Errors: {info.get('errors', 0)}")
-        if info.get("indexed_functions"):
-            print(f"  Indexed: {', '.join(info['indexed_functions'])}")
-        if info.get("error_details"):
-            for e in info["error_details"]:
-                print(f"  ERROR: {e['name']} — {e['error']}")
+        for module, info in result.get("results", {}).items():
+            print(f"\n  Module: {module}")
+            print(f"  Total: {info.get('total_functions', 0)}")
+            print(f"  Indexed: {info.get('indexed', 0)}")
+            print(f"  Skipped: {info.get('skipped', 0)}")
+            print(f"  Errors: {info.get('errors', 0)}")
+            if info.get("indexed_functions"):
+                print(f"  Indexed: {', '.join(info['indexed_functions'])}")
+            if info.get("error_details"):
+                for e in info["error_details"]:
+                    print(f"  ERROR: {e['name']} — {e['error']}")
 
+        await vs.close()
+        return
+
+    # Default path: loader-validated.
+    import redis as _redis
+
+    graph_redis = _redis.Redis(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+    )
+
+    print("Indexing loader-validated functions (graph:<schema>:<fn>)...")
+    result = await indexer.index_all_loaded(
+        graph_redis_client=graph_redis,
+        force=force,
+    )
+
+    per_schema = result.get("results") or {}
+    if not per_schema:
+        print(
+            "\n  No schemas discovered — no graph:<schema>:<fn> keys in Redis.\n"
+            "  Run the backend at least once (`python run.py`) to load functions,\n"
+            "  or use `python cli.py index --from-disk` to walk db/modules/* directly."
+        )
+    else:
+        for schema, info in per_schema.items():
+            print(
+                f"\n  Auto-index {schema}: "
+                f"{info.get('indexed', 0)} indexed, "
+                f"{info.get('skipped', 0)} skipped, "
+                f"{info.get('errors', 0)} errors"
+            )
+
+    try:
+        graph_redis.close()
+    except Exception:
+        pass
     await vs.close()
 
 
@@ -225,8 +291,12 @@ async def main():
     cmd = args[0]
 
     if cmd == "index":
+        if "--help" in args or "-h" in args:
+            print(__doc__)
+            return
         force = "--force" in args
-        await cmd_index(force=force)
+        from_disk = "--from-disk" in args
+        await cmd_index(force=force, from_disk=from_disk)
     elif cmd == "status":
         await cmd_status()
     elif cmd == "ask" and len(args) > 1:
