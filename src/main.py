@@ -41,6 +41,7 @@ from src.agents.anchor_resolution import (
     ensure_anchor_in_search_results,
     resolve_search_query,
 )
+from src.agents.graph_rerank import rerank_with_rrf
 from src.agents.retrieval_config import resolve_top_k
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
@@ -1162,6 +1163,26 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         "main.semantic_search", correlation_id,
                     )
 
+            # W80c: hybrid graph + vector rerank. 1-hop expansion from
+            # the top-3 vector hits via the cross-function edges already
+            # persisted at graph:full:<schema>, then RRF fuses cosine
+            # rank with edge-derived signals so multi-stage chain
+            # functions (the significant-investment canary's 3 missing
+            # targets ranked 8/12/18 by pure cosine) climb into the
+            # surfacing set. Gated on VARIABLE_TRACE / COLUMN_LOGIC and
+            # on _graph_redis availability. Best-effort — any failure
+            # leaves search_results untouched. Stamps
+            # state["graph_rerank_stats"] so the meta event surfaces
+            # seed/expanded/rank_change counts for canary measurement.
+            # Must run BEFORE ensure_anchor_in_search_results so W95's
+            # position-0 injection isn't displaced by the rerank.
+            apply_w80c_rerank(
+                state,
+                redis_client=_graph_redis,
+                correlation_id=correlation_id,
+                schema_scope=schema_scope,
+            )
+
             # W95: anchor resolution (W76 / BI routing) must be reflected
             # in downstream retrieval, not just embedding bias. When the
             # anchored function ranked outside the vector-search top-K
@@ -1207,6 +1228,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "schema_searched": list(state.get("schemas_searched", []) or []),
                 "schema_scope": schema_scope,
                 "correlation_id": correlation_id,
+                # W80c telemetry: status + (when status=ok) seed_count,
+                # expanded_count, kept_count, rank_change_count. Always
+                # populated post-vector-search; status="skipped_*" when
+                # the gate was closed (FUNCTION_LOGIC, no redis, etc.).
+                "graph_rerank": state.get("graph_rerank_stats") or {},
             }
             yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
 
@@ -1920,6 +1946,106 @@ async def _run_scoped_vector_search(
     )
     contributed = [schema_scope] if hits else []
     return hits, contributed
+
+
+_W80C_RERANK_QUERY_TYPES: frozenset[str] = frozenset({"VARIABLE_TRACE", "COLUMN_LOGIC"})
+
+
+def apply_w80c_rerank(
+    state: Dict[str, Any],
+    *,
+    redis_client: Any,
+    correlation_id: str,
+    schema_scope: str,
+) -> None:
+    """W80c — best-effort hybrid graph + vector rerank of ``search_results``.
+
+    Calls :func:`rerank_with_rrf` against the cross-function edges already
+    persisted at ``graph:full:<schema>`` (built once at loader time). The
+    rerank surfaces 1-hop neighbors of the top-3 vector hits and fuses
+    cosine rank with edge-derived signals (matching_columns,
+    seed_reach_count, same_sub_process_path) via Reciprocal Rank Fusion.
+
+    Gating (mirrors the W80c Stage 1 diagnostic Section 7 Q2 decision):
+      * ``query_type`` must be ``VARIABLE_TRACE`` or ``COLUMN_LOGIC`` —
+        FUNCTION_LOGIC is anchored upstream and gains nothing.
+      * ``redis_client`` must be non-None — no Redis means no edge index.
+      * ``state["search_results"]`` must be non-empty — nothing to rerank.
+
+    Best-effort augmentation: any exception is caught, logged at WARNING,
+    and ``state["search_results"]`` is left unchanged. The stats dict is
+    stamped on ``state["graph_rerank_stats"]`` for downstream telemetry
+    (meta event, weakness-log calibration). On skip or failure the stats
+    block records the reason so canary readers can distinguish "did not
+    run" from "ran but coasted".
+
+    The ``keep_top`` budget is ``resolve_top_k(query_type) + 10`` —
+    diagnostic Q4 picked the +10 cap on top of W80b's per-query-type
+    top_k.
+    """
+    query_type = state.get("query_type") or ""
+
+    if query_type not in _W80C_RERANK_QUERY_TYPES:
+        state["graph_rerank_stats"] = {"status": "skipped_query_type"}  # type: ignore[typeddict-item]
+        return
+    if redis_client is None:
+        state["graph_rerank_stats"] = {"status": "skipped_no_redis"}  # type: ignore[typeddict-item]
+        return
+    hits = state.get("search_results") or []
+    if not hits:
+        state["graph_rerank_stats"] = {"status": "skipped_empty_results"}  # type: ignore[typeddict-item]
+        return
+
+    keep_top = resolve_top_k(query_type) + 10
+    # PR 2 retune (2026-05-18): per-seed cap of 20 holds expansion
+    # blast radius. First wire-in canary measured 137 expansion
+    # candidates from 3 FCT_ENTITY_INFO-touching seeds and pushed a
+    # strong-cosine top-1 hit (T1) out of the keep_top=25 window;
+    # cap=20 trims the long tail of 0-col passthrough neighbours
+    # while keeping every load-bearing edge.
+    per_seed_cap = 20
+    try:
+        with stage_timer(
+            "graph_rerank", correlation_id,
+            schema_scope=schema_scope, query_type=query_type,
+        ):
+            reranked, stats = rerank_with_rrf(
+                hits,
+                redis_client=redis_client,
+                seed_count=3,
+                keep_top=keep_top,
+                per_seed_cap=per_seed_cap,
+            )
+        state["search_results"] = reranked
+        state["graph_rerank_stats"] = {"status": "ok", **stats}  # type: ignore[typeddict-item]
+        # Stats line as a second log entry — stage_timer can only carry
+        # kwargs known at entry, but seed_count / expanded_count /
+        # rank_change_count are only known after the call returns. The
+        # canary parses this line out of logs/app.log if needed.
+        try:
+            logger.info(
+                "[GRAPH_RERANK_STATS] correlation_id=%s schema_scope=%s "
+                "query_type=%s seed_count=%d expanded_count=%d "
+                "kept_count=%d rank_change_count=%d keep_top=%d",
+                correlation_id, schema_scope, query_type,
+                stats["seed_count"], stats["expanded_count"],
+                stats["kept_count"], stats["rank_change_count"],
+                keep_top,
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        # Best-effort: leave search_results untouched, record failure so
+        # the canary can spot a regression even when the user-visible
+        # response still renders.
+        logger.warning(
+            "apply_w80c_rerank failed (best-effort; leaving "
+            "search_results unchanged): %s", exc,
+        )
+        state["graph_rerank_stats"] = {  # type: ignore[typeddict-item]
+            "status": "error",
+            "error": type(exc).__name__,
+        }
 
 
 def _normalize_schema_scope(raw: Optional[str]) -> str:

@@ -60,6 +60,15 @@ logger = get_logger(__name__, concern="app")
 _NO_GRAPH_REACH_RANK = 1_000_000
 
 _DEFAULT_WEIGHTS: Dict[str, float] = {
+    # PR 2 retune attempt (2026-05-18, reverted same day): lifting α to
+    # 3.0 was a no-op because RRF fuses INTEGER ranks, not raw scores —
+    # uniformly scaling one weight preserves the sort order of
+    # ``graph_score`` across candidates, so ``graph_rank`` integers stay
+    # identical and the fused output is bit-for-bit unchanged. The real
+    # mechanism that flooded the keep_top window was the 137-candidate
+    # expansion from FCT_ENTITY_INFO-touching seeds; that's now bounded
+    # by a per-seed cap in :func:`expand_one_hop` (default 20). Keeping
+    # α=1.0 here as the PR 1 shipped default.
     "matching_columns": 1.0,
     "seed_reach": 0.5,
     "sub_process": 0.5,
@@ -68,6 +77,18 @@ _DEFAULT_WEIGHTS: Dict[str, float] = {
     # can experiment without an API change.
     "process": 0.0,
 }
+
+# Default per-seed cap for ``expand_one_hop``. The W80c PR 2 wire-in
+# canary measured 137 expansion candidates from 3 seeds touching
+# FCT_ENTITY_INFO / DIM_* tables; the resulting flood pushed strong-
+# cosine top-1 hits with weak graph signals (T1 in the significant-
+# investment canary) out of the keep_top=25 window. Capping each seed
+# to its top-N neighbours BY ``len(matching_columns)`` descending (ties
+# broken stably in edge-list order) bounds expansion at ~3*N pre-dedupe
+# while keeping every load-bearing edge (T2 → T4 with 5 cols, T2 → T5
+# with 3 cols, T3 → T2 with 2 cols, etc.) inside the cap. N=20 is the
+# PR 2 starting point — tuning per future canary measurements.
+_DEFAULT_PER_SEED_CAP = 20
 
 
 # ---------------------------------------------------------------------
@@ -277,13 +298,34 @@ class EdgeIndex:
 # ---------------------------------------------------------------------
 
 
-def expand_one_hop(seeds: List[str], edge_index: EdgeIndex) -> List[str]:
+def expand_one_hop(
+    seeds: List[str],
+    edge_index: EdgeIndex,
+    *,
+    per_seed_cap: int = _DEFAULT_PER_SEED_CAP,
+) -> List[str]:
     """Return the deduped 1-hop neighbor set of *seeds*, excluding seeds.
 
-    Stable ordering: each seed is walked in input order, and neighbors
-    are emitted in the order they appear in the edge list. The
-    case-insensitive dedupe key is the uppercased function name, but
-    the output preserves the casing recorded in the underlying edge.
+    Each seed's neighbor list is sorted by ``len(matching_columns)``
+    descending (ties broken stably in original edge-list order — Python's
+    ``sorted`` is stable, so the secondary key is implicit) and sliced
+    to the first ``per_seed_cap`` entries before contributing to the
+    output. This bounds the expansion blast radius from a single seed:
+    the W80c PR 2 wire-in canary measured 137 candidates from 3 seeds
+    touching ``FCT_ENTITY_INFO`` / ``DIM_*`` tables — most of those
+    edges had ``matching_columns == []`` (pure passthrough). Capping at
+    ``per_seed_cap=20`` keeps every load-bearing edge (5-col, 3-col,
+    2-col, 1-col) and drops the long tail of 0-col passthrough.
+
+    ``per_seed_cap <= 0`` disables the cap (returns the pre-PR-2-retune
+    behaviour). Use this for tests of the underlying mechanism — the
+    production path always passes a positive cap via
+    :func:`rerank_with_rrf`.
+
+    Stable across-seed ordering: seeds are walked in input order; a
+    neighbor reachable from multiple seeds appears at its first-seen
+    seed's position. Case-insensitive dedupe key (uppercased function
+    name); output preserves the casing recorded in the edge.
     """
     if not seeds or edge_index is None:
         return []
@@ -293,7 +335,13 @@ def expand_one_hop(seeds: List[str], edge_index: EdgeIndex) -> List[str]:
     for seed in seeds:
         if not seed:
             continue
-        for edge in edge_index.neighbors(seed):
+        neighbors = edge_index.neighbors(seed)
+        if per_seed_cap is not None and per_seed_cap > 0:
+            # Stable sort: primary key = -len(matching_columns), ties
+            # preserve original edge-list order (Python sort stability).
+            neighbors = sorted(neighbors, key=lambda e: -len(e.matching_columns))
+            neighbors = neighbors[:per_seed_cap]
+        for edge in neighbors:
             tgt = edge.to_function
             tgt_u = tgt.upper()
             if tgt_u in seed_upper or tgt_u in added:
@@ -410,6 +458,7 @@ def rerank_with_rrf(
     schema: Optional[str] = None,
     weights: Optional[Dict[str, float]] = None,
     k: int = 60,
+    per_seed_cap: int = _DEFAULT_PER_SEED_CAP,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Reciprocal Rank Fusion between cosine rank and graph-edge rank.
 
@@ -423,6 +472,13 @@ def rerank_with_rrf(
     unchanged — Stage 1 confirmed canary targets land in one schema,
     but the defensive path matters because ``ensure_anchor_in_search_results``
     can stamp an empty schema on its injected entry.
+
+    ``per_seed_cap`` (default 20) bounds the per-seed neighbor count
+    forwarded to expansion. The PR 2 wire-in canary measured 137
+    expansion candidates from 3 seeds touching dimension tables; the
+    cap holds expansion at ~``3 * per_seed_cap`` pre-dedupe and keeps
+    load-bearing edges (highest matching_columns first) within reach
+    of every seed. Pass ``per_seed_cap=0`` to disable.
 
     The function is pure relative to its inputs apart from Redis I/O,
     which is gated by the process-level ``EdgeIndex`` cache. The input
@@ -470,7 +526,7 @@ def rerank_with_rrf(
     seeds = [fn for fn in input_fns[:seed_count] if fn]
     actual_seed_count = len(seeds)
 
-    expanded = expand_one_hop(seeds, edge_index)
+    expanded = expand_one_hop(seeds, edge_index, per_seed_cap=per_seed_cap)
     expanded_count = len(expanded)
 
     # Per-request hierarchy memoization. score_candidate looks up the

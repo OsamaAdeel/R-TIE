@@ -226,7 +226,10 @@ def test_expand_one_hop_excludes_seeds_and_dedupes():
     })
     idx = EdgeIndex.for_schema(redis, "OFSERM")
 
-    out = expand_one_hop(["S1", "S2"], idx)
+    # ``per_seed_cap=0`` disables the cap so this test verifies the
+    # dedupe + seed-exclusion behavior independently of the cap's
+    # sort-then-slice mechanism.
+    out = expand_one_hop(["S1", "S2"], idx, per_seed_cap=0)
     # X is reachable from both seeds but should appear once. Y is
     # reachable only via S1 (in-edge from X→Y) since the index records
     # both directions; that's still 1 hop from S1. Seeds themselves
@@ -235,6 +238,60 @@ def test_expand_one_hop_excludes_seeds_and_dedupes():
     assert out.count("X") == 1
     # First-seen order: S1's out-neighbors first, then S2's.
     assert out.index("X") < (out.index("Y") if "Y" in out else len(out))
+
+
+# =====================================================================
+# 5b. expand_one_hop per_seed_cap keeps strongest-match edges
+# =====================================================================
+
+
+def test_expand_one_hop_per_seed_cap_keeps_strongest_matching_edges():
+    """W80c PR 2 retune — seeds with many neighbours get bounded.
+
+    Single seed S with 5 neighbours of matching-column counts
+    [3, 0, 2, 0, 1]. With ``per_seed_cap=3`` the cap keeps S's three
+    strongest-matching-column edges (to A, C, E) and drops the two
+    0-col passthrough edges (to B, D). Output is high-to-low
+    matching-count order because :func:`expand_one_hop` sorts each
+    seed's neighbour list (stable; ties preserve edge insertion
+    order) before slicing.
+
+    Production rationale: PR 2 wire-in canary measured 137 expansion
+    candidates from 3 seeds touching ``FCT_ENTITY_INFO`` / ``DIM_*``
+    tables. ~100+ of those were 0-col DIM passthrough. Cap=20 (the
+    production default) keeps every load-bearing edge in the
+    significant-investment cluster (5-col T2→T4, 3-col T2→T5, 2-col
+    T3→T2, 1-col T1→T2) within reach while shedding the long tail
+    that flooded the keep_top window.
+    """
+    edges = [
+        ("S", "A", "TBL_A", ["c1", "c2", "c3"], "CROSS_FUNCTION_TABLE_FLOW"),
+        ("S", "B", "TBL_B", [], "CROSS_FUNCTION_TABLE_FLOW"),
+        ("S", "C", "TBL_C", ["c1", "c2"], "CROSS_FUNCTION_TABLE_FLOW"),
+        ("S", "D", "TBL_D", [], "CROSS_FUNCTION_TABLE_FLOW"),
+        ("S", "E", "TBL_E", ["c1"], "CROSS_FUNCTION_TABLE_FLOW"),
+    ]
+    redis = _FakeRedis({
+        "graph:full:OFSERM": _full_graph_blob(
+            schema="OFSERM", edge_records=edges,
+        ),
+    })
+    idx = EdgeIndex.for_schema(redis, "OFSERM")
+
+    capped = expand_one_hop(["S"], idx, per_seed_cap=3)
+    assert capped == ["A", "C", "E"], (
+        "Cap=3 should keep top-3 by matching_columns count (A=3, C=2, "
+        "E=1) and drop the two 0-col passthrough edges (B, D)."
+    )
+
+    # Uncapped (per_seed_cap=0) returns all neighbours; the seed
+    # exclusion + dedupe behaviour is unchanged.
+    uncapped = expand_one_hop(["S"], idx, per_seed_cap=0)
+    assert set(uncapped) == {"A", "B", "C", "D", "E"}
+
+    # Default cap (20) doesn't trigger here — only 5 neighbours exist.
+    default = expand_one_hop(["S"], idx)
+    assert set(default) == {"A", "B", "C", "D", "E"}
 
 
 # =====================================================================
