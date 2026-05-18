@@ -336,7 +336,17 @@ async def _collect_result(stream):
 def test_stream_fires_w86_on_all_null_aggregate(monkeypatch):
     """Wiring test: aggregate returns one row of nulls → final payload
     has suspicious=True + a sanity_warnings entry tagged
-    suspicious_metric_all_null."""
+    suspicious_metric_all_null.
+
+    Note (W88, 2026-05-18): the original user_query was 'BIA op risk on
+    2026-12-31'. With W88's named-computation pre-router in place, that
+    phrasing now short-circuits through the BIA anchor before
+    _generate_sql is called, so the test no longer exercises the LLM-
+    SQL → all-null detection path. W88 narrows W86's domain to non-
+    named-computation aggregates; this test reflects the post-W88
+    residual surface using a generic op-risk-staging phrasing that
+    doesn't match any W88 pattern.
+    """
     agent = DataQueryAgent(
         schema_tools=_FakeSchemaTools([(None, None)]),
         redis_client=None,
@@ -368,7 +378,7 @@ def test_stream_fires_w86_on_all_null_aggregate(monkeypatch):
     monkeypatch.setattr(agent, "_generate_sql", fake_generate)
 
     result = asyncio.run(_collect_result(agent.answer_stream(
-        user_query="BIA op risk on 2026-12-31",
+        user_query="Get the alpha and beta totals from op risk staging on 2026-12-31",
         schema="OFSMDM",
         filters={"mis_date": "2026-12-31"},
     )))

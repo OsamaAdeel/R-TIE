@@ -2092,6 +2092,13 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "requested_dates": result.get("requested_dates") or [],
         "verification_sql": result.get("verification_sql"),
     }
+    # W88: propagate pre-router metadata when present. Both fields are
+    # absent on non-W88 DATA_QUERY responses; canaries assert their
+    # presence/absence as the W88 routing signal.
+    if result.get("w88_anchor"):
+        done_payload["w88_anchor"] = result["w88_anchor"]
+    if result.get("w88_decline"):
+        done_payload["w88_decline"] = result["w88_decline"]
     with stage_timer("done_emit", correlation_id, route="data_query"):
         yield f"event: done\ndata: {json_mod.dumps(done_payload, default=str)}\n\n"
 
