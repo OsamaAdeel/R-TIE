@@ -1091,6 +1091,140 @@ def w83c_w83b_december_regression():
     return passed, extra
 
 
+# ---------------------------------------------------------------------------
+# W80 — Vector retrieval embedding input poisoning fix
+# ---------------------------------------------------------------------------
+
+# The 5 Cowork-named functions the stakeholder-test-2 significant-
+# investment pipeline traces through. Pre-W80 the classifier blob fed
+# to the embedding retrieved 0 of 5 — the embedding centroid was pulled
+# toward unrelated functions (CS_INSIGNIFICANT_INVST_*, FN_LOAD_OPS_RISK_DATA,
+# etc.). Post-W80 with the embedding input no longer poisoned, we expect
+# at least 2 of 5 to surface — a floor that documents W80b motivation
+# (top-K + hybrid retrieval) without blocking on it.
+W80_SIGNIFICANT_INVESTMENT_PIPELINE = {
+    "CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION",
+    "SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION",
+    "ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP",
+    "SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP",
+    "SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES",
+}
+
+
+@test("W80 — significant-investment trace recovers >=2 of 5 pipeline fns")
+def w80_significant_investment_trace_recovers_pipeline():
+    """Stakeholder test 2 (2026-05-14) reproduction.
+
+    Query shape note: the original canary asked "Trace
+    `N_SIGNIFICANT_INVST_AMT` from classification through deduction." That
+    query contains a specific column-shaped term that no resolver can
+    place (the real columns are N_CET1_INVESTMENT_AMOUNT,
+    F_SIGNIFICANT_INVESTMENT_IND, etc.) — W87's unrecognized-term gate
+    correctly intercepts before vector search runs, so the query can't
+    measure W80 v1's effect on the retrieval path. This rewrite asks the
+    same domain question in prose — no specific quoted identifier, no
+    function anchor, no BI literal. W87 passes; resolve_search_query
+    falls back to raw_query; the embedding is the user's verbatim prose;
+    KNN runs. That is the path W80 v1 changes.
+
+    Pre-W80 the orchestrator stamped object_name with the classifier
+    blob (raw_query + intent + search_terms), the embedding of that blob
+    was a diffuse centroid pulled away from the significant-investment
+    cluster, and recall was 0 of 5. Post-W80 the embedding is the
+    user's verbatim prose; recall floor is 2 of 5. Anything less and the
+    embedding cleanup alone isn't sufficient — W80b (hybrid BM25 + KNN /
+    adaptive top-K) becomes the next priority.
+    """
+    r = run_query(
+        "summarize the workflow for non-regulated entity investment processing"
+    )
+    d = r["done"] or {}
+
+    # functions_analyzed comes back on the meta event (and is also
+    # reflected in d.functions_analyzed when the renderer copied it through).
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns_meta = (meta_event or {}).get("functions_analyzed") or []
+    fns_done = d.get("functions_analyzed") or []
+    fns = fns_meta or fns_done
+
+    fns_upper = {f.upper() for f in fns}
+    matched = fns_upper & W80_SIGNIFICANT_INVESTMENT_PIPELINE
+    matched_count = len(matched)
+
+    passed = matched_count >= 2
+    extra = (
+        summarize_done(d)
+        + f" matched={matched_count}/5"
+        + f" matched_fns={sorted(matched)}"
+        + f" retrieved={fns}"
+    )
+    return passed, extra
+
+
+@test("W80 — anchored-function query regression unchanged")
+def w80_anchored_function_regression():
+    """W76 anchor fires; object_name = clean function name; embedding
+    input is that function name; retrieval anchors correctly. Pre-W80
+    this path already worked (because W76 overwrote the blob); post-W80
+    it must keep working — pin VERIFIED badge and FN_LOAD_OPS_RISK_DATA
+    in functions_analyzed."""
+    r = run_query("How does FN_LOAD_OPS_RISK_DATA work?")
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+    fns_upper = {f.upper() for f in fns}
+
+    passed = (
+        d.get("badge") == "VERIFIED"
+        and "FN_LOAD_OPS_RISK_DATA" in fns_upper
+    )
+    extra = summarize_done(d) + f" fns={fns}"
+    return passed, extra
+
+
+@test("W80 — CAP-code BI-routing regression unchanged")
+def w80_cap_code_regression():
+    """BI routing fires; object_name = resolved function name; embedding
+    anchors on it. Pre-W80 this path already worked (BI routing overwrote
+    the blob); post-W80 it must keep working — pin the meta event coming
+    back with a non-empty functions_analyzed list and a non-DECLINED
+    response shape."""
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+
+    # CAP973 is a known regulatory tag — different W-tickets have
+    # different verdicts on its grounding (W37/W45 may surface). The
+    # only W80-specific assertion is: the embedding ran, retrieval
+    # returned something, and the response is NOT a generic
+    # function_not_found DECLINED (which would indicate BI routing or
+    # the pipeline failed entirely).
+    passed = (
+        len(fns) > 0
+        and d.get("type") != "function_not_found"
+    )
+    extra = (
+        summarize_done(d)
+        + f" type={d.get('type')} fns_count={len(fns)}"
+    )
+    return passed, extra
+
+
 def main():
     results = []
     for name, fn in TESTS:

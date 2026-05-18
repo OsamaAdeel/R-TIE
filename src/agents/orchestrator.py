@@ -618,7 +618,11 @@ class Orchestrator:
             model: Specific model name. None uses default.
 
         Returns:
-            Updated LogicState with query_type, object_name, schema populated.
+            Updated LogicState with query_type, schema, target_variable,
+            and phase2 fields populated. W80: does NOT set object_name —
+            that field is owned by the W76 anchor / BI routing post-passes,
+            which produce clean function names rather than the classifier's
+            synthesised search blob.
         """
         correlation_id = get_correlation_id()
         logger.info(
@@ -662,11 +666,16 @@ class Orchestrator:
         parsed = json.loads(raw_content)
         result = ClassificationResult(**parsed)
 
-        # Build enriched search query from intent + search terms
-        enriched_query = f"{query} {result.intent} {' '.join(result.search_terms)}"
-
+        # W80: classify_query must NOT write object_name. The classifier's
+        # synthesised intent + search_terms used to be concatenated with the
+        # raw query and stamped here, but that blob poisoned the vector-
+        # search embedding for anchorless queries (cf. stakeholder test 2's
+        # significant-investment trace). object_name is now populated only by
+        # apply_named_function_anchor (W76, line 526) or apply_bi_routing
+        # (line 1163); embedding sites fall back to raw_query when neither
+        # fired. The blob is not stored anywhere — discovery confirmed no
+        # consumer reads it.
         state["query_type"] = result.query_type
-        state["object_name"] = enriched_query
         state["object_type"] = ""
         state["schema"] = result.schema_name
         state["target_variable"] = result.target_variable or ""
