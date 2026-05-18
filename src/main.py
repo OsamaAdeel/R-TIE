@@ -38,6 +38,7 @@ from src.agents.orchestrator import (
     _detect_unrecognized_term_query,
 )
 from src.agents.anchor_resolution import resolve_search_query
+from src.agents.retrieval_config import resolve_top_k
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
     LogicExplainer,
@@ -1129,13 +1130,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # a strong OFSERM hit (global top-K would let it). Scoped
             # mode passes the schema through to the vector store as a
             # TAG pre-filter on the KNN clause.
+            # W80b: per-query-type top-K — FUNCTION_LOGIC stays at 5
+            # (anchored upstream), VARIABLE_TRACE / COLUMN_LOGIC raise
+            # to capture multi-stage chains and dense column-writer
+            # sets. See src/agents/retrieval_config.py.
+            top_k = resolve_top_k(state.get("query_type"))
             with stage_timer(
-                "vector_search", correlation_id, schema_scope=schema_scope
+                "vector_search", correlation_id,
+                schema_scope=schema_scope, top_k=top_k,
             ):
                 results, schemas_searched = await _run_scoped_vector_search(
                     query_embedding=query_embedding,
                     schema_scope=schema_scope,
-                    top_k=5,
+                    top_k=top_k,
                 )
             state["search_results"] = results
             state["schemas_searched"] = schemas_searched

@@ -21,6 +21,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from src.pipeline.state import LogicState
 from src.parsing.schema_discovery import fallback_to_default_schema
 from src.agents.anchor_resolution import resolve_search_query
+from src.agents.retrieval_config import resolve_top_k
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import LogicExplainer
@@ -154,9 +155,12 @@ def build_logic_graph(
         )
         query_embedding = await embeddings.aembed_query(search_query)
 
+        # W80b: per-query-type top-K — see src/agents/retrieval_config.py
+        # for the rationale per query_type. The /v1/stream call site in
+        # main.py uses the same helper; both stay in lockstep.
         results = await vector_store.search(
             query_embedding=query_embedding,
-            top_k=5,
+            top_k=resolve_top_k(state.get("query_type")),
         )
 
         state["search_results"] = results

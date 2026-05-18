@@ -1165,6 +1165,80 @@ def w80_significant_investment_trace_recovers_pipeline():
     return passed, extra
 
 
+@test("W80b — significant-investment trace: top-K mechanism active, >=2 of 5")
+def w80b_significant_investment_trace_raised_floor():
+    """Same query and target set as the W80 v1 canary above, with two
+    assertions: (1) recall floor >=2 of 5 (matches W80 v1's floor —
+    confirms W80b didn't regress retrieval); (2) candidate-set size
+    >5 (confirms the W80b per-query-type top-K routing fired and
+    expanded the candidate set beyond the pre-W80b hardcoded ceiling).
+
+    Outcome history. The hypothesis that motivated this canary was
+    that the significant-investment cluster (15 functions in OFSERM)
+    was being truncated at top_k=5, and raising to top_k=20 for
+    VARIABLE_TRACE / COLUMN_LOGIC would lift recall from 2 of 5 to
+    >=3 of 5. The first post-W80b measurement (2026-05-16) was FLAT:
+    recall stayed at 2 of 5 with the expanded candidate set (~20
+    entries). The OFSERM top-10 contained the 2 matched targets plus
+    8 close siblings (CS_SIGNIFICANT_INVST_*, CS_INSIGNIFICANT_*,
+    CS_REGULATORY_INVESTMENTS_*); the 3 missing targets ranked
+    below 20 because the query's "non-regulated entity" framing
+    semantically discriminates *correctly* against party-level /
+    threshold-treatment / capital-deduction-exposure functions
+    (which is what those 3 are about).
+
+    Diagnostic implication: cluster-density alone was not the
+    dominant constraint. Cosine similarity is correctly placing
+    semantically-near functions in top-K; the 3 missing targets are
+    semantically distant from this specific query shape. The
+    architecturally correct fix is W80c (hybrid graph + vector with
+    rerank, gated on W36 Phase 7 + W88 preconditions). Description
+    regeneration (W80a) is unlikely to lift the missing 3 alone
+    because they already have rich 3-paragraph descriptions; the
+    miss is query-vocabulary divergence, not description quality.
+
+    The candidate-set-size assertion is W80b's load-bearing signal:
+    if a future change reverts the per-query-type top-K routing,
+    this canary fails even when recall (the W80 v1 floor) still
+    passes.
+    """
+    r = run_query(
+        "summarize the workflow for non-regulated entity investment processing"
+    )
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns_meta = (meta_event or {}).get("functions_analyzed") or []
+    fns_done = d.get("functions_analyzed") or []
+    fns = fns_meta or fns_done
+
+    fns_upper = {f.upper() for f in fns}
+    matched = fns_upper & W80_SIGNIFICANT_INVESTMENT_PIPELINE
+    matched_count = len(matched)
+
+    # W80b: two-part pass condition. Recall floor matches W80 v1
+    # (>=2 of 5); candidate-set size proves the top-K routing fired
+    # (>5 — the pre-W80b ceiling). If either drops, the canary fails
+    # with a specific signal about which W80b property regressed.
+    recall_ok = matched_count >= 2
+    candidate_set_expanded = len(fns) > 5
+    passed = recall_ok and candidate_set_expanded
+    extra = (
+        summarize_done(d)
+        + f" matched={matched_count}/5"
+        + f" matched_fns={sorted(matched)}"
+        + f" retrieved_count={len(fns)}"
+        + f" recall_ok={recall_ok}"
+        + f" candidate_set_expanded={candidate_set_expanded}"
+        + f" retrieved={fns}"
+    )
+    return passed, extra
+
+
 @test("W80 — anchored-function query regression unchanged")
 def w80_anchored_function_regression():
     """W76 anchor fires; object_name = clean function name; embedding
