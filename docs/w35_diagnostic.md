@@ -48,6 +48,8 @@ The literal `"OFSMDM"` (case-insensitive) appears in 16 distinct call sites acro
 - `src/templates/sql_templates.yaml` — every Oracle template binds `:schema` ([sql_templates.yaml](src/templates/sql_templates.yaml)). Templates do not hardcode an owner.
 - `src/parsing/loader.py:_extract_schema_from_source()` ([loader.py:73-84](src/parsing/loader.py#L73-L84)) — derives schema from the `CREATE OR REPLACE FUNCTION schema.name` prefix in each .sql file. Multi-schema discovery is already built into the loader.
 
+**Cross-schema reachability — deferred (W80c Q1):** `build_cross_function_graph` ([loader.py:476-485](src/parsing/loader.py#L476)) scopes edge derivation to a single primary schema, so the `graph:full:<schema>` rollup never contains an OFSMDM-writes → OFSERM-reads edge (or the reverse). The W80c hybrid retrieval helper at [src/agents/graph_rerank.py](src/agents/graph_rerank.py) consumes the per-schema rollup as-is; the significant-investment canary that motivated W80c lives entirely in OFSERM so the gap is currently inert. A future canary that crosses schemas (raw-load → enrichment, etc.) will require either a global rollup at loader time or a query-time merge of per-schema rollups. Address when such a canary surfaces; do not pre-build the global rollup speculatively.
+
 ---
 
 ## Section 2 — Redis State Inventory
