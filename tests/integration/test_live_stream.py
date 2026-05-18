@@ -121,14 +121,98 @@ def t2():
     return passed, summarize_done(d)
 
 
-@test("TEST 3 — Business identifier not in any loaded function (CAP973 alone)")
+@test("TEST 3 — W95 CAP973 BI-resolved computer reaches explainer")
 def t3():
+    """W95 scope: anchor-resolved function must be in retrieval, at
+    position 0 of ``functions_analyzed`` (the force-injection slot), so
+    the source-fetch pipeline loads its body. The W95-targeted W57
+    violation — ``GROUNDING-HIGH: cited function ... not in retrieved
+    sources`` — must NOT fire for the anchored function.
+
+    Adjacent trust checks (calendar/template paraphrases, post-hoc
+    caveats, etc.) are OUT OF SCOPE here. The badge may still land
+    UNVERIFIED if W83a / W83b catch a content fabrication unrelated to
+    retrieval (see W96 for the CAP-code December-template surface
+    documented during W95 validation). Coupling W95's success to badge
+    VERIFIED would mask the W95 fix landing whenever a downstream
+    detector legitimately fires.
+    """
     r = run_query("How is CAP973 calculated?")
     d = r["done"] or {}
-    # CAP973 is not in any loaded function's source (per the prompt). The
-    # identifier-grounding check should catch this and NOT return VERIFIED.
-    passed = d.get("badge") != "VERIFIED"
-    return passed, summarize_done(d)
+    functions_analyzed = d.get("functions_analyzed") or []
+    warnings = d.get("warnings") or []
+    anchor_fn = "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+
+    checks = {
+        # Position 0 is W95's injection slot — a stronger signal than
+        # mere presence. Pre-W95 the slot held a sibling loader.
+        "computer_at_position_0": (
+            bool(functions_analyzed)
+            and functions_analyzed[0].upper() == anchor_fn
+        ),
+        # The exact W57 sub-check W95 closes: cited function not in
+        # retrieved sources. Other GROUNDING-HIGH warnings (template
+        # phrase, etc.) are not W95's surface and don't fail this test.
+        "no_not_in_retrieved_warning": not any(
+            "GROUNDING-HIGH" in w
+            and "not in retrieved sources" in w
+            and anchor_fn in w
+            for w in warnings
+        ),
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed:
+        extra += f" FAILED_CHECKS={failed} functions_analyzed={functions_analyzed}"
+    return passed, extra
+
+
+@test("TEST 3b — W95 CAP943 BI-resolved computer reaches explainer + derivation banner")
+def t3b():
+    """W95 scope for CAP943: same as TEST 3, plus the Phase 6
+    derivation banner. CAP943's literal-index record carries an
+    embedded ``SUBTRACT`` derivation
+    (``CAP943 = CAP309 - CAP863``), and ``render_derivation_header``
+    emits ``**CAP943 = CAP309 - CAP863**`` programmatically — so the
+    exact string is stable across LLM runs.
+
+    Banner presence is W95-adjacent: it only renders when the BI
+    routing record reaches the explainer pipeline, which depends on
+    BI routing firing AND state being threaded correctly. The W95
+    force-include doesn't render the banner directly, but the banner
+    rendering is a downstream consumer of the same BI-routed state,
+    so its presence is a useful end-to-end signal.
+    """
+    r = run_query("How is CAP943 calculated?")
+    d = r["done"] or {}
+    functions_analyzed = d.get("functions_analyzed") or []
+    markdown = (d.get("explanation") or {}).get("markdown", "")
+    warnings = d.get("warnings") or []
+    anchor_fn = "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION"
+
+    checks = {
+        "computer_at_position_0": (
+            bool(functions_analyzed)
+            and functions_analyzed[0].upper() == anchor_fn
+        ),
+        "no_not_in_retrieved_warning": not any(
+            "GROUNDING-HIGH" in w
+            and "not in retrieved sources" in w
+            and anchor_fn in w
+            for w in warnings
+        ),
+        # Phase 6 derivation banner — programmatically rendered.
+        "derivation_banner_present": (
+            "**CAP943 = CAP309 - CAP863**" in markdown
+        ),
+    }
+    passed = all(checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    extra = summarize_done(d)
+    if failed:
+        extra += f" FAILED_CHECKS={failed} functions_analyzed={functions_analyzed}"
+    return passed, extra
 
 
 @test("TEST 4 — Business identifier IS in a loaded function")

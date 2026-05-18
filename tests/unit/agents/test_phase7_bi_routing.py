@@ -22,6 +22,7 @@ from src.agents.orchestrator import (
     detect_business_identifiers,
     resolve_bi_to_function,
 )
+from src.agents.anchor_resolution import ensure_anchor_in_search_results
 from src.agents.logic_explainer import render_derivation_header
 
 
@@ -569,3 +570,241 @@ class TestRenderDerivationHeader:
         # Header is the first non-blank line.
         first_line = rendered.lstrip().splitlines()[0]
         assert first_line == "## Derivation"
+
+
+# ===========================================================================
+# W95 — anchor-resolved function forced into search_results
+# ===========================================================================
+#
+# Phase 7's apply_bi_routing stamps state["object_name"] / state["schema"]
+# correctly, but the source-fetch pipeline downstream of vector search only
+# reads from state["search_results"]. When semantic search ranks the
+# BI-resolved (or W76-anchored) function outside the top-K, the explainer
+# never sees its body and either hallucinates (W57 → UNVERIFIED) or
+# anchors on a sibling. ensure_anchor_in_search_results closes the gap by
+# force-injecting the anchored function at position 0.
+
+def _sr(function_name: str, schema: str = "OFSERM", score: float = 0.5) -> Dict[str, Any]:
+    """Build a minimal search_results record in the shape vector_store.search
+    returns. Empty string fields match the metadata_interpreter contract —
+    every consumer reads via ``.get(key, "")``.
+    """
+    return {
+        "function_name": function_name,
+        "schema": schema,
+        "module": "",
+        "description": "",
+        "tables_read": "",
+        "tables_written": "",
+        "key_columns": "",
+        "score": score,
+    }
+
+
+class TestEnsureAnchorInSearchResults:
+    """W95 — round-trip from anchor stamp to search_results.
+
+    Helper must inject the anchored function at position 0 (so the
+    metadata_interpreter loops over it first and multi_source's key order
+    leads with the anchor), tag the injection (``anchor_injected: True``)
+    for downstream telemetry, and be idempotent when the anchor is
+    already in retrieval.
+    """
+
+    def test_bi_routing_anchor_injected_when_missing_from_results(self):
+        # The CAP973 reproduction: BI routing resolved to the computer
+        # but vector search returned siblings only.
+        state = {
+            "bi_routing": {
+                "identifier": "CAP973",
+                "function": "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+                "schema": "OFSERM",
+                "role": "case_when_target",
+            },
+            "object_name": "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT",
+            "schema": "OFSERM",
+            "search_results": [
+                _sr("CS_PHASE_IN_DEDUCTION_AMOUNT"),
+                _sr("CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT"),
+                _sr("CS_REGULATORY_INVESTMENTS_PHASE_IN_DEDUCTION_AMOUNT"),
+                _sr("THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP"),
+                _sr("FN_LOAD_OPS_RISK_DATA", schema="OFSMDM"),
+            ],
+        }
+        ensure_anchor_in_search_results(state)
+
+        names = [r["function_name"] for r in state["search_results"]]
+        # Anchored function leads the result list — position 0 is what
+        # metadata_interpreter visits first when building multi_source.
+        assert names[0] == "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+        # All original results retained — injection is additive, not a
+        # replacement of the semantic top-K.
+        assert len(state["search_results"]) == 6
+        # Injection carries the BI-routed schema so the meta event's
+        # downstream `schemas_searched`/`schema` reflect the routed path.
+        injected = state["search_results"][0]
+        assert injected["schema"] == "OFSERM"
+        assert injected["anchor_injected"] is True
+
+    def test_w76_anchor_injected_when_missing_from_results(self):
+        # The W76 sibling case: user typed an explicit function name and
+        # vector search ranks 5 sibling functions above it. Same fix —
+        # force-inject so the explainer sees the user's function body.
+        state = {
+            "w76_anchor": {
+                "function": "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+                "source": "prefix",
+                "original_query_type": "VARIABLE_TRACE",
+                "original_target_variable": "",
+            },
+            "object_name": "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION",
+            "schema": "OFSERM",
+            "search_results": [
+                _sr("SIBLING_1"),
+                _sr("SIBLING_2"),
+                _sr("SIBLING_3"),
+                _sr("SIBLING_4"),
+                _sr("SIBLING_5"),
+            ],
+        }
+        ensure_anchor_in_search_results(state)
+
+        names = [r["function_name"] for r in state["search_results"]]
+        assert names[0] == "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION"
+        assert len(state["search_results"]) == 6
+        assert state["search_results"][0]["anchor_injected"] is True
+
+    def test_w76_takes_priority_over_bi_routing(self):
+        # apply_bi_routing's explicit-name override means W76 + BI on the
+        # same state is unusual, but the helper still has to pick a
+        # winner. Priority mirrors determine_primary_anchor: W76 (high
+        # confidence — user explicitly named the function) above BI
+        # (medium — user named a CAP-code).
+        state = {
+            "w76_anchor": {
+                "function": "W76_FUNCTION",
+                "source": "prefix",
+            },
+            "bi_routing": {
+                "identifier": "CAP500",
+                "function": "BI_FUNCTION",
+                "schema": "OFSERM",
+                "role": "case_when_target",
+            },
+            "search_results": [_sr("UNRELATED")],
+        }
+        ensure_anchor_in_search_results(state)
+        assert state["search_results"][0]["function_name"] == "W76_FUNCTION"
+
+    def test_idempotent_when_anchor_already_in_results(self):
+        # Defensive: when vector search DID return the anchored function
+        # (e.g. semantic ranking happened to surface it), the helper must
+        # not inject a duplicate. The existing entry's metadata is also
+        # left intact — we don't shadow real description / score data
+        # with empty injected fields.
+        state = {
+            "bi_routing": {
+                "identifier": "CAP500",
+                "function": "MATCHING_FN",
+                "schema": "OFSERM",
+                "role": "case_when_target",
+            },
+            "search_results": [
+                _sr("OTHER_FN"),
+                {
+                    "function_name": "MATCHING_FN",
+                    "schema": "OFSERM",
+                    "module": "REAL_MODULE",
+                    "description": "real description",
+                    "tables_read": "T1",
+                    "tables_written": "T2",
+                    "key_columns": "C1",
+                    "score": 0.12,
+                },
+            ],
+        }
+        ensure_anchor_in_search_results(state)
+        # Result count unchanged; the existing entry's real metadata
+        # survives.
+        assert len(state["search_results"]) == 2
+        existing = next(
+            r for r in state["search_results"]
+            if r["function_name"] == "MATCHING_FN"
+        )
+        assert existing["description"] == "real description"
+        assert existing["score"] == 0.12
+
+    def test_idempotent_match_is_case_insensitive(self):
+        # The literal index emits uppercase function names; vector
+        # search retains whatever case the upserted doc had. Match by
+        # case-insensitive comparison so a casing skew doesn't double-
+        # inject.
+        state = {
+            "bi_routing": {
+                "function": "Mixed_Case_Fn",
+                "schema": "OFSERM",
+            },
+            "search_results": [_sr("MIXED_CASE_FN")],
+        }
+        ensure_anchor_in_search_results(state)
+        assert len(state["search_results"]) == 1
+
+    def test_noop_when_no_anchor_signal(self):
+        # No bi_routing, no w76_anchor — helper must leave state alone.
+        # Verbatim list-identity check confirms no defensive copy was
+        # made either (callers shouldn't rely on the reference being
+        # preserved, but a no-op should also be a no-write).
+        original = [_sr("A"), _sr("B")]
+        state = {"search_results": original}
+        ensure_anchor_in_search_results(state)
+        assert state["search_results"] is original
+
+    def test_noop_when_w76_function_is_empty(self):
+        # apply_named_function_anchor's alias-literal-cleared fallback
+        # stamps w76_anchor with function="" (mechanism 2 path at
+        # orchestrator.py:510). Helper must treat this as "no W76
+        # anchor" rather than injecting an empty function name.
+        state = {
+            "w76_anchor": {
+                "function": "",
+                "alias_literal_cleared": "EXP_11",
+                "source": "alias_fallback_no_function",
+            },
+            "search_results": [_sr("A")],
+        }
+        ensure_anchor_in_search_results(state)
+        assert [r["function_name"] for r in state["search_results"]] == ["A"]
+
+    def test_bi_routing_anchor_with_empty_search_results(self):
+        # Vector search returned nothing. Helper still injects so the
+        # explainer has *something* to anchor on (rather than empty
+        # multi_source → fall-through to a degenerate response).
+        state = {
+            "bi_routing": {
+                "function": "ONLY_FN",
+                "schema": "OFSERM",
+            },
+            "search_results": [],
+        }
+        ensure_anchor_in_search_results(state)
+        assert len(state["search_results"]) == 1
+        assert state["search_results"][0]["function_name"] == "ONLY_FN"
+
+    def test_schema_falls_back_to_state_schema_when_bi_missing(self):
+        # W76 anchor path doesn't stamp state["bi_routing"], but
+        # state["schema"] is set by W79 / classifier. The injection's
+        # schema field should reflect that so the meta event is honest.
+        state = {
+            "w76_anchor": {"function": "FN", "source": "prefix"},
+            "schema": "OFSMDM",
+            "search_results": [],
+        }
+        ensure_anchor_in_search_results(state)
+        assert state["search_results"][0]["schema"] == "OFSMDM"
+
+    def test_returns_state_for_chainable_callers(self):
+        # Mirrors apply_bi_routing's pattern — mutate in place AND
+        # return for callers that prefer `state = helper(state)` style.
+        state = {"search_results": []}
+        result = ensure_anchor_in_search_results(state)
+        assert result is state
