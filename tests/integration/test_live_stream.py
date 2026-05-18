@@ -1095,12 +1095,13 @@ def w83c_w83b_december_regression():
 # W80 — Vector retrieval embedding input poisoning fix
 # ---------------------------------------------------------------------------
 
-# The 5 Cowork-named functions the stakeholder-test-2 trace
-# (`N_SIGNIFICANT_INVST_AMT` through deduction) should retrieve. Pre-W80
-# this query retrieved 0 of 5. Post-W80 with the embedding input no
-# longer poisoned, we expect at least 2 of 5 to surface — a floor that
-# documents the W80b motivation (top-K + hybrid retrieval) without
-# blocking on it.
+# The 5 Cowork-named functions the stakeholder-test-2 significant-
+# investment pipeline traces through. Pre-W80 the classifier blob fed
+# to the embedding retrieved 0 of 5 — the embedding centroid was pulled
+# toward unrelated functions (CS_INSIGNIFICANT_INVST_*, FN_LOAD_OPS_RISK_DATA,
+# etc.). Post-W80 with the embedding input no longer poisoned, we expect
+# at least 2 of 5 to surface — a floor that documents W80b motivation
+# (top-K + hybrid retrieval) without blocking on it.
 W80_SIGNIFICANT_INVESTMENT_PIPELINE = {
     "CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION",
     "SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION",
@@ -1112,16 +1113,30 @@ W80_SIGNIFICANT_INVESTMENT_PIPELINE = {
 
 @test("W80 — significant-investment trace recovers >=2 of 5 pipeline fns")
 def w80_significant_investment_trace_recovers_pipeline():
-    """Stakeholder test 2 (2026-05-14) reproduction. Pre-W80 the classifier
-    blob fed to the embedding pulled retrieval toward unrelated functions
-    (CS_INSIGNIFICANT_INVST_*, FN_LOAD_OPS_RISK_DATA, etc.) — 0 of 5
-    Cowork-correct functions surfaced. Post-W80 the embedding input is the
-    user's verbatim query (no W76 anchor, no CAP-code, so raw_query
-    fallback fires). The recall floor is 2 of 5 — anything less means the
-    embedding cleanup alone isn't sufficient and W80b (hybrid BM25 + KNN /
-    adaptive top-K) becomes the next priority."""
+    """Stakeholder test 2 (2026-05-14) reproduction.
+
+    Query shape note: the original canary asked "Trace
+    `N_SIGNIFICANT_INVST_AMT` from classification through deduction." That
+    query contains a specific column-shaped term that no resolver can
+    place (the real columns are N_CET1_INVESTMENT_AMOUNT,
+    F_SIGNIFICANT_INVESTMENT_IND, etc.) — W87's unrecognized-term gate
+    correctly intercepts before vector search runs, so the query can't
+    measure W80 v1's effect on the retrieval path. This rewrite asks the
+    same domain question in prose — no specific quoted identifier, no
+    function anchor, no BI literal. W87 passes; resolve_search_query
+    falls back to raw_query; the embedding is the user's verbatim prose;
+    KNN runs. That is the path W80 v1 changes.
+
+    Pre-W80 the orchestrator stamped object_name with the classifier
+    blob (raw_query + intent + search_terms), the embedding of that blob
+    was a diffuse centroid pulled away from the significant-investment
+    cluster, and recall was 0 of 5. Post-W80 the embedding is the
+    user's verbatim prose; recall floor is 2 of 5. Anything less and the
+    embedding cleanup alone isn't sufficient — W80b (hybrid BM25 + KNN /
+    adaptive top-K) becomes the next priority.
+    """
     r = run_query(
-        "Trace `N_SIGNIFICANT_INVST_AMT` from classification through deduction."
+        "summarize the workflow for non-regulated entity investment processing"
     )
     d = r["done"] or {}
 
