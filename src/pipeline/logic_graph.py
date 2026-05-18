@@ -172,6 +172,16 @@ def build_logic_graph(
             state.get("correlation_id", ""),
         )
 
+        # W80c: hybrid graph + vector rerank is wired in main.py's
+        # /v1/stream handler (the canary path per CLAUDE.md) but NOT
+        # here. The LangGraph pipeline is compiled in lifespan BEFORE
+        # `_graph_redis` is constructed, so the rerank's prerequisite
+        # client isn't available at graph-build time. /v1/query is
+        # documented as non-canary (CLAUDE.md: "Don't probe /v1/query
+        # for badge / warnings / grounding signals") so the parity
+        # gap is acceptable; revisit if /v1/query becomes a canary
+        # surface.
+
         # W95: force-include the W76 / BI-routed anchor when vector
         # search missed it. The /v1/stream call site in main.py uses
         # the same helper at the equivalent point in its pipeline;

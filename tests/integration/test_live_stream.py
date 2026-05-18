@@ -1323,6 +1323,84 @@ def w80b_significant_investment_trace_raised_floor():
     return passed, extra
 
 
+@test("W80c — significant-investment trace post-rerank: >=4 of 5, rank moved")
+def w80c_significant_investment_trace_post_rerank():
+    """W80c PR 2 wire-in measurement.
+
+    Same query and target set as W80 v1 / W80b above. Asserts:
+
+      1. Recall floor >=4 of 5 — the W80c hypothesis is that 1-hop
+         graph expansion from the top-3 vector hits surfaces the
+         three downstream-consumer targets the W80b audit found
+         ranked below 20 by pure cosine (party-level identification,
+         threshold treatment, capital-deduction-exposure population).
+         Diagnostic Section 2.B traced 7 direct cross-function edges
+         within the 5-set; if the rerank mechanism is doing what
+         the diagnostic predicted, 4+ of 5 should surface.
+
+      2. ``meta.graph_rerank.status == "ok"`` — the wire-in actually
+         ran (didn't skip via the query-type / redis / empty gates).
+
+      3. ``meta.graph_rerank.rank_change_count > 0`` — positions
+         actually moved. If the rerank coasts (zero changes), it's
+         either a no-op (mechanism not engaging) or every position
+         was already correct (won't happen at the canary baseline of
+         2 of 5). Either way zero changes contradicts the
+         diagnostic's reachability finding and is worth a fail.
+
+    Outcome categories (per W80c PR 2 spec):
+      * HIGH (4-5 of 5) — canary passes, ship.
+      * MEDIUM-IMPROVED (3 of 5) — recall_ok=False here; relax
+        floor to >=3 with this docstring noting the regression
+        from the target.
+      * FLAT (still 2 of 5) — recall_ok=False; do NOT relax floor.
+        Toheed decides between weight tuning and reverting the
+        wire-in.
+    """
+    r = run_query(
+        "summarize the workflow for non-regulated entity investment processing"
+    )
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns_meta = (meta_event or {}).get("functions_analyzed") or []
+    fns_done = d.get("functions_analyzed") or []
+    fns = fns_meta or fns_done
+
+    fns_upper = {f.upper() for f in fns}
+    matched = fns_upper & W80_SIGNIFICANT_INVESTMENT_PIPELINE
+    matched_count = len(matched)
+
+    graph_rerank = (meta_event or {}).get("graph_rerank") or {}
+    rerank_status = graph_rerank.get("status", "missing")
+    rank_change_count = graph_rerank.get("rank_change_count", 0)
+
+    recall_ok = matched_count >= 4
+    rerank_ran = rerank_status == "ok"
+    rerank_moved = rank_change_count > 0
+
+    passed = recall_ok and rerank_ran and rerank_moved
+    extra = (
+        summarize_done(d)
+        + f" matched={matched_count}/5"
+        + f" matched_fns={sorted(matched)}"
+        + f" rerank_status={rerank_status}"
+        + f" rank_change_count={rank_change_count}"
+        + f" seed_count={graph_rerank.get('seed_count', '?')}"
+        + f" expanded_count={graph_rerank.get('expanded_count', '?')}"
+        + f" kept_count={graph_rerank.get('kept_count', '?')}"
+        + f" recall_ok={recall_ok}"
+        + f" rerank_ran={rerank_ran}"
+        + f" rerank_moved={rerank_moved}"
+        + f" retrieved={fns}"
+    )
+    return passed, extra
+
+
 @test("W80 — anchored-function query regression unchanged")
 def w80_anchored_function_regression():
     """W76 anchor fires; object_name = clean function name; embedding
