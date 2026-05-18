@@ -37,7 +37,10 @@ from src.agents.orchestrator import (
     resolve_bi_to_function,
     _detect_unrecognized_term_query,
 )
-from src.agents.anchor_resolution import resolve_search_query
+from src.agents.anchor_resolution import (
+    ensure_anchor_in_search_results,
+    resolve_search_query,
+)
 from src.agents.retrieval_config import resolve_top_k
 from src.agents.metadata_interpreter import MetadataInterpreter
 from src.agents.logic_explainer import (
@@ -1158,6 +1161,17 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     state["schema"] = fallback_to_default_schema(
                         "main.semantic_search", correlation_id,
                     )
+
+            # W95: anchor resolution (W76 / BI routing) must be reflected
+            # in downstream retrieval, not just embedding bias. When the
+            # anchored function ranked outside the vector-search top-K
+            # (CAP973 → CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT
+            # is the canonical case), force-inject it at position 0 so
+            # fetch_multi_logic loads its body. Refresh the local
+            # `results` reference so the downstream stage-event preview
+            # and fn_names match state["search_results"].
+            ensure_anchor_in_search_results(state)
+            results = state["search_results"]
 
             # Stage 3: Fetch source code
             fn_names = list(dict.fromkeys(r["function_name"] for r in results)) if results else []

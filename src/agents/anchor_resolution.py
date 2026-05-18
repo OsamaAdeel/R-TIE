@@ -234,6 +234,101 @@ def resolve_search_query(state: LogicState) -> str:
     return state.get("object_name") or state.get("raw_query") or ""
 
 
+def ensure_anchor_in_search_results(state: LogicState) -> LogicState:
+    """W95 — force the anchor-resolved function into ``search_results``.
+
+    Architectural principle: anchor resolution (W76 / BI routing) must be
+    reflected in downstream retrieval, not just embedding bias. Without
+    this helper, when vector search ranks the anchored function outside
+    the top-K, the source-fetch pipeline never loads its body — the
+    explainer is handed sibling functions only and either hallucinates
+    (caught post-hoc by W57 as ``GROUNDING-HIGH`` / ``UNVERIFIED``) or
+    anchors on a wrong function.
+
+    Sibling fixes that established the same principle at earlier stages:
+
+      * W43 — graph pipeline failing to honour the routed schema.
+      * W80 v1 — vector embedding input being the classifier blob
+        instead of the clean anchor (``resolve_search_query`` above).
+
+    W95 closes the gap one stage further downstream: between vector
+    search and source fetch. The injected record is a sentinel — empty
+    metadata fields are fine because
+    :meth:`MetadataInterpreter.fetch_multi_logic` resolves the owning
+    schema and reads the source body from the parsed graph, keyed off
+    ``function_name`` alone.
+
+    Idempotent. No-op when:
+
+      * No anchor signal is present (neither W76 nor BI routing fired).
+      * The W76 anchor record exists but its ``function`` is empty
+        (alias-literal cleared fallback — see
+        ``apply_named_function_anchor`` mechanism 2).
+      * The anchored function is already in ``state["search_results"]``
+        (case-insensitive match on ``function_name``).
+
+    Source priority — first non-empty wins:
+
+      1. ``state["w76_anchor"]["function"]`` (user explicitly named a
+         function via ``"In <Fn>, ..."`` prefix or alias-literal
+         recovery).
+      2. ``state["bi_routing"]["function"]`` (CAP-code / business
+         identifier resolved through the literal index).
+
+    Mutates and returns *state* for chainable callers.
+    """
+    w76 = state.get("w76_anchor") or {}
+    w76_fn = (w76.get("function") or "").strip() if isinstance(w76, dict) else ""
+
+    bi = state.get("bi_routing") or {}
+    bi_fn = (bi.get("function") or "").strip() if isinstance(bi, dict) else ""
+
+    anchor_fn = w76_fn or bi_fn
+    if not anchor_fn:
+        return state
+
+    search_results = list(state.get("search_results") or [])
+    anchor_upper = anchor_fn.upper()
+    for r in search_results:
+        if not isinstance(r, dict):
+            continue
+        if (r.get("function_name") or "").upper() == anchor_upper:
+            return state
+
+    # Schema priority: BI routing's resolved schema (most specific) >
+    # request-level state.schema > empty. fetch_multi_logic resolves
+    # the actual owning schema per-function from Redis regardless, so
+    # an empty value here is safe — this is a hint, not a directive.
+    anchor_schema = ""
+    if isinstance(bi, dict):
+        anchor_schema = (bi.get("schema") or "").strip()
+    if not anchor_schema:
+        anchor_schema = state.get("schema", "") or ""
+
+    injected = {
+        "function_name": anchor_fn,
+        "schema": anchor_schema,
+        "module": "",
+        "description": "",
+        "tables_read": "",
+        "tables_written": "",
+        "key_columns": "",
+        "score": 0.0,
+        "anchor_injected": True,
+    }
+    state["search_results"] = [injected] + search_results
+
+    logger.info(
+        "ensure_anchor_in_search_results: injected %s (source=%s, schema=%r) "
+        "at position 0 — anchored function was missing from %d vector results",
+        anchor_fn,
+        "w76" if w76_fn else "bi_routing",
+        anchor_schema,
+        len(search_results),
+    )
+    return state
+
+
 def apply_w70_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
     """Compute primary anchor, stamp diagnostic onto *state*, log decision.
 

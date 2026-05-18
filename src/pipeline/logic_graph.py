@@ -20,7 +20,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from src.pipeline.state import LogicState
 from src.parsing.schema_discovery import fallback_to_default_schema
-from src.agents.anchor_resolution import resolve_search_query
+from src.agents.anchor_resolution import (
+    ensure_anchor_in_search_results,
+    resolve_search_query,
+)
 from src.agents.retrieval_config import resolve_top_k
 from src.agents.orchestrator import Orchestrator
 from src.agents.metadata_interpreter import MetadataInterpreter
@@ -169,9 +172,15 @@ def build_logic_graph(
             state.get("correlation_id", ""),
         )
 
+        # W95: force-include the W76 / BI-routed anchor when vector
+        # search missed it. The /v1/stream call site in main.py uses
+        # the same helper at the equivalent point in its pipeline;
+        # both stay in lockstep.
+        ensure_anchor_in_search_results(state)
+
         logger.info(
-            f"[semantic_search] Found {len(results)} results: "
-            f"{[r['function_name'] for r in results]}"
+            f"[semantic_search] Found {len(state['search_results'])} results: "
+            f"{[r['function_name'] for r in state['search_results']]}"
         )
         return state
 
