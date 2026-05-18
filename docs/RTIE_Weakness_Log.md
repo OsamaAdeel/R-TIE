@@ -408,6 +408,17 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
+## W93b. `cli.py index` should default to loader-validated path — FIXED 2026-05-18 (merge SHA pending)
+
+- **Discovered:** W93 verification run (2026-05-16). Running `python cli.py index --force` to re-attempt the four sentinel docs called `IndexerAgent.index_all_modules` → `index_module("ABL_CAR_CSTM_V4", force=False)`, which walks `db/modules/*` on disk and indexes every `.sql` file regardless of whether the loader accepted it. The OFSERM vector-store corpus jumped 178 → 281 docs mid-run. Cleanup required deleting 116 `rtie:vec:OFSERM:<fn>` docs that had no corresponding `graph:OFSERM:<fn>` backing.
+- **Root cause:** [cli.py:42-68](cli.py#L42-L68) `cmd_index` called `index_all_modules` unconditionally. That's the **disk-walking** path — it embeds the raw file set under `db/modules/`, including functions the loader rejected. The Phase-3 path `index_all_loaded` at [src/agents/indexer.py:302](src/agents/indexer.py#L302) iterates `graph:<schema>:<fn>` keys directly and matches what the rest of RTIE serves answers from. The lifespan was already using it ([src/main.py:562-578](src/main.py#L562-L578)); the CLI was the one stale call site.
+- **Fix:** Default switched to `index_all_loaded`. `cmd_index(from_disk=False, force=...)` builds a sync `redis.Redis` client (same shape the lifespan uses) and passes it through, then prints the per-schema summary line (`Auto-index <schema>: N indexed, N skipped, N errors`) that mirrors the lifespan log. `--from-disk` preserved as an opt-in escape hatch for rebuilds outside the loader's view, with a warning in the help text. Help is the module docstring (no argparse rewrite); `--help` / `-h` short-circuits to print it without running the indexer. When `index_all_loaded` returns zero schemas (loader not yet run), the CLI prints actionable guidance — start the backend once or use `--from-disk` — instead of silently exiting with no work done.
+- **Tests:** 9 unit tests in [tests/unit/test_cli_index_surface.py](tests/unit/test_cli_index_surface.py) cover (a) docstring surface (mentions `--from-disk`, loader prerequisite, default-is-safe framing) and (b) arg parsing routing (`index` → default, `--force` keeps default, `--from-disk` flips, both compose, `--help` short-circuits before constructing clients, bare invocation prints doc). `cmd_index`'s Redis / IndexerAgent body is intentionally not exercised in unit tests — that surface belongs to manual smoke and the boot-time auto-index path the lifespan already covers.
+- **Out of scope:** The `/index-module` / `/index-all` admin slash commands at [src/main.py:2606-2609](src/main.py#L2606-L2609) still call the disk-walk methods. Left alone deliberately — those are explicit-name handlers that callers invoke when they want disk-walk semantics; not the same ergonomic footgun the bare `cli.py index` was. Cold-start ergonomic (user runs `python cli.py index` on fresh Redis, sees "no schemas discovered" message) is documented in the help and prints actionable guidance but is not auto-handled — wiring the loader into the CLI is logged as [W93c](w93c_cli_cold_start_loader_invocation.md), not urgent.
+- **Merge SHA:** pending.
+
+---
+
 ## Operational observations — surfaced during W83C canary run (2026-05-15)
 
 Two pre-existing items observed while running [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) against the live backend for W83C verification. Neither was introduced by W83C; logged here so they don't get lost.
