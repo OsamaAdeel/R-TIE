@@ -526,9 +526,9 @@ Pre-W80c-v2 (`keep_top = top_k + 10`), the same query failed differently: `NAMED
 
 ---
 
-## W98. Anchor cascade missing "scan raw_query for known function names" layer — NEW 2026-05-19
+## W98. Anchor cascade missing "scan raw_query for known function names" layer — FIXED 2026-05-19 (merge SHA pending)
 
-**Status:** Backlog. Surfaced during W97 canary verification (2026-05-19) when the FN_LOAD_OPS_RISK_DATA query exposed that the W70 anchor cascade resolves to the WRONG function for the `"How does <FN> work?"` pattern. Not blocking W97 — W97 closes the prompt-prominence half of the anchor architecture independently of cascade correctness; W98 closes the resolution-input half.
+**Status:** Fixed. Surfaced during W97 canary verification (2026-05-19) when the FN_LOAD_OPS_RISK_DATA query exposed that the W70 anchor cascade resolves to the WRONG function for the `"How does <FN> work?"` pattern. Not blocking W97 — W97 closes the prompt-prominence half of the anchor architecture independently of cascade correctness; W98 closes the resolution-input half.
 
 **Failure surface.** Query `"How does FN_LOAD_OPS_RISK_DATA work?"` returns badge `UNVERIFIED` with `GROUNDING-ANCHOR-MISMATCH-HIGH: response anchors on 'PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP' but user asked about 'FN_LOAD_OPS_RISK_DATA'`. The cascade in [src/agents/anchor_resolution.py:63-150](src/agents/anchor_resolution.py#L63-L150) `determine_primary_anchor` flows through:
 
@@ -541,39 +541,39 @@ The LLM correctly follows the (wrong) anchor directive; W85's `ANCHOR-MISMATCH-H
 
 **Root cause.** The cascade has no layer for "user mentioned a function name in plain text, without W76 prefix or BI code". `_w57_resolve_primary_function` (W76b) and `extract_function_candidates` already exist and scan raw_query for function-name candidates — the cascade just doesn't consult them. A 5th layer (or extending layer 2 to consult raw_query when `object_name` is empty/non-clean) would close the gap.
 
-**Likely fix (W98 v1).** Add a layer between current layers 3 and 4 in `determine_primary_anchor`:
+**Regression sub-finding (architectural principle).** The W84 integration test at [test_live_stream.py:556-590](tests/integration/test_live_stream.py#L556-L590) was passing at its commit time (203e091, 2026-05-12) — but NOT because a `raw_query`-scan cascade layer existed. It passed because the pre-W80 vector-search embedding used the classifier-enriched blob (which contains the literal function name plus restatement noise), and that embedding poisoning pulled `FN_LOAD_OPS_RISK_DATA` to semantic top-1, so Layer 4 happened to resolve correctly by accident. W80 v1 ([f0029a3](https://github.com/anthropics/RTIE/commit/f0029a3)) correctly cleaned the embedding input to `object_name or raw_query`, but that removed an **implicit safety net** the W84 test was silently depending on. The general principle: **removing implicit dependencies on classifier-side noise requires replacing them with explicit cascade layers, not just deleting them**. W98 makes that safety net explicit — a `raw_query`-scan layer in the cascade — rather than relying on retrieval ranking to surface the named function at top-1.
+
+**Fix landed (W98 v1).** New Layer 4 in [`determine_primary_anchor`](src/agents/anchor_resolution.py#L96-L168) between current Layers 3 (bi_routing) and 5 (semantic top-1):
 ```python
-# Layer 4 (new): scan raw_query for known function names.
+# Layer 4 (W98): scan raw_query for known function names.
 raw_query = state.get("raw_query") or ""
-candidates = extract_function_candidates(raw_query)
-# Filter to candidates actually present in the loaded corpus.
-known = [c for c in candidates if function_exists(c, redis_client)]
-if len(known) == 1:
-    return {"function": known[0], "source": "raw_query_scan", "confidence": "high"}
+if raw_query and multi_source:
+    candidates = extract_function_candidates(raw_query)
+    if candidates:
+        ms_upper_to_actual = {k.upper(): k for k in multi_source.keys()}
+        matched = [ms_upper_to_actual[c.upper()] for c in candidates if c.upper() in ms_upper_to_actual]
+        if len(matched) == 1:
+            return {"function": matched[0], "source": "raw_query_scan", "confidence": "high"}
 ```
-Multi-candidate case ambiguous — fall through to layer 5 (current layer 4, semantic top-1) and let W85 catch the mismatch. High confidence single-candidate case wins.
+Validates against `multi_source.keys()` (case-insensitive) rather than `function_exists_in_graph` — the cascade runs AFTER `fetch_multi_logic`, so a candidate whose body isn't in multi_source can't be anchored on anyway (`promote_anchor_to_front` would no-op and the explainer would have no source body to describe). Tying the diagnostic stamp to retrieval keeps `w70_anchor` honest. Multi-candidate / zero-survivor cases fall through to Layer 5 semantic top-1 and let W85 ANCHOR-MISMATCH-HIGH catch any drift. No signature change — `determine_primary_anchor(state) -> Optional[Dict]` unchanged.
 
-**W84 test contradiction to investigate as W98 discovery.** [test_live_stream.py:556-590](tests/integration/test_live_stream.py#L556-L590) `test_w84_diagnostic_single_function` asserts:
+**W84 test as the spec.** [test_live_stream.py:556-590](tests/integration/test_live_stream.py#L556-L590) `test_w84_diagnostic_single_function` asserts both:
 ```python
-"w70_anchor_resolves_to_asked_function": (
-    diag.get("w70_anchor") == "FN_LOAD_OPS_RISK_DATA"
-),
+"w70_anchor_resolves_to_asked_function": diag.get("w70_anchor") == "FN_LOAD_OPS_RISK_DATA",
+"w76_anchor_null_for_no_prefix_query":  diag.get("w76_anchor") is None,
 ```
-for the exact query `"How does FN_LOAD_OPS_RISK_DATA work?"`. Live runs (2026-05-19) show `w70_anchor` resolves to `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` instead. Two possibilities:
+for the query `"How does FN_LOAD_OPS_RISK_DATA work?"`. The `w76_anchor is None` half was load-bearing for the architecture choice — W98 fixes resolution in `determine_primary_anchor` (cascade) rather than in `apply_named_function_anchor` (which would have stamped `w76_anchor` and broken the second half of the test). Post-W98 both assertions pass for the right reason.
 
-1. **Aspirational test** — the test was written to specify desired cascade behavior that was never implemented.
-2. **Cascade regression** — the cascade once resolved correctly (perhaps via a clean `object_name` produced by an earlier classifier) and has since regressed (post-W80 classifier no longer writes `object_name` for non-anchored queries, per the `resolve_search_query` docstring at anchor_resolution.py:213-234).
+[test_live_stream.py:1400-1423](tests/integration/test_live_stream.py#L1400-L1423) `w80_anchored_function_regression` covers the end-to-end outcome on the same query — VERIFIED badge + `FN_LOAD_OPS_RISK_DATA` in `functions_analyzed`. Post-W98 the cascade picks FN_LOAD, W97 promotes it to position 0, the explainer anchors correctly.
 
-Either way, the W84 test is the **spec** for what W98 must restore. Discovery work: run the W84 test on main and confirm it's currently failing, git-blame the relevant cascade and classifier history to identify when the behavior diverged, and decide whether the fix is in the cascade (add raw_query scan layer) or in the classifier (re-emit clean object_name when raw_query contains a single known function name) or both.
+**Detection signal.** `GROUNDING-ANCHOR-MISMATCH-HIGH` (W85) catches cascade-anchor vs asked-function divergence — pre-W98 this was the only thing keeping the bad answer from being labelled VERIFIED. Post-W98 the detector keeps firing as a defense-in-depth backstop but the cascade no longer produces the mismatch in the first place.
 
-**Detection signal.** Already firing — `GROUNDING-ANCHOR-MISMATCH-HIGH` (W85) catches the cascade-anchor vs asked-function divergence. No new detector needed.
+**Scope.**
 
-**Scope when implemented.**
+* Changed: [src/agents/anchor_resolution.py](src/agents/anchor_resolution.py) (new Layer 4 + docstring renumbering), [tests/unit/agents/test_w70_anchor_injection.py](tests/unit/agents/test_w70_anchor_injection.py) (cascade test additions). The two pre-existing live tests (W84, W80-anchored-function-regression) flipped from failing → passing without modification — they were the W98 spec.
+* Not changed: any detector, vector store, retrieval / rerank, W76 detect_named_function_anchor, W95 ensure_anchor_in_search_results, W97 promote_anchor_to_front, classifier prompt, embedding logic, signature of `determine_primary_anchor` / `apply_w70_anchor`.
 
-* MAY change: `src/agents/anchor_resolution.py` (cascade layer), possibly `src/agents/orchestrator.py` (classifier path to clean `object_name`), `tests/unit/agents/test_w70_anchor_injection.py` (cascade test additions), `tests/integration/test_live_stream.py` (re-enable the FN_LOAD canary as the W98 verification — assert VERIFIED + `functions_analyzed[0] == FN_LOAD_OPS_RISK_DATA` + neither `GROUNDING-HIGH` nor `GROUNDING-ANCHOR-MISMATCH-HIGH` fires).
-* MUST NOT change: any detector, vector store, retrieval / rerank, W97 promote-to-front (the W97 contract is correct and W98 must preserve it — anchor at multi_source[0] regardless of which cascade layer resolved it).
-
-**Priority.** Medium. W97 reduced the FN_LOAD-style failure mode's blast radius (anchor still wrong, but at least position-0 and anchor agree so the LLM doesn't drift further). Full fix requires W98.
+**Priority.** Medium → Done. W97 had already reduced the FN_LOAD-style failure mode's blast radius (anchor still wrong, but at least position-0 and anchor agreed so the LLM didn't drift further); W98 makes the anchor right in the first place.
 
 ---
 

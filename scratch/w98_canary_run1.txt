@@ -1,0 +1,68 @@
+
+==============================================================================
+CANARY A — "How does FN_LOAD_OPS_RISK_DATA work?"
+==============================================================================
+badge:              'VERIFIED'
+diag.w70_anchor:    'FN_LOAD_OPS_RISK_DATA'
+diag.w76_anchor:    None
+functions_analyzed: ['FN_LOAD_OPS_RISK_DATA', 'PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP', 'STD_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP', 'STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP', 'ENTITY_INFO_HIER_DATA_POP', 'ABL_INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'FCT_CAP_CONS_RATIO_POP', 'CAP_CONSL_EFFECTIVE_SHAREHOLDING_PERCENT_FOR_AN_ENTITY_BASED_ON_CONSOLIDATION_APPROACH', 'CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION', 'CS_PHASE_IN_TREATMENT_AGGREGATE_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT', 'CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT', 'REG_ADJUSTMENT_RWA_STD_ACCT_HEAD_DATA_POP', 'THIRD_PARTY_MINORITY_HOLDING_INDICATOR_ASSIGNMENT_UNDER_CAPITAL_CONSOLIDATION', 'CS_CAPITAL_INVESTMENTS_IN_SIGNIFICANT_ENTITIES_IN_THE_FORM_OF_COMMON_STOCK_THAT_ARE_NOT_DEDUCTED', 'CS_DTA_ARISING_FROM_TEMPORARY_DIFFERENCES_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED', 'CS_DTA_RELATED_TO_TEMPORARY_DIFFERENCES_ABOVE_THE_15_PERCENT_AGGREGATE_THRESHOLD_LIMIT', 'CS_MSR_ABOVE_THE_15_PERCENT_AGGREGATE_THRESHOLD_LIMIT', 'CS_MSR_NET_OF_DTL_THAT_ARE_NOT_DEDUCTED', 'CS_SIGNIFICANT_INVESTMENT_AMOUNT_IN_COMMON_STOCK_ABOVE_THE_15_PCT_AGGREGATE_THRESHOLD_LIMIT', 'OPS_RISK_DATA_POPULATION_CSTM', 'CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT', 'OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP', 'T2T_FCT_CCP_DETAILS_STD_ACCT_HEAD_POP', 'CS_PHASE_IN_TREATMENT_RW_ASSIGNMENT', 'ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM', 'MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP', 'REQ_CNTR_CYC_BUFFER_POP', 'CS_PHASE_IN_TREATMENT_RWA_CALCULATION', 'ALLOCATION_RANK_ASSIGNMENT', 'TLX_LOB_MAPPING', 'POPULATE_PP_FROMGL', 'TLX_LOAD_DELETE_OFSMDM', 'POPULATE_GL_FROMGLBAL', 'MAP_999999_ENTRIES_EXPO']
+functions_analyzed[0] (upper): 'FN_LOAD_OPS_RISK_DATA'
+warnings:           []
+
+checks:
+  [PASS] badge_VERIFIED
+  [PASS] diag_w70_eq_FN_LOAD
+  [PASS] fns0_eq_FN_LOAD
+  [PASS] no_GROUNDING_HIGH
+  [PASS] no_ANCHOR_MISMATCH_HIGH
+
+=> CANARY A PASS
+
+==============================================================================
+CANARY B — "How is CAP973 calculated?" (W97 contract unchanged)
+==============================================================================
+diag.w70_anchor:    'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT'
+functions_analyzed[0]: 'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT'
+functions_analyzed head: ['CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT', 'CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT', 'CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT']
+
+checks:
+  [PASS] diag_w70_eq_expected
+  [PASS] fns0_eq_expected
+
+=> CANARY B PASS
+
+==============================================================================
+CANARY C — "Trace N_EOP_BAL" (W87 short-circuit unchanged)
+==============================================================================
+badge:    'UNVERIFIED'
+type:     'unrecognized_term'
+status:   'unverified'
+decline:  name=None reason=''
+summary:  type=unrecognized_term badge=UNVERIFIED validated=False confidence=0.2 citations=0 warnings=["UNRECOGNIZED_TERM: 'N_EOP_BAL' not in indexed corpus"]
+
+=> CANARY C FAIL
+
+==============================================================================
+CANARY D — W80c significant-investment regression (recall 5/5)
+==============================================================================
+matched:            5/5
+matched_fns:        ['ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION', 'SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES', 'SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION', 'SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP']
+rerank_status:      ok
+rank_change_count:  35
+
+checks:
+  [PASS] recall_5_of_5
+  [PASS] rerank_status_ok
+  [PASS] rerank_moved
+
+=> CANARY D PASS
+
+==============================================================================
+SUMMARY
+==============================================================================
+  [PASS] A — FN_LOAD
+  [PASS] B — CAP973
+  [FAIL] C — N_EOP_BAL
+  [PASS] D — W80c 5/5
+
+Total: 3/4
