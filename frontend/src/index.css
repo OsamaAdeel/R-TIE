@@ -155,12 +155,14 @@ body {
    ────────────────────────────────────────────── */
 @keyframes rtie-conn-pulse {
   0%, 100% {
-    box-shadow: 0 0 6px oklch(0.65 0.16 155 / 0.55);
+    transform: scale(1);
+    box-shadow: 0 0 5px oklch(0.65 0.16 155 / 0.5);
     opacity: 1;
   }
   50% {
-    box-shadow: 0 0 9px oklch(0.65 0.16 155 / 0.85);
-    opacity: 0.82;
+    transform: scale(1.35);
+    box-shadow: 0 0 12px oklch(0.65 0.16 155 / 0.95);
+    opacity: 0.7;
   }
 }
 
@@ -174,8 +176,9 @@ body {
 }
 .rtie-conn-dot.is-ok {
   background: var(--color-emerald);
-  box-shadow: 0 0 6px oklch(0.65 0.16 155 / 0.55);
-  animation: rtie-conn-pulse 1.8s ease-in-out infinite;
+  box-shadow: 0 0 5px oklch(0.65 0.16 155 / 0.5);
+  animation: rtie-conn-pulse 1.6s ease-in-out infinite;
+  transform-origin: center;
 }
 .rtie-conn-dot.is-degraded {
   background: var(--color-amber);
@@ -183,7 +186,6 @@ body {
 }
 .rtie-conn-dot.is-down {
   background: var(--color-burgundy);
-  box-shadow: 0 0 0 2px oklch(0.55 0.16 25 / 0.22), 0 0 9px oklch(0.55 0.16 25 / 0.7);
 }
 .rtie-conn-dot.is-unknown {
   background: var(--color-ivory-faint);

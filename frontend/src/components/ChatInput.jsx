@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { ArrowUp, Slash, Database, Quote, ChevronDown, Square } from 'lucide-react';
+import { ArrowUp, Slash, Database, ChevronDown, Square } from 'lucide-react';
 import clsx from 'clsx';
 import { fetchModels } from '../api/client';
 
@@ -55,9 +55,7 @@ export default function ChatInput({ onSend, onStop, disabled, provider, model, o
   const textareaRef = useRef(null);
 
   // W79: schema dropdown drives the backend `schema_scope` field.
-  // Citations toggle is still cosmetic / client-side only.
   const [schema, setSchema] = useState(SCHEMA_OPTIONS[0]);
-  const [citationsOn, setCitationsOn] = useState(true);
   const [schemaOpen, setSchemaOpen] = useState(false);
   const schemaRef = useRef(null);
 
@@ -281,15 +279,6 @@ export default function ChatInput({ onSend, onStop, disabled, provider, model, o
                 )}
               </div>
 
-              {/* Citations toggle — cosmetic; client-side only */}
-              <Chip
-                onClick={() => setCitationsOn((v) => !v)}
-                icon={<Quote size={12} />}
-                active={citationsOn}
-              >
-                Citations: {citationsOn ? 'on' : 'off'}
-              </Chip>
-
               {/* Spacer pushes model + send to the right */}
               <div className="flex-1" />
 
@@ -402,10 +391,8 @@ function Chip({ icon, children, onClick, active, caret, ariaExpanded }) {
       className={clsx(
         'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[12px] font-medium transition-colors shrink-0',
         active
-          // Solid accent fill when on/selected — matches the linen
-          // prototype's "Citations: on" treatment.
           ? 'border-gold bg-gold text-ink'
-          : 'border-line-strong bg-panel-2 text-ivory-dim hover:text-ivory hover:border-line-gold'
+          : 'border-transparent bg-transparent text-ivory-dim hover:text-ivory hover:border-line-strong hover:bg-panel-2'
       )}
     >
       {icon && <span className="shrink-0">{icon}</span>}
