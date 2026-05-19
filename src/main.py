@@ -38,7 +38,9 @@ from src.agents.orchestrator import (
     _detect_unrecognized_term_query,
 )
 from src.agents.anchor_resolution import (
+    apply_w70_anchor,
     ensure_anchor_in_search_results,
+    promote_anchor_to_front,
     resolve_search_query,
 )
 from src.agents.graph_rerank import rerank_with_rrf
@@ -1214,6 +1216,28 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         state.get("multi_source", {}) or {},
                         redis_client=_graph_redis,
                     )
+
+            # W97: extend the W95 architectural principle one stage
+            # downstream. W95 force-includes the anchored function in
+            # search_results when it was missing; W97 promotes it to
+            # multi_source position 0 when it was present but ranked low
+            # (W80c-v2's wider retrieval window now surfaces anchors at
+            # rank 30 only for the LLM to drift to position 0 instead).
+            # Anchor resolution must dominate both retrieval coverage
+            # (W95) and prompt prominence (W97) — the LLM anchors on
+            # whatever sits first in the source pile regardless of the
+            # system-prompt anchor block. Runs AFTER reorder_multi_source
+            # so anchor-first beats manifest task_order when they
+            # disagree. Also stamps state["w70_anchor"] for diagnostics
+            # — the duplicate apply_w70_anchor call inside
+            # stream_semantic is idempotent (determine_primary_anchor is
+            # deterministic on a fixed state).
+            with stage_timer("w97_promote_anchor", correlation_id):
+                w70_anchor = apply_w70_anchor(state)
+                state["multi_source"] = promote_anchor_to_front(
+                    state.get("multi_source", {}) or {},
+                    w70_anchor,
+                )
 
             # Send metadata event
             meta = {
