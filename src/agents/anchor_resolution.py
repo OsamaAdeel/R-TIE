@@ -85,10 +85,23 @@ def determine_primary_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
          business identifier rather than a function, so the framing
          and confidence differ.
 
-      4. Lowest-score entry in ``state["multi_source"]`` — semantic
+      4. W98 — raw_query function-name scan: when the user mentioned
+         a callable PL/SQL function in plain text (``"How does
+         <Fn> work?"``) without W76 prefix syntax and without a
+         business identifier, and exactly one of those candidates
+         survived retrieval into ``state["multi_source"]``, anchor on
+         it (high confidence, source ``"raw_query_scan"``). Closes
+         the gap W80 v1 opened: pre-W80 the classifier-blob embedding
+         pulled the named function to semantic top-1; post-W80 the
+         clean-input embedding ranks by body semantics, so the named
+         function can land anywhere in the retrieved set. This layer
+         is the explicit cascade signal that replaces the implicit
+         classifier-side safety net.
+
+      5. Lowest-score entry in ``state["multi_source"]`` — semantic
          top-1 (low confidence). Cosine distance: smaller is closer.
 
-    Returns ``None`` only when none of the four layers can produce a
+    Returns ``None`` only when none of the five layers can produce a
     candidate (e.g. ``multi_source`` is empty, a DECLINED-shaped
     state). The caller then skips anchor injection and emits the
     existing prompt unchanged.
@@ -127,6 +140,39 @@ def determine_primary_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
         }
 
     multi_source = state.get("multi_source") or {}
+
+    # Layer 4 (W98) — raw_query function-name scan. Picks the named
+    # function for "How does <Fn> work?" / "Explain <Fn>" patterns
+    # that escape Layer 1 (no "In <Fn>," prefix) and Layer 3 (no BI
+    # code). Validates against multi_source keys rather than the
+    # graph: the cascade runs AFTER fetch_multi_logic, so a candidate
+    # whose body isn't in multi_source can't be anchored on anyway —
+    # promote_anchor_to_front would no-op and the explainer would
+    # have no source body to describe. Tying the diagnostic stamp to
+    # what retrieval actually surfaced keeps w70_anchor honest.
+    #
+    # Multi-candidate rule: filter raw_query candidates to those
+    # present in multi_source (case-insensitive); fire only on a
+    # unique survivor. Zero / multiple survivors fall through to
+    # Layer 5 semantic top-1 and let W85 ANCHOR-MISMATCH-HIGH catch
+    # any drift.
+    raw_query = state.get("raw_query") or ""
+    if raw_query and multi_source:
+        candidates = extract_function_candidates(raw_query)
+        if candidates:
+            ms_upper_to_actual = {k.upper(): k for k in multi_source.keys()}
+            matched = [
+                ms_upper_to_actual[c.upper()]
+                for c in candidates
+                if c.upper() in ms_upper_to_actual
+            ]
+            if len(matched) == 1:
+                return {
+                    "function": matched[0],
+                    "source": "raw_query_scan",
+                    "confidence": "high",
+                }
+
     if multi_source:
         def _score(item):
             data = item[1]

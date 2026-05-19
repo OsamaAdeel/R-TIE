@@ -158,13 +158,15 @@ class TestDetermineprimaryAnchorCascade:
         assert out["function"] == "CS_PHASE_IN_DEDUCTION_AMOUNT"
 
     def test_semantic_top1_when_only_multi_source(self):
-        """Layer 4: with no anchor, no clean object_name, no BI, the
-        cascade picks the lowest-score (best cosine match) entry from
-        multi_source at low confidence."""
+        """Layer 5: with no anchor, no clean object_name, no BI, no
+        raw_query-named function in multi_source, the cascade picks
+        the lowest-score (best cosine match) entry from multi_source
+        at low confidence."""
         state = {
             "w76_anchor": {},
             "object_name": "How does X work?",
             "bi_routing": {},
+            "raw_query": "How does X work?",
             "multi_source": {
                 "WORST": {"score": 0.5},
                 "BEST": {"score": 0.05},
@@ -206,6 +208,215 @@ class TestDetermineprimaryAnchorCascade:
     def test_completely_empty_state_returns_none(self):
         """Defensive: missing keys must not raise."""
         assert determine_primary_anchor({}) is None
+
+
+# ---------------------------------------------------------------------------
+# W98 — raw_query function-name scan layer (cascade Layer 4)
+# ---------------------------------------------------------------------------
+
+
+class TestW98RawQueryScanLayer:
+    """W98 — closes the gap W80 v1 exposed: bare-function-name queries
+    ("How does <Fn> work?" / "Explain <Fn>") that escape Layer 1 (no
+    "In <Fn>," prefix) and Layer 3 (no BI code) used to fall straight
+    to Layer 5 semantic top-1, which on the FN_LOAD_OPS_RISK_DATA
+    canary returned the wrong function (PREV_QTR_CET1_…).
+
+    The new Layer 4 scans raw_query via ``extract_function_candidates``
+    and fires when exactly ONE candidate is also present in
+    ``multi_source`` — the post-fetch survivorship gate keeps the
+    diagnostic stamp honest about what the explainer actually has a
+    body for.
+    """
+
+    def test_bare_function_query_fires_high_confidence(self):
+        """The W84 canary: ``How does FN_LOAD_OPS_RISK_DATA work?``
+        has no W76 prefix, no BI code, no clean object_name. With the
+        named function present in multi_source (post-W80c-v2 widened
+        retrieval surfaces it at rank 30), Layer 4 anchors on it at
+        high confidence."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": "How does FN_LOAD_OPS_RISK_DATA work?",
+            "multi_source": {
+                # Note: the wrong-anchor case has the asked-about
+                # function at a low rank. Cascade still picks it via
+                # Layer 4 regardless of multi_source order.
+                "PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP": {
+                    "score": 0.10
+                },
+                "FN_LOAD_OPS_RISK_DATA": {"score": 0.30},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out == {
+            "function": "FN_LOAD_OPS_RISK_DATA",
+            "source": "raw_query_scan",
+            "confidence": "high",
+        }
+
+    def test_w76_prefix_wins_over_w98(self):
+        """When the W76 prefix rule fires, Layer 1 returns immediately
+        — Layer 4 must not double-stamp or override."""
+        state = {
+            "w76_anchor": {
+                "function": "FN_FROM_PREFIX",
+                "source": "prefix",
+            },
+            "object_name": "FN_FROM_PREFIX",
+            "bi_routing": {},
+            "raw_query": (
+                "In FN_FROM_PREFIX, what does FN_OTHER_LOOKUP do?"
+            ),
+            "multi_source": {
+                "FN_FROM_PREFIX": {"score": 0.05},
+                "FN_OTHER_LOOKUP": {"score": 0.10},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out["function"] == "FN_FROM_PREFIX"
+        assert out["source"] == "w76_prefix"
+        assert out["confidence"] == "high"
+
+    def test_bi_routing_wins_over_w98(self):
+        """BI routing (Layer 3) fires before the W98 raw_query scan
+        (Layer 4). A CAP-code query that ALSO mentions a function
+        name in body (e.g. "How is CAP973 calculated by FN_FOO?")
+        anchors via BI at medium confidence, not via W98."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {
+                "function": "CS_PHASE_IN_DEDUCTION_AMOUNT",
+                "identifier": "CAP973",
+            },
+            "raw_query": "How is CAP973 calculated?",
+            "multi_source": {
+                "CS_PHASE_IN_DEDUCTION_AMOUNT": {"score": 0.08},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out["function"] == "CS_PHASE_IN_DEDUCTION_AMOUNT"
+        assert out["source"] == "bi_routing"
+        assert out["confidence"] == "medium"
+
+    def test_no_function_named_falls_through(self):
+        """``Trace N_EOP_BAL`` — N_EOP_BAL is filtered by W58 column-
+        type-prefix rules in extract_function_candidates, so the
+        candidate list is empty and Layer 4 doesn't fire. Falls
+        through to Layer 5 semantic top-1."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": "Trace N_EOP_BAL",
+            "multi_source": {
+                "SOME_UPSTREAM_FN": {"score": 0.20},
+                "ANOTHER_FN": {"score": 0.40},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out["source"] == "semantic_top1"
+        assert out["function"] == "SOME_UPSTREAM_FN"
+        assert out["confidence"] == "low"
+
+    def test_two_candidates_one_in_multi_source_fires(self):
+        """``How does FN_X call FN_Y?`` — two callable candidates. If
+        only one survived retrieval, Layer 4 anchors on the surviving
+        one at high confidence (the user's question implies both, but
+        the body we have is the one to describe)."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": (
+                "How does FN_LOAD_OPS_RISK_DATA call FN_MISSING_HELPER?"
+            ),
+            "multi_source": {
+                "FN_LOAD_OPS_RISK_DATA": {"score": 0.20},
+                "UNRELATED_SIBLING": {"score": 0.10},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out["function"] == "FN_LOAD_OPS_RISK_DATA"
+        assert out["source"] == "raw_query_scan"
+        assert out["confidence"] == "high"
+
+    def test_candidate_not_in_multi_source_falls_through(self):
+        """``How does FN_UNKNOWN_FUNCTION work?`` — candidate passes
+        extract_function_candidates but isn't in multi_source.
+        Layer 4 honestly skips (would no-op W97 promotion anyway).
+        Falls through to Layer 5."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": "How does FN_UNKNOWN_FUNCTION work?",
+            "multi_source": {
+                "RANDOM_SEMANTIC_HIT": {"score": 0.30},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out["function"] == "RANDOM_SEMANTIC_HIT"
+        assert out["source"] == "semantic_top1"
+
+    def test_multiple_candidates_multiple_in_multi_source_falls_through(self):
+        """Genuinely ambiguous: two named functions both survived
+        retrieval. Layer 4 abstains rather than pick — Layer 5
+        semantic top-1 takes over, and W85 ANCHOR-MISMATCH-HIGH
+        provides defense-in-depth if top-1 disagrees with the user's
+        intent."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": (
+                "Compare FN_LOAD_OPS_RISK_DATA and FN_LOAD_OPS_RISK_CBA"
+            ),
+            "multi_source": {
+                "FN_LOAD_OPS_RISK_DATA": {"score": 0.20},
+                "FN_LOAD_OPS_RISK_CBA": {"score": 0.10},
+                "UNRELATED": {"score": 0.40},
+            },
+        }
+        out = determine_primary_anchor(state)
+        # Layer 4 skips. Layer 5 picks lowest-score.
+        assert out["source"] == "semantic_top1"
+        assert out["function"] == "FN_LOAD_OPS_RISK_CBA"
+
+    def test_empty_multi_source_returns_none(self):
+        """Defensive: empty multi_source means there's nothing the
+        explainer can anchor on. Layer 4 abstains (no point stamping
+        a function whose body isn't loaded), Layer 5 has nothing to
+        pick from, cascade returns None."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": "How does FN_LOAD_OPS_RISK_DATA work?",
+            "multi_source": {},
+        }
+        assert determine_primary_anchor(state) is None
+
+    def test_case_insensitive_multi_source_match(self):
+        """``extract_function_candidates`` preserves case; multi_source
+        keys are uppercase (loader convention). Layer 4 matches case-
+        insensitively and returns the multi_source key as-stored."""
+        state = {
+            "w76_anchor": {},
+            "object_name": "",
+            "bi_routing": {},
+            "raw_query": "How does Fn_Load_Ops_Risk_Data work?",
+            "multi_source": {
+                "FN_LOAD_OPS_RISK_DATA": {"score": 0.25},
+            },
+        }
+        out = determine_primary_anchor(state)
+        assert out is not None
+        assert out["function"] == "FN_LOAD_OPS_RISK_DATA"
+        assert out["source"] == "raw_query_scan"
 
 
 # ---------------------------------------------------------------------------
