@@ -108,9 +108,11 @@ def test_variable_trace_invokes_rerank_and_stamps_stats(monkeypatch):
     assert state["graph_rerank_stats"]["kept_count"] == 3
     assert state["graph_rerank_stats"]["rank_change_count"] == 2
 
-    # keep_top = resolve_top_k("VARIABLE_TRACE") + 10 = 20 + 10 = 30
+    # W80c-v2 retune: keep_top = resolve_top_k("VARIABLE_TRACE") + 20
+    # = 20 + 20 = 40 (was top_k+10 in PR 2 before the T3 chase).
     assert captured["kwargs"]["seed_count"] == 3
-    assert captured["kwargs"]["keep_top"] == 30
+    assert captured["kwargs"]["keep_top"] == 40
+    assert captured["kwargs"]["per_seed_cap"] == 20
 
 
 # =====================================================================

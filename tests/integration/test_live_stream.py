@@ -1323,20 +1323,20 @@ def w80b_significant_investment_trace_raised_floor():
     return passed, extra
 
 
-@test("W80c — significant-investment trace post-rerank: >=4 of 5, rank moved")
+@test("W80c — significant-investment trace post-rerank: 5 of 5, rank moved")
 def w80c_significant_investment_trace_post_rerank():
-    """W80c PR 2 wire-in measurement.
+    """W80c full-recall canary — measured 5 of 5 after W80c-v2 retune.
 
     Same query and target set as W80 v1 / W80b above. Asserts:
 
-      1. Recall floor >=4 of 5 — the W80c hypothesis is that 1-hop
-         graph expansion from the top-3 vector hits surfaces the
-         three downstream-consumer targets the W80b audit found
-         ranked below 20 by pure cosine (party-level identification,
-         threshold treatment, capital-deduction-exposure population).
-         Diagnostic Section 2.B traced 7 direct cross-function edges
-         within the 5-set; if the rerank mechanism is doing what
-         the diagnostic predicted, 4+ of 5 should surface.
+      1. Recall = 5 of 5 — every function in the significant-
+         investment pipeline surfaces. W80c PR 2 hit 4 of 5 with
+         T3 (SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_
+         IDENTIFICATION) at RRF rank 30, cut by the original
+         keep_top=25 window. W80c-v2 lifted keep_top from
+         ``top_k+10`` to ``top_k+20`` (35 for COLUMN_LOGIC, 40 for
+         VARIABLE_TRACE) — T3 now lands inside the window with 5
+         slots to spare.
 
       2. ``meta.graph_rerank.status == "ok"`` — the wire-in actually
          ran (didn't skip via the query-type / redis / empty gates).
@@ -1348,14 +1348,10 @@ def w80c_significant_investment_trace_post_rerank():
          2 of 5). Either way zero changes contradicts the
          diagnostic's reachability finding and is worth a fail.
 
-    Outcome categories (per W80c PR 2 spec):
-      * HIGH (4-5 of 5) — canary passes, ship.
-      * MEDIUM-IMPROVED (3 of 5) — recall_ok=False here; relax
-        floor to >=3 with this docstring noting the regression
-        from the target.
-      * FLAT (still 2 of 5) — recall_ok=False; do NOT relax floor.
-        Toheed decides between weight tuning and reverting the
-        wire-in.
+    Regression categories:
+      * 5 of 5 — canonical W80c-v2 outcome — passes.
+      * 4 of 5 — Lever B regressed; investigate before relaxing.
+      * <4 of 5 — major regression below the W80c PR 2 baseline.
     """
     r = run_query(
         "summarize the workflow for non-regulated entity investment processing"
@@ -1379,7 +1375,7 @@ def w80c_significant_investment_trace_post_rerank():
     rerank_status = graph_rerank.get("status", "missing")
     rank_change_count = graph_rerank.get("rank_change_count", 0)
 
-    recall_ok = matched_count >= 4
+    recall_ok = matched_count >= 5
     rerank_ran = rerank_status == "ok"
     rerank_moved = rank_change_count > 0
 

@@ -459,6 +459,7 @@ def rerank_with_rrf(
     weights: Optional[Dict[str, float]] = None,
     k: int = 60,
     per_seed_cap: int = _DEFAULT_PER_SEED_CAP,
+    debug_log_top_n: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Reciprocal Rank Fusion between cosine rank and graph-edge rank.
 
@@ -479,6 +480,14 @@ def rerank_with_rrf(
     cap holds expansion at ~``3 * per_seed_cap`` pre-dedupe and keeps
     load-bearing edges (highest matching_columns first) within reach
     of every seed. Pass ``per_seed_cap=0`` to disable.
+
+    ``debug_log_top_n`` (default 0 → disabled) emits a single INFO log
+    line listing the top-N candidates in the post-RRF ranked order
+    BEFORE the ``keep_top`` slice, each annotated with vector_rank,
+    graph_rank, and RRF score. Diagnostic-only — used by W80c-v2 to
+    capture where targeted functions land in the full ranking. Set
+    a positive value from the wire-in temporarily when investigating
+    a missed target; remove or set back to 0 for production.
 
     The function is pure relative to its inputs apart from Redis I/O,
     which is gated by the process-level ``EdgeIndex`` cache. The input
@@ -629,6 +638,25 @@ def rerank_with_rrf(
     )
     for rank_idx, c in enumerate(ranked, start=1):
         c.final_rank = rank_idx
+
+    if debug_log_top_n and debug_log_top_n > 0:
+        # W80c-v2 probe: emit full RRF-ranked top-N for post-mortem.
+        try:
+            parts = []
+            for c in ranked[:debug_log_top_n]:
+                rrf_score = _rrf(c)
+                parts.append(
+                    f"{c.final_rank}:{c.function_name}"
+                    f"(v={c.vector_rank},g={c.graph_rank},rrf={rrf_score:.5f})"
+                )
+            logger.info(
+                "[RERANK_TOP_N] schema=%s seed_count=%d expanded=%d "
+                "ranked_total=%d top_%d=%s",
+                resolved_schema, actual_seed_count, expanded_count,
+                len(ranked), debug_log_top_n, " | ".join(parts),
+            )
+        except Exception:
+            pass
 
     capped = ranked[:keep_top]
 

@@ -366,7 +366,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W80c. Hybrid graph + vector retrieval rerank — PR 2 wire-in IN FLIGHT (2026-05-18)
+## W80c. Hybrid graph + vector retrieval rerank — FIXED 2026-05-18 / 2026-05-19 (PR 2 at `211303e`, v2 merge SHA pending)
 
 - **Discovered:** W80b post-merge measurement (2026-05-16, recorded above). Cluster-density expansion alone (top_k=20) did not lift recall above 2 of 5. The W80b description audit demonstrated the 3 missing targets are downstream consumers in a multi-stage chain whose descriptions correctly do NOT match the canary query's "non-regulated entity workflow" semantic zone — pure cosine cannot find them without dishonest description scaffolding.
 - **Hypothesis:** Cross-function edges (writer → column → table → reader) already persisted at `graph:full:<schema>` carry chain semantics that cosine doesn't. 1-hop expansion from the top-3 vector hits should surface the 3 missing downstream-consumer targets; an RRF fusion of cosine rank and graph-edge rank should rank them inside top_k+10 without displacing the W80 v1 / W80b strong cosine hits.
@@ -380,9 +380,20 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
   - **FN_LOAD_OPS_RISK_DATA** — UNVERIFIED + PARTIAL_SOURCE_INDEXED + NAMED_FUNCTION_NOT_RETRIEVED. **Confirmed pre-existing**, NOT W80c-induced: Redis probe shows `graph:OFSMDM:FN_LOAD_OPS_RISK_DATA` (13,444 B), `graph:source:OFSMDM:FN_LOAD_OPS_RISK_DATA` (15,356 B), `graph:meta:OFSMDM:FN_LOAD_OPS_RISK_DATA` (119 B), and `rtie:vec:OFSMDM:FN_LOAD_OPS_RISK_DATA` all present — W49 PARTIAL_SOURCE detector is firing despite source being indexed. Detector-chain quirk triggered by W85 NAMED_FUNCTION_NOT_RETRIEVED; orthogonal to W80c. Loggable as a separate ticket.
   - **N_EOP_BAL** — W87 unrecognized-term short-circuit before retrieval; `graph_rerank={}` confirms rerank didn't run; no regression.
   - **CAP973** — W80c gate correctly closed for FUNCTION_LOGIC; `graph_rerank={"status":"skipped_query_type"}`; UNVERIFIED is from [W96](#w96-llm-fabricates-december-calendar-gate-on-cap-code-regulatory-adjustment-functions--new-2026-05-18) (December calendar fabrication, pre-W80c).
-- **W80c-v2 follow-up (T3 chase):** T3 surfaces in expansion (reached via T2's top-20 in the per-seed cap) but its graph_score 3.0 (2*α=1.0 + 1*0.5 reach + 0.5 sub_process match with T1) doesn't beat the close-cosine sibling candidates holding the reranked top-8. Candidate levers: bump `seed_reach` weight from 0.5 → 1.0 (T3 reaches multiple seeds — would shift ordering); raise `keep_top` from `top_k+10` to `top_k+20` (gives T3 more room without filtering); add transitive 2-hop expansion for VARIABLE_TRACE / COLUMN_LOGIC (T3 reaches T2 directly and T5 indirectly via T3→T5 with 3 cols — both signals could carry it). Defer to a separate slice; W80c PR 2 ships at 4/5.
-- **Scope limits (PR 2):** No changes to anchor_resolution, vector store, SQL Guardian, computation router, classifier, embedding logic, or frontend. `graph_rerank.py` edits scoped to (1) default weight constant comment update, (2) `expand_one_hop` cap parameter, (3) `rerank_with_rrf` parameter forwarding — all authorized as tuning extensions per Toheed's 2026-05-18 PR 2 direction; the algorithm shape is unchanged. Cross-schema reachability (OFSMDM↔OFSERM edges) remains deferred per diagnostic Q1.
-- **Merge SHA:** TBD (close-out pending).
+- **W80c-v2 (T3 chase, FIXED 2026-05-19, branch `fix/w80c-v2-t3-chase`):** Task 1 diagnostic on the PR 2 wire-in run found:
+  - `expand_one_hop` already walks bidirectionally — `EdgeIndex._build` records every edge twice (`direction='out'` under `from_function`, `direction='in'` under `to_function`); `neighbors(seed)` returns both. Lever D ("bidirectional") was already in place.
+  - Live `graph:full:OFSERM` probe of T3's edges contradicted the diagnostic doc Section 2.B: T3→T2 carries **1 matching col** (not 2 as predicted), T3→T5 carries **0 cols** (not 3). The diagnostic doc was corrected in this PR with a one-line note acknowledging predicted vs live counts.
+  - Per-seed neighbor probe: T2 has 103 neighbors with 25 candidates at ≥3 matching cols — already exceeds the cap-20 — so T3 (sort-rank 94 in T2's neighbor list) is **cut by cap=20 at T2** and never expands via T2. T3 DOES reach the expansion pool via T1's 0-col tail (sort-rank 7 in T1's 114-neighbor list, of which only 2 have matching_cols ≥ 1 and the rest are 0-col passthrough).
+  - With `debug_log_top_n=50` probe live: T3 landed at RRF rank **30** (vector_rank=21 → expansion-only, graph_rank=23, RRF score 0.02439). PR 2's `keep_top=25` cut T3 by 5 ranks.
+- **Lever chosen — B (raise `keep_top` from `top_k+10` to `top_k+20`):** Smallest blast radius — doesn't shift any RRF rank, just keeps 10 more candidates. Lever A (bump `seed_reach` 0.5 → 1.0) was the fallback but unused; α-style scaling is sort-order-invariant for the canary fixture (see PR 2 retune note above). Lever C (transitive 2-hop) doesn't apply — T3 reaches T1 and T2 directly. Lever D (bidirectional) was already in place.
+- **Empirical outcome — 5 of 5 (2026-05-19):** Canary measurement on PID 5100 with `keep_top = top_k + 20` (35 for COLUMN_LOGIC). All five canary targets matched: T1 (RRF rank 9), T2 (rank 4), T3 (**rank 30** — landed inside the new keep_top=35 with 5 slots to spare), T4 (rank 1), T5 (rank 7). `kept_count=35`, `expanded_count=41` (unchanged from PR 2 — cap=20 still applied), elapsed similar to PR 2. Lever B confirmed sufficient; Lever A not needed.
+- **W80c-v2 tests:** Existing `test_main_w80c_wire_in.py::test_variable_trace_invokes_rerank_and_stamps_stats` updated to assert `keep_top=40` (was 30) for VARIABLE_TRACE. Integration canary `w80c_significant_investment_trace_post_rerank` floor lifted ≥4 → ≥5 to lock the achieved value. `debug_log_top_n` kwarg added to `rerank_with_rrf` (default 0 → off; zero runtime cost; available as a future probe surface).
+- **Regression canaries after Lever B:**
+  - **FN_LOAD_OPS_RISK_DATA** — failure mode CHANGED. Previously UNVERIFIED with `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (function absent from `functions_analyzed`). Now UNVERIFIED with `GROUNDING-HIGH` + `GROUNDING-ANCHOR-MISMATCH-HIGH`: the larger keep_top=35 window now includes FN_LOAD_OPS_RISK_DATA in `functions_analyzed` (it lands at rank 30 by vector signal alone), but the LLM's response anchored on `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top-ranked retrieval entry) instead of the W76-anchored target. Same UNVERIFIED badge — not a W80c-v2 regression per se, but a NEW failure surface logged separately as [W97](#w97-w70w76-anchor-block-insufficient-against-top-ranked-retrieval-preference--new-2026-05-19).
+  - **N_EOP_BAL** — W87 short-circuit, unchanged.
+  - **CAP973** — W80c gate closed (FUNCTION_LOGIC), unchanged.
+- **Scope limits:** No changes to anchor_resolution, vector store, SQL Guardian, computation router, classifier, embedding logic, or frontend. `graph_rerank.py` edits scoped to (1) PR 1 surface, (2) per-seed cap (PR 2), (3) `debug_log_top_n` kwarg (W80c-v2) — all authorized as tuning / instrumentation extensions; the algorithm shape is unchanged. Cross-schema reachability (OFSMDM↔OFSERM edges) remains deferred per diagnostic Q1.
+- **Merge SHAs:** `211303e` (PR 2 merge, 2026-05-18); W80c-v2 merge SHA TBD (close-out pending).
 
 ---
 
@@ -392,8 +403,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
   - [W80 v1](#w80-v1-vector-retrieval-embedding-input-poisoning--fixed-2026-05-15-merge-sha-pending) — Vector retrieval embedding input poisoning (FIXED 2026-05-15). Narrow slice: stop poisoning the embedding input with the classifier's enriched blob. Does NOT address graph-traversal retrieval.
   - W80a — Regenerate stunted vector-store descriptions (<500 chars). Logged inside W80 v1's "Out of scope" block.
   - W80b — Hybrid BM25 + KNN retrieval with per-query-type adaptive top-K. Logged inside W80 v1's "Out of scope" block.
-  - [W80c](#w80c-hybrid-graph--vector-retrieval-rerank--pr-2-wire-in-in-flight-2026-05-18) — Hybrid graph + vector retrieval rerank. PR 1 helper merged 2026-05-18 (SHA `fe5de15`); PR 2 wire-in IN FLIGHT (this entry).
-  - W80c-v2 (potential follow-up) — weight tuning, conditional on the PR 2 empirical outcome.
+  - [W80c](#w80c-hybrid-graph--vector-retrieval-rerank--fixed-2026-05-18--2026-05-19-pr-2-at-211303e-v2-merge-sha-pending) — Hybrid graph + vector retrieval rerank. PR 1 helper merged 2026-05-18 (SHA `fe5de15`); PR 2 wire-in merged 2026-05-18 (SHA `211303e`); W80c-v2 T3 chase (Lever B: keep_top top_k+10 → top_k+20) merged 2026-05-19 → **5 of 5 recall on the canary**.
 - **Original scope (Run 8):** ~25% retrieval miss on VARIABLE_TRACE queries. Documented as a known failure surface but framed as a partial coverage gap.
 - **Actual scope (stakeholder test 2, 2026-05-14):** Closer to 100% retrieval miss on cross-table multi-stage VARIABLE_TRACE queries. The `N_SIGNIFICANT_INVST_AMT` trace returned 10 functions, 0 matching Cowork's correct 5-function pipeline. Pure name-similarity matching missed every upstream function operating on different table names. Evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
 - **Implication for the fix:** Semantic search by name-similarity alone is not sufficient. The umbrella fix must consider graph-edge traversal (writer → column → table → reader) as a signal complementary to semantic search, not a replacement. Multi-stage chains span sub-processes named differently from the target variable; the only reliable retrieval signal across those boundaries is the manifest-anchored graph itself. W80 v1 (embedding-input cleanup) is a prerequisite — it removes one source of noise — but does NOT itself address cross-table chains.
@@ -467,6 +477,27 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 **Detection signal.** Already firing — the existing W83a / W83b checks at [src/agents/logic_explainer.py](src/agents/logic_explainer.py) catch the December template phrase against the cited source body. No new detector needed.
 
 **Next step.** Audit the explainer system prompt (W57's `SEMANTIC_EXPLANATION_PROMPT` and the W70 anchor block at [src/agents/anchor_resolution.py:153-184](src/agents/anchor_resolution.py#L153-L184)) for any phrasing that biases toward calendar gates. Add a calendar-grounding clause if the audit doesn't surface one. Verify the fix against the same two canaries (TEST 3, TEST 3b in [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py)) — after W96 lands, those tests should clear AND the badge should reach VERIFIED.
+
+---
+
+## W97. W70/W76 anchor block insufficient against top-ranked retrieval preference — NEW 2026-05-19
+
+**Status:** Backlog. Surfaced during W80c-v2 canary verification (2026-05-19). Not blocking W80c-v2 — same UNVERIFIED badge as before, different failure mode. Loggable as a separate anchor-strength ticket.
+
+**Failure surface.** Query `"How does FN_LOAD_OPS_RISK_DATA work?"` on the W80c-v2 build returns badge `UNVERIFIED` with warnings:
+
+* `GROUNDING-HIGH: user asked about 'FN_LOAD_OPS_RISK_DATA' (0 mentions) but response primarily cites 'PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP' (3 mentions, >2x ratio)`
+* `GROUNDING-ANCHOR-MISMATCH-HIGH: response anchors on 'PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP' but user asked about 'FN_LOAD_OPS_RISK_DATA'`
+
+Pre-W80c-v2 (`keep_top = top_k + 10`), the same query failed differently: `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (the function wasn't in `functions_analyzed` at all). Lever B's bigger window (`keep_top = top_k + 20`) now retrieves FN_LOAD_OPS_RISK_DATA at functions_analyzed rank 30, but the LLM explainer drifts to the top-ranked retrieval entry instead of the W76-anchored target.
+
+**Likely root cause.** The W70 anchor block at [src/agents/anchor_resolution.py:153-184](src/agents/anchor_resolution.py#L153-L184) prepends a `PRIMARY FUNCTION: <fn>` directive to `SEMANTIC_EXPLANATION_PROMPT`, but the LLM treats the top retrieval entry as a stronger signal than the anchor directive when the top entry has substantial source content and the anchor's content is sparser. With the larger retrieval window exposing more functions, the LLM has more "evidence" pointing to a sibling and over-weights it.
+
+**Why not blocking W80c-v2.** Architecturally distinct: W80c-v2 closes the retrieval-coverage gap (T3 now surfaces); W97 is an anchor-strength gap (the LLM doesn't honor the W76/W70 anchor block hard enough when retrieval surfaces stronger-evidence alternatives). Both canary states are UNVERIFIED — the badge didn't regress. W97 may have existed pre-W80c-v2 but was masked by the function never reaching retrieval.
+
+**Detection signal.** Already firing — both `GROUNDING-HIGH` (asked vs cited token ratio) and `GROUNDING-ANCHOR-MISMATCH-HIGH` catch the drift. No new detector needed.
+
+**Next step.** Audit the anchor block strength. Options: (a) escalate the anchor directive from "MUST describe THIS function" → a hard rule that any sibling description outside the anchor must be ≤ a fraction of the anchor's coverage; (b) re-order `multi_source` so the anchor lands at index 0 (W95 already does this for `search_results`, but the post-fetch `multi_source` ordering might not preserve it); (c) provide the LLM the anchor's source body BEFORE the sibling content in the prompt. Verify against the FN_LOAD_OPS_RISK_DATA canary — after W97 lands, the badge should reach VERIFIED.
 
 ---
 

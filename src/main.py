@@ -1996,13 +1996,21 @@ def apply_w80c_rerank(
         state["graph_rerank_stats"] = {"status": "skipped_empty_results"}  # type: ignore[typeddict-item]
         return
 
-    keep_top = resolve_top_k(query_type) + 10
     # PR 2 retune (2026-05-18): per-seed cap of 20 holds expansion
     # blast radius. First wire-in canary measured 137 expansion
     # candidates from 3 FCT_ENTITY_INFO-touching seeds and pushed a
     # strong-cosine top-1 hit (T1) out of the keep_top=25 window;
     # cap=20 trims the long tail of 0-col passthrough neighbours
     # while keeping every load-bearing edge.
+    #
+    # W80c-v2 (2026-05-18): keep_top offset lifted +10 → +20 to chase
+    # T3 (SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION).
+    # Diagnostic showed T3 expanded via T1 (cap-20 sort-rank 7 within
+    # T1's 114-neighbour list) but was scored at the margin of the
+    # PR 2 keep_top=25 window. Doesn't shift any RRF rank — just
+    # keeps 10 more candidates. Fetch cost ~+40% per VARIABLE_TRACE /
+    # COLUMN_LOGIC, bounded acceptable.
+    keep_top = resolve_top_k(query_type) + 20
     per_seed_cap = 20
     try:
         with stage_timer(
