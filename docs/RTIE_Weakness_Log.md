@@ -389,7 +389,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 - **Empirical outcome — 5 of 5 (2026-05-19):** Canary measurement on PID 5100 with `keep_top = top_k + 20` (35 for COLUMN_LOGIC). All five canary targets matched: T1 (RRF rank 9), T2 (rank 4), T3 (**rank 30** — landed inside the new keep_top=35 with 5 slots to spare), T4 (rank 1), T5 (rank 7). `kept_count=35`, `expanded_count=41` (unchanged from PR 2 — cap=20 still applied), elapsed similar to PR 2. Lever B confirmed sufficient; Lever A not needed.
 - **W80c-v2 tests:** Existing `test_main_w80c_wire_in.py::test_variable_trace_invokes_rerank_and_stamps_stats` updated to assert `keep_top=40` (was 30) for VARIABLE_TRACE. Integration canary `w80c_significant_investment_trace_post_rerank` floor lifted ≥4 → ≥5 to lock the achieved value. `debug_log_top_n` kwarg added to `rerank_with_rrf` (default 0 → off; zero runtime cost; available as a future probe surface).
 - **Regression canaries after Lever B:**
-  - **FN_LOAD_OPS_RISK_DATA** — failure mode CHANGED. Previously UNVERIFIED with `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (function absent from `functions_analyzed`). Now UNVERIFIED with `GROUNDING-HIGH` + `GROUNDING-ANCHOR-MISMATCH-HIGH`: the larger keep_top=35 window now includes FN_LOAD_OPS_RISK_DATA in `functions_analyzed` (it lands at rank 30 by vector signal alone), but the LLM's response anchored on `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top-ranked retrieval entry) instead of the W76-anchored target. Same UNVERIFIED badge — not a W80c-v2 regression per se, but a NEW failure surface logged separately as [W97](#w97-w70w76-anchor-block-insufficient-against-top-ranked-retrieval-preference--new-2026-05-19).
+  - **FN_LOAD_OPS_RISK_DATA** — failure mode CHANGED. Previously UNVERIFIED with `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (function absent from `functions_analyzed`). Now UNVERIFIED with `GROUNDING-HIGH` + `GROUNDING-ANCHOR-MISMATCH-HIGH`: the larger keep_top=35 window now includes FN_LOAD_OPS_RISK_DATA in `functions_analyzed` (it lands at rank 30 by vector signal alone), but the LLM's response anchored on `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top-ranked retrieval entry) instead of the W76-anchored target. Same UNVERIFIED badge — not a W80c-v2 regression per se, but a NEW failure surface logged separately as [W97](#w97-w70w76-anchor-block-insufficient-against-top-ranked-retrieval-preference--fixed-2026-05-19-merge-sha-pending) (FIXED 2026-05-19 by anchor-promote-to-front).
   - **N_EOP_BAL** — W87 short-circuit, unchanged.
   - **CAP973** — W80c gate closed (FUNCTION_LOGIC), unchanged.
 - **Scope limits:** No changes to anchor_resolution, vector store, SQL Guardian, computation router, classifier, embedding logic, or frontend. `graph_rerank.py` edits scoped to (1) PR 1 surface, (2) per-seed cap (PR 2), (3) `debug_log_top_n` kwarg (W80c-v2) — all authorized as tuning / instrumentation extensions; the algorithm shape is unchanged. Cross-schema reachability (OFSMDM↔OFSERM edges) remains deferred per diagnostic Q1.
@@ -480,9 +480,9 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W97. W70/W76 anchor block insufficient against top-ranked retrieval preference — NEW 2026-05-19
+## W97. W70/W76 anchor block insufficient against top-ranked retrieval preference — FIXED 2026-05-19 (merge SHA pending)
 
-**Status:** Backlog. Surfaced during W80c-v2 canary verification (2026-05-19). Not blocking W80c-v2 — same UNVERIFIED badge as before, different failure mode. Loggable as a separate anchor-strength ticket.
+**Status:** FIXED 2026-05-19 by promoting the anchored function to `multi_source` position 0 in `src/main.py` after `fetch_multi_logic` (and after W89's `reorder_multi_source`). New helper: `promote_anchor_to_front` in `src/agents/anchor_resolution.py`, sibling to W95's `ensure_anchor_in_search_results`. Surfaced during W80c-v2 canary verification (2026-05-19); not a regression — W80c-v2's wider retrieval window simply exposed an existing prompt-prominence gap.
 
 **Failure surface.** Query `"How does FN_LOAD_OPS_RISK_DATA work?"` on the W80c-v2 build returns badge `UNVERIFIED` with warnings:
 
@@ -491,13 +491,89 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 Pre-W80c-v2 (`keep_top = top_k + 10`), the same query failed differently: `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (the function wasn't in `functions_analyzed` at all). Lever B's bigger window (`keep_top = top_k + 20`) now retrieves FN_LOAD_OPS_RISK_DATA at functions_analyzed rank 30, but the LLM explainer drifts to the top-ranked retrieval entry instead of the W76-anchored target.
 
-**Likely root cause.** The W70 anchor block at [src/agents/anchor_resolution.py:153-184](src/agents/anchor_resolution.py#L153-L184) prepends a `PRIMARY FUNCTION: <fn>` directive to `SEMANTIC_EXPLANATION_PROMPT`, but the LLM treats the top retrieval entry as a stronger signal than the anchor directive when the top entry has substantial source content and the anchor's content is sparser. With the larger retrieval window exposing more functions, the LLM has more "evidence" pointing to a sibling and over-weights it.
+**Original root-cause hypothesis (partially wrong, corrected below).** The W70 anchor block at [src/agents/anchor_resolution.py:153-184](src/agents/anchor_resolution.py#L153-L184) prepends a `PRIMARY FUNCTION: <fn>` directive to `SEMANTIC_EXPLANATION_PROMPT`. The original hypothesis was that the LLM treats the top retrieval entry as a stronger signal than the anchor directive when the top entry has substantial source content and the anchor's content is sparser.
+
+**Corrected root-cause (post-canary, 2026-05-19).** Live canary verification revealed the hypothesis was *partially* wrong. The LLM is NOT ignoring the anchor directive — it correctly follows whatever `PRIMARY FUNCTION: <fn>` says. The actual failure mode for the FN_LOAD_OPS_RISK_DATA query is **upstream**: the W70 anchor cascade resolves to the WRONG function (`PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP`, via layer 4 semantic top-1), not to `FN_LOAD_OPS_RISK_DATA`. The query pattern `"How does <FN> work?"` doesn't trigger W76 prefix (no `In <X>, ...` syntax), doesn't populate a clean `object_name` from the classifier, and isn't a BI code — so cascade layers 1-3 all miss and layer 4 picks the strongest vector hit. The LLM then dutifully anchors on the wrong function, and W85 fires `ANCHOR-MISMATCH-HIGH` because the resolved anchor differs from the asked-about function. This cascade-resolution gap is logged as [W98](#w98-anchor-cascade-missing-scan-raw_query-for-known-function-names-layer--new-2026-05-19).
+
+**W97's architectural correctness still holds.** When the cascade resolves the right anchor (BI-routing branch: `CAP973 → CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT`), W97 verifiably promotes it to `multi_source[0]` and the LLM anchors correctly end-to-end. The CAP973 canary [`w97_anchor_promotion_cap973`](tests/integration/test_live_stream.py) locks this contract. W97 closes the prompt-prominence half of the anchor architecture independently of whether the cascade resolution itself is correct.
 
 **Why not blocking W80c-v2.** Architecturally distinct: W80c-v2 closes the retrieval-coverage gap (T3 now surfaces); W97 is an anchor-strength gap (the LLM doesn't honor the W76/W70 anchor block hard enough when retrieval surfaces stronger-evidence alternatives). Both canary states are UNVERIFIED — the badge didn't regress. W97 may have existed pre-W80c-v2 but was masked by the function never reaching retrieval.
 
 **Detection signal.** Already firing — both `GROUNDING-HIGH` (asked vs cited token ratio) and `GROUNDING-ANCHOR-MISMATCH-HIGH` catch the drift. No new detector needed.
 
-**Next step.** Audit the anchor block strength. Options: (a) escalate the anchor directive from "MUST describe THIS function" → a hard rule that any sibling description outside the anchor must be ≤ a fraction of the anchor's coverage; (b) re-order `multi_source` so the anchor lands at index 0 (W95 already does this for `search_results`, but the post-fetch `multi_source` ordering might not preserve it); (c) provide the LLM the anchor's source body BEFORE the sibling content in the prompt. Verify against the FN_LOAD_OPS_RISK_DATA canary — after W97 lands, the badge should reach VERIFIED.
+**Fix — Lever H4 (anchor-promote, structural):** New helper `promote_anchor_to_front(multi_source, anchor)` in [src/agents/anchor_resolution.py](src/agents/anchor_resolution.py) rebuilds `multi_source` with the anchor's entry first when the anchor IS in the retrieved set but at a non-zero position. Idempotent / no-op for missing anchor, missing entry, or already-at-front. Wired into [src/main.py](src/main.py) after `fetch_multi_logic` and AFTER `reorder_multi_source` (W89) so anchor-first wins over manifest task_order when they disagree — answering the function the user asked about beats showing the chain in execution order.
+
+**Why H4 over H1 (language) / H2 (placement) / H3 (filter):**
+
+* **H1 rejected** — anchor block already directive ("MUST describe THIS function ... other functions are reference material only ... say so explicitly rather than describing a different function"). The directive sits ~3500 tokens before the source pile in the system message; sharpening language doesn't bridge that distance.
+* **H2 deferred** — adding a one-line `ANCHOR: {fn}` reminder at the end of the user message (recency-of-instruction) is layered as a follow-on if H4 alone is insufficient. Not needed if the canary lands VERIFIED.
+* **H3 rejected** — slicing `multi_source` to anchor + top-N siblings would lose W80c-v2's recall gains and interact with W89's chain-reorder for VARIABLE_TRACE.
+* **H4 chosen** — primacy-of-appearance in the source pile, same architectural pattern as W95 (anchor at index 0). Prompt-only effect, no shape change to `multi_source`, no detector change, no retrieval change.
+
+**Architectural principle (recorded by W97):** Anchor resolution must dominate both retrieval coverage AND prompt prominence. W95 closed coverage (anchor IN search_results); W97 closes prominence (anchor at multi_source position 0 → LLM reads its source first). The two together form the complete contract: when a deterministic upstream signal (W76 prefix, BI routing, clean object_name) names the function the user wants, that function must be both retrieved AND placed first in the source pile the LLM reads.
+
+**Tests:** 13 unit tests in [tests/unit/agents/test_w97_promote_anchor.py](tests/unit/agents/test_w97_promote_anchor.py) covering happy path, case-insensitive match, already-at-front no-op, anchor-not-in-multi_source no-op, defensive no-ops (None / empty function / missing key), and idempotency. Integration canary `w97_anchor_promotion_cap973` in [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) asserts CAP973 → `functions_analyzed[0] == CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT` AND `diagnostic.w70_anchor` matches the front entry. Badge is **not** asserted — CAP973 still trips the unrelated W96 December calendar fabrication. The originally-proposed FN_LOAD canary was reframed to CAP973 because the FN_LOAD query exercises a cascade-resolution gap (W98) orthogonal to W97's prompt-prominence contract.
+
+**Regression canaries (must remain unchanged post-W97):**
+
+* **W80c significant-investment trace** — recall 5/5; rerank still runs; rank_change_count > 0.
+* **CAP973 BI-routing** — UNVERIFIED retained (W96 December calendar fabrication still pending); BI routing path still resolves a function and `functions_analyzed` is non-empty.
+* **N_EOP_BAL** — W87 unrecognized-term short-circuit still fires; rerank skipped.
+
+**Scope limits:** No changes to detectors (W37/W45/W49/W57/W83a/B/C/W85/W86/W87/W88/W89/W93/W95), vector store, graph_rerank, computation router, classifier, embedding logic, SQL Guardian, or frontend. `apply_w70_anchor` is now called twice per request (once in main.py for W97 promote, once in `stream_semantic` for anchor block) — idempotent because `determine_primary_anchor` is deterministic on a fixed state; the duplicate is the smallest blast radius edit.
+
+**Merge SHA:** pending.
+
+---
+
+## W98. Anchor cascade missing "scan raw_query for known function names" layer — NEW 2026-05-19
+
+**Status:** Backlog. Surfaced during W97 canary verification (2026-05-19) when the FN_LOAD_OPS_RISK_DATA query exposed that the W70 anchor cascade resolves to the WRONG function for the `"How does <FN> work?"` pattern. Not blocking W97 — W97 closes the prompt-prominence half of the anchor architecture independently of cascade correctness; W98 closes the resolution-input half.
+
+**Failure surface.** Query `"How does FN_LOAD_OPS_RISK_DATA work?"` returns badge `UNVERIFIED` with `GROUNDING-ANCHOR-MISMATCH-HIGH: response anchors on 'PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP' but user asked about 'FN_LOAD_OPS_RISK_DATA'`. The cascade in [src/agents/anchor_resolution.py:63-150](src/agents/anchor_resolution.py#L63-L150) `determine_primary_anchor` flows through:
+
+* Layer 1 (`w76_anchor.function`) — null (no `In <X>, ...` prefix syntax).
+* Layer 2 (clean `object_name`) — not firing (classifier does not emit clean function name for this pattern).
+* Layer 3 (`bi_routing.function`) — null (not a CAP code / business identifier).
+* Layer 4 (semantic top-1 from `multi_source`) — picks `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top vector hit), which is NOT what the user asked about.
+
+The LLM correctly follows the (wrong) anchor directive; W85's `ANCHOR-MISMATCH-HIGH` detector catches the divergence between cascade-resolved anchor and asked-about function. W97's promote-to-front faithfully promotes the wrong anchor to `multi_source[0]`, which is W97's contract (promote whatever the cascade said) — not a W97 bug.
+
+**Root cause.** The cascade has no layer for "user mentioned a function name in plain text, without W76 prefix or BI code". `_w57_resolve_primary_function` (W76b) and `extract_function_candidates` already exist and scan raw_query for function-name candidates — the cascade just doesn't consult them. A 5th layer (or extending layer 2 to consult raw_query when `object_name` is empty/non-clean) would close the gap.
+
+**Likely fix (W98 v1).** Add a layer between current layers 3 and 4 in `determine_primary_anchor`:
+```python
+# Layer 4 (new): scan raw_query for known function names.
+raw_query = state.get("raw_query") or ""
+candidates = extract_function_candidates(raw_query)
+# Filter to candidates actually present in the loaded corpus.
+known = [c for c in candidates if function_exists(c, redis_client)]
+if len(known) == 1:
+    return {"function": known[0], "source": "raw_query_scan", "confidence": "high"}
+```
+Multi-candidate case ambiguous — fall through to layer 5 (current layer 4, semantic top-1) and let W85 catch the mismatch. High confidence single-candidate case wins.
+
+**W84 test contradiction to investigate as W98 discovery.** [test_live_stream.py:556-590](tests/integration/test_live_stream.py#L556-L590) `test_w84_diagnostic_single_function` asserts:
+```python
+"w70_anchor_resolves_to_asked_function": (
+    diag.get("w70_anchor") == "FN_LOAD_OPS_RISK_DATA"
+),
+```
+for the exact query `"How does FN_LOAD_OPS_RISK_DATA work?"`. Live runs (2026-05-19) show `w70_anchor` resolves to `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` instead. Two possibilities:
+
+1. **Aspirational test** — the test was written to specify desired cascade behavior that was never implemented.
+2. **Cascade regression** — the cascade once resolved correctly (perhaps via a clean `object_name` produced by an earlier classifier) and has since regressed (post-W80 classifier no longer writes `object_name` for non-anchored queries, per the `resolve_search_query` docstring at anchor_resolution.py:213-234).
+
+Either way, the W84 test is the **spec** for what W98 must restore. Discovery work: run the W84 test on main and confirm it's currently failing, git-blame the relevant cascade and classifier history to identify when the behavior diverged, and decide whether the fix is in the cascade (add raw_query scan layer) or in the classifier (re-emit clean object_name when raw_query contains a single known function name) or both.
+
+**Detection signal.** Already firing — `GROUNDING-ANCHOR-MISMATCH-HIGH` (W85) catches the cascade-anchor vs asked-function divergence. No new detector needed.
+
+**Scope when implemented.**
+
+* MAY change: `src/agents/anchor_resolution.py` (cascade layer), possibly `src/agents/orchestrator.py` (classifier path to clean `object_name`), `tests/unit/agents/test_w70_anchor_injection.py` (cascade test additions), `tests/integration/test_live_stream.py` (re-enable the FN_LOAD canary as the W98 verification — assert VERIFIED + `functions_analyzed[0] == FN_LOAD_OPS_RISK_DATA` + neither `GROUNDING-HIGH` nor `GROUNDING-ANCHOR-MISMATCH-HIGH` fires).
+* MUST NOT change: any detector, vector store, retrieval / rerank, W97 promote-to-front (the W97 contract is correct and W98 must preserve it — anchor at multi_source[0] regardless of which cascade layer resolved it).
+
+**Priority.** Medium. W97 reduced the FN_LOAD-style failure mode's blast radius (anchor still wrong, but at least position-0 and anchor agree so the LLM doesn't drift further). Full fix requires W98.
 
 ---
 

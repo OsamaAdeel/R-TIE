@@ -350,3 +350,90 @@ def apply_w70_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
     else:
         logger.info("apply_w70_anchor: no anchor available")
     return anchor
+
+
+def promote_anchor_to_front(
+    multi_source: Dict[str, Any],
+    anchor: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """W97 — promote the anchored function to ``multi_source`` position 0.
+
+    Architectural principle: anchor resolution must dominate both
+    retrieval coverage AND prompt prominence. W95
+    (:func:`ensure_anchor_in_search_results`) closed the coverage gap —
+    when the anchored function was missing from ``search_results`` it
+    is force-injected at index 0. W97 closes the prominence gap — when
+    the anchored function IS in ``multi_source`` but at a low rank
+    (e.g. position 30 of 35 after the W80c-v2 widened retrieval
+    window), the explainer LLM reads 30 sibling function sections
+    before reaching the anchored body and over-weights whichever
+    sibling occupies position 0. Promoting the anchor to position 0
+    of ``multi_source`` places its source first in the user-message
+    function pile, reinforcing the system-prompt anchor block with
+    primacy-of-appearance.
+
+    W80c-v2 canary surfaced the failure: the FN_LOAD_OPS_RISK_DATA
+    query landed UNVERIFIED with both ``GROUNDING-HIGH`` and
+    ``GROUNDING-ANCHOR-MISMATCH-HIGH`` despite the W70 high-confidence
+    anchor block (``"PRIMARY FUNCTION: FN_LOAD_OPS_RISK_DATA — your
+    explanation MUST describe THIS function ..."``). The directive sits
+    ~3500 tokens earlier in the system message while a wall of 30
+    sibling function bodies dominates the user message — the LLM
+    drifted to the position-0 retrieval entry
+    (``PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP``).
+
+    Idempotent. No-op when:
+
+      * ``anchor`` is ``None`` or has an empty ``function``.
+      * ``multi_source`` is empty.
+      * The anchored function is not in ``multi_source``
+        (case-insensitive match on the key). The companion W95 helper
+        runs upstream of ``fetch_multi_logic`` so the anchor IS
+        normally present by the time W97 fires — but a no-op here is
+        the safe behaviour when retrieval and anchor disagree.
+      * The anchored function is already at position 0 (the W95
+        injection path).
+
+    Preserves the relative order of all non-anchor entries. The
+    returned dict is fresh — the input is not mutated. Python's
+    insertion-order semantics (3.7+) carry through to downstream
+    callers that iterate ``multi_source.items()`` or
+    ``list(multi_source.keys())``.
+
+    Runs AFTER :func:`chain_ordering.reorder_multi_source` (W89) in
+    :mod:`src.main` so anchor-first wins when the manifest task_order
+    chain and the user's explicit anchor disagree — answering the
+    function the user asked about beats showing the chain in execution
+    order.
+    """
+    if not multi_source:
+        return multi_source
+    if not isinstance(anchor, dict):
+        return multi_source
+    anchor_fn = (anchor.get("function") or "").strip()
+    if not anchor_fn:
+        return multi_source
+
+    anchor_upper = anchor_fn.upper()
+    keys = list(multi_source.keys())
+    # Case-insensitive lookup so we tolerate any casing mismatch
+    # between the anchor cascade and the search_results key.
+    upper_to_actual = {k.upper(): k for k in keys}
+    actual_key = upper_to_actual.get(anchor_upper)
+    if actual_key is None:
+        return multi_source
+    if keys[0].upper() == anchor_upper:
+        return multi_source
+
+    promoted = {actual_key: multi_source[actual_key]}
+    for k in keys:
+        if k == actual_key:
+            continue
+        promoted[k] = multi_source[k]
+
+    logger.info(
+        "promote_anchor_to_front: moved %s from position %d to position 0 "
+        "(multi_source size=%d)",
+        actual_key, keys.index(actual_key), len(keys),
+    )
+    return promoted

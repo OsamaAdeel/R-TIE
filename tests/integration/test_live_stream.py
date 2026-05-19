@@ -1423,6 +1423,88 @@ def w80_anchored_function_regression():
     return passed, extra
 
 
+@test("W97 — BI-routed anchor promoted to multi_source position 0 (CAP973)")
+def w97_anchor_promotion_cap973():
+    """W97 closes the prompt-prominence half of the anchor architecture.
+
+    W95 force-includes the anchored function in ``search_results`` when
+    retrieval missed it; W97 promotes it to ``multi_source[0]`` when
+    retrieval surfaced it at a low rank. Together: anchor resolution
+    must dominate both retrieval coverage (W95) AND prompt prominence
+    (W97). The LLM reads multi_source.items() in order — whatever sits
+    at position 0 is the de facto subject regardless of the W70
+    anchor block in the system message.
+
+    This canary exercises the **BI-routing branch** where the cascade
+    correctly resolves the anchor: ``CAP973`` → BI routing →
+    ``CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT``. Pre-W97
+    this anchor might not have been at ``multi_source[0]`` (W80c-v2's
+    wider retrieval window can rerank a sibling above it). Post-W97
+    the anchor wins position 0 unconditionally.
+
+    Why NOT the FN_LOAD_OPS_RISK_DATA query (W97's originating canary):
+    that query exposes a separate cascade-resolution gap — the
+    ``How does <FN> work?`` pattern doesn't trigger W76 prefix, doesn't
+    populate clean ``object_name``, and isn't a BI code, so the cascade
+    falls through to layer 4 (semantic top-1) and resolves to the WRONG
+    function (``PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP``). W97's
+    promote-to-front then faithfully promotes the wrong anchor to
+    position 0. The cascade gap is logged separately as W98 — the
+    pre-existing [test_w84_diagnostic_single_function](#L556) asserts
+    cascade behavior that doesn't match live runs, which is the spec
+    W98 must restore.
+
+    Post-W97 assertions:
+
+      1. ``functions_analyzed[0]`` (case-insensitive) is
+         CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT — the
+         BI-resolved anchor wins position 0.
+      2. ``diagnostic.w70_anchor`` matches — confirms the cascade
+         resolved through the BI-routing layer and W97 promoted that
+         same function.
+
+    Badge is NOT asserted: CAP973's narrative still trips the W96
+    December calendar fabrication (a content ticket downstream of
+    retrieval, unrelated to W97). Badge stays UNVERIFIED for that
+    reason — orthogonal to W97's contract.
+
+    Regression categories:
+      * anchor at index 0 + diagnostic match — canonical W97 outcome —
+        passes.
+      * anchor in fns but not at index 0 — promotion didn't run;
+        investigate the call site ordering before relaxing.
+      * diagnostic.w70_anchor ≠ functions_analyzed[0] — cascade and
+        promote disagree; potential ordering bug.
+    """
+    r = run_query("How is CAP973 calculated?")
+    d = r["done"] or {}
+
+    meta_event = None
+    for ev_name, payload in r["events"]:
+        if ev_name == "meta":
+            meta_event = payload
+            break
+    fns = (meta_event or {}).get("functions_analyzed") or []
+    fns_upper = [f.upper() for f in fns]
+
+    expected = "CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT"
+    anchor_at_front = len(fns_upper) > 0 and fns_upper[0] == expected
+
+    diag = d.get("diagnostic") or {}
+    diag_anchor = (diag.get("w70_anchor") or "").upper()
+    diag_matches_front = diag_anchor == expected
+
+    passed = anchor_at_front and diag_matches_front
+    extra = (
+        summarize_done(d)
+        + f" anchor_at_front={anchor_at_front}"
+        + f" diag_matches_front={diag_matches_front}"
+        + f" diag_w70_anchor={diag.get('w70_anchor')!r}"
+        + f" fns_head={fns[:3]}"
+    )
+    return passed, extra
+
+
 @test("W80 — CAP-code BI-routing regression unchanged")
 def w80_cap_code_regression():
     """BI routing fires; object_name = resolved function name; embedding
