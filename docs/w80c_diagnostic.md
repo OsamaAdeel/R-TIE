@@ -187,6 +187,23 @@ columns — the table is touched in both, but the columns shared are
 just dimension surrogates that pass through every function in the
 chain.
 
+> **W80c-v2 correction (2026-05-18):** the diagram and table above
+> overstated the matching-column counts on the {3}→{2,5} edges. The
+> counts were predictions from edge inspection that did not match live
+> Redis at the time of writing. Verified counts in
+> `graph:full:OFSERM`:
+>
+> | Edge | Predicted (above) | Actual (live Redis) |
+> |---|---|---|
+> | {3} → {2} via FCT_PARTY_SHR_HLD_PERCENT | 2 cols | **1 col** (`F_SIGNIFICANT_INVESTMENT_IND`) |
+> | {3} → {5} via FCT_PARTY_SHR_HLD_PERCENT | 3 cols | **0 cols** |
+>
+> The Section 1.B reachability finding (every missing target is 1 hop
+> from at least one surfaced target) still holds — {3}'s 1-col edge to
+> {2} preserves the writer→reader path. The narrower edge weight is
+> why the W80c PR 2 rerank surfaced {4} and {5} but kept {3} on the
+> margin; see [W80c-v2 in RTIE_Weakness_Log.md](RTIE_Weakness_Log.md).
+
 ### 2.C Out-of-corpus / schema-boundary check
 
 Negative — all 5 in OFSERM. No traversal required across schema
