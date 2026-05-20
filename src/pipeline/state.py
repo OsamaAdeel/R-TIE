@@ -99,6 +99,13 @@ class LogicState(TypedDict):
     # the answer came from. List of schema names; empty when nothing was
     # retrieved (DECLINED / scope-mismatch case).
     schemas_searched: list
+    # W92: schemas whose source bodies were fetched into multi_source
+    # this turn — i.e. what the body actually cites. Derived as
+    # ``sorted({e["schema"] for e in multi_source.values() if e["schema"]})``
+    # so the order is deterministic. Distinct from ``schemas_searched``
+    # (vector retrieval coverage) and ``schema`` (primary anchor).
+    # Empty list when multi_source was empty / DECLINED.
+    cited_schemas: list
     # Final output
     output: dict
     partial_flag: bool
