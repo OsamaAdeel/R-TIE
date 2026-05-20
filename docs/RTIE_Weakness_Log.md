@@ -455,11 +455,11 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W91. `(SCHEMA)` placeholder leak in markdown — NEW 2026-05-14
+## W91. `(SCHEMA)` placeholder leak in markdown — FIXED 2026-05-20 (merge SHA ef8b498)
 
 - **Discovered:** Stakeholder test 2 (2026-05-14). Response heading shows literal `(SCHEMA)` — a template placeholder that wasn't substituted with the actual schema name. Also surfaced in Q9 of the 2026-05-12 stakeholder test, so this is reproducible.
 - **Root cause:** `VARIABLE_TRACE_PROMPT` in [src/agents/variable_tracer.py](src/agents/variable_tracer.py) instructs the LLM to `Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)`. The LLM treats `(SCHEMA)` as literal text rather than a variable to fill. The prompt should either pre-substitute the schema or remove the bracketed token.
-- **Priority:** Small fix; bundle with W50 (formatting pass).
+- **Fix:** Changed the FORMAT line's `(SCHEMA)` token to `{SCHEMA}` and threaded `state["schema"]` through `explain_chain` and `stream_chain` so the substitution happens in Python before `SystemMessage` is built. Used `str.replace("{SCHEMA}", schema_label)` rather than `str.format` because the template also contains `{VARIABLE_NAME}` as an LLM-facing literal that `.format` would `KeyError` on. Empty-schema fallback is the literal `"the schema"`. Five unit tests in `tests/unit/agents/test_w91_schema_placeholder.py` lock down the template invariant, the substitution on both code paths, and the untouched `(OFSMDM)` example block in `UNGROUNDED_IDENTIFIER_PROMPT` (W92 remains out of scope — primary-anchor schema label only).
 
 ---
 
