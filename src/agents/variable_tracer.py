@@ -398,7 +398,7 @@ RULES:
    - Any important conditions (e.g. December-only)
 
 FORMAT:
-- Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` (SCHEMA)
+- Start with: ## {VARIABLE_NAME} in `FUNCTION_NAME` ({SCHEMA})
 - Use ### for each function/step
 - Include ```sql code blocks with the relevant PL/SQL
 - Put line references in section headers: ### Step 1: Initial Insert (Lines 203-223)
@@ -886,6 +886,7 @@ class VariableTracer:
         user_query: str,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        schema: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send the compact transformation chain to the LLM for explanation."""
         correlation_id = get_correlation_id()
@@ -910,8 +911,15 @@ class VariableTracer:
             f"Cite every function name and line number."
         )
 
+        # W91: substitute {SCHEMA} in the template (the only Python-style
+        # token meant for interpolation). `.replace` is used instead of
+        # `.format` because the template also contains {VARIABLE_NAME} as
+        # a literal LLM-facing instruction that must not be interpolated.
+        schema_label = schema or "the schema"
+        system_content = VARIABLE_TRACE_PROMPT.replace("{SCHEMA}", schema_label)
+
         messages = [
-            SystemMessage(content=VARIABLE_TRACE_PROMPT),
+            SystemMessage(content=system_content),
             HumanMessage(content=user_prompt),
         ]
 
@@ -946,6 +954,7 @@ class VariableTracer:
         user_query: str,
         provider: str | None = None,
         model: str | None = None,
+        schema: str | None = None,
     ):
         """Stream variable trace explanation tokens as an async generator.
 
@@ -970,8 +979,15 @@ class VariableTracer:
             f"Cite every function name and line number."
         )
 
+        # W91: substitute {SCHEMA} in the template (the only Python-style
+        # token meant for interpolation). `.replace` is used instead of
+        # `.format` because the template also contains {VARIABLE_NAME} as
+        # a literal LLM-facing instruction that must not be interpolated.
+        schema_label = schema or "the schema"
+        system_content = VARIABLE_TRACE_PROMPT.replace("{SCHEMA}", schema_label)
+
         messages = [
-            SystemMessage(content=VARIABLE_TRACE_PROMPT),
+            SystemMessage(content=system_content),
             HumanMessage(content=user_prompt),
         ]
 
@@ -1352,6 +1368,7 @@ class VariableTracer:
             user_query=query,
             provider=provider,
             model=model,
+            schema=state.get("schema", ""),
         )
         state["explanation"] = explanation
 
