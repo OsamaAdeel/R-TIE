@@ -9,6 +9,41 @@ comments, and PR titles (`refactor/w35-…`, `fix/w83b-…`, etc.).
 
 ---
 
+## W101. Manifest validator too strict for OFSAA N:M semantics — FIXED 2026-05-20
+
+**Status:** Implemented and merged on `fix/w101-manifest-validator-relaxation`. Live in `_validate_and_index` in [src/parsing/manifest.py](src/parsing/manifest.py).
+
+**Architectural principle.** The manifest validator must reflect OFSAA semantics, not Python-collection intuitions. OFSAA's runchart model:
+
+1. **Task order = absolute runchart row position.** A sub-process whose runchart lists 16 rows but only ships 6 active PL/SQL tasks (TYPE3/TYPE2 rows are filtered out at manifest-authoring time) legitimately has order values `[2, 4, 5, 6, 8, 16]`. The orders are unique within container, but contiguous 1..N is the wrong invariant.
+2. **Function-task is N:M.** The same `.sql` function can be wired into N task slots across M process contexts (e.g., `BNK_UNDERLYING_EXPOSURES_DATA_POPULATION` fires once under `ABL_INVESTMENT_DATA_POPULATION > BNK_PRODUCT_PROCESSOR_DATA_POPULATION` and again under `SEC_DATA_POPULATION`). Task names repeat legitimately; what stays globally unique is `function_name × source_file`.
+
+**Failure surface.** After Stage 1+2+3 corpus update (2026-05-20), `python run.py` would crash at loader startup with `ManifestValidationError`. Diagnostic audit of all 120 task containers in `ABL_CAR_CSTM_V4/manifest.yaml`:
+
+- **39 containers** had non-contiguous all-orders (validator FAIL on contiguity rule)
+- **14 containers** already used the runchart-absolute-position pattern but passed the validator coincidentally (their inactive placeholder rows filled the gaps, making the all-orders set 1..N)
+- **3 active task names** appeared in two distinct sub-processes each, all sharing the same `source_file` (validator FAIL on global-uniqueness)
+
+The 14 coincidentally-passing containers proved the runchart-absolute-position convention was already the de facto manifest authoring spec; the validator's `[1..N]` rule was the outlier.
+
+**Fix.** Two narrowly-scoped validator relaxations in [src/parsing/manifest.py](src/parsing/manifest.py) `_validate_and_index`:
+
+1. **Order check** — require `len(orders) == len(set(orders))` (unique within container); drop `sorted(orders) == [1..N]`. Emit a `logger.debug` line when the active subset has gaps so the convention stays auditable from logs alone.
+2. **Global-uniqueness check** — allow duplicate active task names when every occurrence shares the same `source_file` basename (N:M semantics). Differing `source_file` for the same name remains a hard error (real name collision worth catching). The `_file_index` collision check was relaxed in the same spirit (debug-log + keep first binding).
+
+**Tests** ([tests/unit/parsing/test_manifest.py](tests/unit/parsing/test_manifest.py)):
+
+- `test_non_contiguous_orders_pass_w101` — container with `[2, 4, 5, 6, 8, 16]` validates clean
+- `test_duplicate_orders_within_container_raise_w101` — two active tasks at order=1 still rejected
+- `test_same_name_same_source_across_containers_passes_w101` — OFSAA N:M happy path
+- `test_same_name_different_source_across_containers_raises_w101` — real name collision still rejected
+
+All 18 manifest tests pass.
+
+**Out-of-scope.** Found-but-deferred manifest issues surfaced once the contiguity gate was removed: one Stage-3 task entry has `name: "FN PRODUCT RECLASS CSTM"` (spaces) referencing `source_file: FN_PRODUCT_RECLASS_CSTM.sql` (underscores), failing the function-name-match check at `_validate_task`. Pre-existing manifest authoring bug, not a W101 regression — flagged separately for the Stage-3 fixup pass.
+
+---
+
 ## Containerization v1 (infra/containerization-v1) — partial validation, v2 follow-ups pending
 
 **Status:** Dockerfiles, compose stack, entrypoint, and README onboarding shipped on `infra/containerization-v1` (2026-05-14). Strict `poetry install --only main --no-root --no-ansi` and `npm ci --no-audit --no-fund` both succeed against the re-synced lockfiles. Outside the strict grounding/routing weaknesses this log normally tracks, but recorded here per agreement when v1 landed.

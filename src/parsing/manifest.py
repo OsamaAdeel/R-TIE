@@ -557,47 +557,81 @@ def _validate_and_index(
     manifest_path: str,
     functions_dir: str,
 ) -> None:
-    """Run cross-task validation (order, uniqueness, source existence,
-    function-name match) and populate ``_task_index`` / ``_file_index``.
+    """Run cross-task validation (order uniqueness, name uniqueness modulo
+    OFSAA N:M semantics, source existence, function-name match) and populate
+    ``_task_index`` / ``_file_index``.
+
+    W101 — validator reflects OFSAA semantics, not Python-collection
+    intuitions:
+
+    * Task ``order`` values within a container must be unique but need NOT
+      be contiguous ``1..N``. OFSAA runchart task-order numbers are
+      absolute row positions, and TYPE3/TYPE2 rows are filtered out at
+      manifest-authoring time, leaving gaps. A debug log is emitted when
+      the active subset has gaps so the convention remains auditable.
+    * Active task ``name`` may repeat across (or within) containers when
+      every occurrence shares the same ``source_file`` — that is the OFSAA
+      pattern of one PL/SQL function executed in N process contexts. A
+      differing ``source_file`` for the same name is still a hard error
+      (real name collision worth catching).
     """
-    seen_names: dict[str, str] = {}  # UPPER(name) → container label
+    # W101: track each active task name's first container + source_file so
+    # subsequent occurrences can be validated against the OFSAA N:M rule.
+    seen_names: dict[str, tuple[str, str]] = {}
+
+    def _source_base(path: str | None) -> str:
+        """Return ``UPPER(basename without .sql)`` or ``""`` when absent."""
+        if not path:
+            return ""
+        return os.path.splitext(os.path.basename(path))[0].upper()
 
     def _validate_task_container(
         container_name: str,
         container_label: str,
         tasks: list[TaskEntry],
     ) -> None:
-        """Run order, duplicate-name, and per-task validation against a flat
-        list of tasks under either a process or a sub_process.
+        """Run order uniqueness, duplicate-name (W101 source-aware), and
+        per-task validation against a flat list of tasks under either a
+        process or a sub_process.
         """
         if tasks:
             orders = [t.order for t in tasks]
-            expected = list(range(1, len(tasks) + 1))
-            if sorted(orders) != expected:
-                raise ManifestValidationError(
-                    f"{manifest_path}: {container_label} '{container_name}' has "
-                    f"non-contiguous task orders {sorted(orders)} (expected {expected})"
-                )
             if len(orders) != len(set(orders)):
                 raise ManifestValidationError(
-                    f"{manifest_path}: {container_label} '{container_name}' has "
-                    f"duplicate task 'order' integers"
+                    f"{manifest_path}: {container_label} '{container_name}' "
+                    f"has duplicate task 'order' integers {sorted(orders)}"
+                )
+            # W101: contiguity 1..N is NOT required. Log when the active
+            # subset is non-contiguous so the runchart-absolute-position
+            # convention stays auditable from logs alone.
+            active_orders = sorted(t.order for t in tasks if t.active)
+            if active_orders and active_orders != list(
+                range(active_orders[0], active_orders[0] + len(active_orders))
+            ):
+                logger.debug(
+                    "Manifest: %s '%s' active task orders %s have gaps "
+                    "(runchart-absolute-position convention, W101).",
+                    container_label, container_name, active_orders,
                 )
 
-            # Only active tasks must be unique. Inactive entries are audit-only
-            # (e.g. the same logical task retired once as TYPE3 and left as a
-            # record alongside a never-built replacement) and may repeat.
-            local_seen: set[str] = set()
+            # W101: within-container active-name uniqueness — relaxed to
+            # allow same name + same source_file (N:M semantics).
+            local_seen: dict[str, str] = {}  # UPPER(name) -> source_base
             for t in tasks:
                 if not t.active:
                     continue
                 name_u = t.name.strip().upper()
-                if name_u in local_seen:
+                curr_source = _source_base(t.source_file)
+                prior_source = local_seen.get(name_u)
+                if prior_source is not None and prior_source != curr_source:
                     raise ManifestValidationError(
                         f"{manifest_path}: duplicate task name '{t.name}' "
-                        f"within {container_label} '{container_name}'"
+                        f"within {container_label} '{container_name}' "
+                        f"with different source files "
+                        f"('{prior_source or '<none>'}.sql' and "
+                        f"'{curr_source or '<none>'}.sql')"
                     )
-                local_seen.add(name_u)
+                local_seen[name_u] = curr_source
 
         for t in tasks:
             _validate_task(
@@ -607,26 +641,54 @@ def _validate_and_index(
             )
 
             name_u = t.name.strip().upper()
+            curr_source = _source_base(t.source_file)
             if t.active:
-                if name_u in seen_names:
-                    raise ManifestValidationError(
-                        f"{manifest_path}: task name '{t.name}' appears in both "
-                        f"'{seen_names[name_u]}' and '{container_name}' — "
-                        f"task names must be globally unique"
+                prior = seen_names.get(name_u)
+                if prior is not None:
+                    prior_container, prior_source = prior
+                    # W101: identical source_file across occurrences is the
+                    # OFSAA "same function fires in N process contexts"
+                    # pattern — allow it. Differing source_file is a real
+                    # name collision between distinct functions; reject.
+                    if prior_source != curr_source:
+                        raise ManifestValidationError(
+                            f"{manifest_path}: task name '{t.name}' appears "
+                            f"in both '{prior_container}' "
+                            f"(source: {prior_source or '<none>'}.sql) and "
+                            f"'{container_name}' "
+                            f"(source: {curr_source or '<none>'}.sql) with "
+                            f"different source files — distinct functions "
+                            f"cannot share an active task name"
+                        )
+                    logger.debug(
+                        "Manifest: active task '%s' appears in '%s' and "
+                        "'%s' with identical source '%s' — allowed per "
+                        "OFSAA N:M semantics (W101).",
+                        t.name, prior_container, container_name,
+                        t.source_file,
                     )
-                seen_names[name_u] = container_name
+                else:
+                    seen_names[name_u] = (container_name, curr_source)
             manifest._task_index[name_u] = t
 
             # Inactive tasks may have no source_file (see _parse_task); skip
             # indexing them by file when absent.
             if t.source_file:
-                file_key = os.path.splitext(os.path.basename(t.source_file))[0].upper()
+                file_key = curr_source
                 if file_key in manifest._file_index:
-                    raise ManifestValidationError(
-                        f"{manifest_path}: source_file '{t.source_file}' is "
-                        f"referenced by more than one task"
+                    # W101: same source_file referenced by multiple tasks is
+                    # the N:M case; keep the first binding so
+                    # get_task_by_file is deterministic.
+                    logger.debug(
+                        "Manifest: source_file '%s' referenced by multiple "
+                        "tasks (first task: '%s'; also seen as '%s') — "
+                        "keeping first binding (W101).",
+                        t.source_file,
+                        manifest._file_index[file_key].name,
+                        t.name,
                     )
-                manifest._file_index[file_key] = t
+                else:
+                    manifest._file_index[file_key] = t
 
     def _visit_sub_process(sp: SubProcess) -> None:
         _validate_task_container(sp.name, "sub_process", sp.tasks)

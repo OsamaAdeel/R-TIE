@@ -250,7 +250,73 @@ processes:
         load_manifest(str(module_dir))
 
 
-def test_non_contiguous_order_raises(tmp_path):
+def test_non_contiguous_orders_pass_w101(tmp_path):
+    # W101: Order values reflect OFSAA runchart absolute position. Gaps
+    # appear when TYPE3/TYPE2 rows are filtered out at manifest-authoring
+    # time. As long as the orders are unique within the container, the
+    # validator must accept them.
+    manifest_yaml = """\
+batch: DEMO_BATCH
+schema: OFSMDM
+processes:
+  - name: P
+    sub_processes:
+      - name: S
+        tasks:
+          - order: 2
+            name: FN_TWO
+            type: T2T
+            source_file: fn_two.sql
+            active: true
+          - order: 4
+            name: FN_FOUR
+            type: T2T
+            source_file: fn_four.sql
+            active: true
+          - order: 5
+            name: FN_FIVE
+            type: T2T
+            source_file: fn_five.sql
+            active: true
+          - order: 6
+            name: FN_SIX
+            type: T2T
+            source_file: fn_six.sql
+            active: true
+          - order: 8
+            name: FN_EIGHT
+            type: T2T
+            source_file: fn_eight.sql
+            active: true
+          - order: 16
+            name: FN_SIXTEEN
+            type: T2T
+            source_file: fn_sixteen.sql
+            active: true
+"""
+    module_dir = _write_module(
+        tmp_path,
+        manifest_yaml=manifest_yaml,
+        sql_files={
+            "fn_two.sql": _sql("FN_TWO"),
+            "fn_four.sql": _sql("FN_FOUR"),
+            "fn_five.sql": _sql("FN_FIVE"),
+            "fn_six.sql": _sql("FN_SIX"),
+            "fn_eight.sql": _sql("FN_EIGHT"),
+            "fn_sixteen.sql": _sql("FN_SIXTEEN"),
+        },
+    )
+    manifest = load_manifest(str(module_dir))
+    assert manifest.active_task_count() == 6
+    # Declaration order is preserved (this is the runchart order).
+    assert [t.order for t in manifest.iter_active_tasks()] == [
+        2, 4, 5, 6, 8, 16
+    ]
+
+
+def test_duplicate_orders_within_container_raise_w101(tmp_path):
+    # W101: contiguity is relaxed, but uniqueness within a container is
+    # still required. Two tasks at the same order is a real bug.
     manifest_yaml = """\
 batch: DEMO_BATCH
 schema: OFSMDM
@@ -264,7 +330,7 @@ processes:
             type: FUNCTION
             source_file: fn_one.sql
             active: true
-          - order: 3
+          - order: 1
             name: FN_TWO
             type: FUNCTION
             source_file: fn_two.sql
@@ -278,7 +344,91 @@ processes:
             "fn_two.sql": _sql("FN_TWO"),
         },
     )
-    with pytest.raises(ManifestValidationError, match="non-contiguous"):
+    with pytest.raises(
+        ManifestValidationError, match="duplicate task 'order' integers"
+    ):
+        load_manifest(str(module_dir))
+
+
+def test_same_name_same_source_across_containers_passes_w101(tmp_path):
+    # W101: OFSAA N:M — same function fires in multiple process contexts.
+    # The 3 in-tree cases (BNK_UNDERLYING_EXPOSURES_DATA_POPULATION,
+    # INV_UNDERLYING_EXPOSURES_DATA_POPULATION, FN_MITIGANT_ELIGIBILITY_CSTM)
+    # all match this pattern: same source_file, different sub_processes.
+    manifest_yaml = """\
+batch: DEMO_BATCH
+schema: OFSMDM
+processes:
+  - name: PROC_A
+    sub_processes:
+      - name: SUB_A
+        tasks:
+          - order: 1
+            name: FN_SHARED
+            type: T2T
+            source_file: fn_shared.sql
+            active: true
+  - name: PROC_B
+    sub_processes:
+      - name: SUB_B
+        tasks:
+          - order: 2
+            name: FN_SHARED
+            type: T2T
+            source_file: fn_shared.sql
+            active: true
+"""
+    module_dir = _write_module(
+        tmp_path,
+        manifest_yaml=manifest_yaml,
+        sql_files={"fn_shared.sql": _sql("FN_SHARED")},
+    )
+    manifest = load_manifest(str(module_dir))
+    # Both task entries are recorded as active (the manifest is honest
+    # about the duplication); _task_index points at one of them (the
+    # first-seen binding) for deterministic navigation.
+    assert manifest.active_task_count() == 2
+    assert manifest.get_task("FN_SHARED") is not None
+    assert manifest.get_task_by_file("fn_shared.sql").name == "FN_SHARED"
+
+
+def test_same_name_different_source_across_containers_raises_w101(tmp_path):
+    # W101: same active task name with a DIFFERENT source_file is a real
+    # function-name collision and must still be rejected.
+    manifest_yaml = """\
+batch: DEMO_BATCH
+schema: OFSMDM
+processes:
+  - name: PROC_A
+    sub_processes:
+      - name: SUB_A
+        tasks:
+          - order: 1
+            name: FN_COLLIDE
+            type: FUNCTION
+            source_file: fn_one.sql
+            active: true
+  - name: PROC_B
+    sub_processes:
+      - name: SUB_B
+        tasks:
+          - order: 1
+            name: FN_COLLIDE
+            type: FUNCTION
+            source_file: fn_two.sql
+            active: true
+"""
+    module_dir = _write_module(
+        tmp_path,
+        manifest_yaml=manifest_yaml,
+        sql_files={
+            "fn_one.sql": _sql("FN_COLLIDE"),
+            "fn_two.sql": _sql("FN_COLLIDE"),
+        },
+    )
+    with pytest.raises(
+        ManifestValidationError, match="different source files"
+    ):
         load_manifest(str(module_dir))
 
 
