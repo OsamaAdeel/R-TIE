@@ -260,6 +260,132 @@ def test_module_without_manifest_uses_flat_structure(module_without_manifest, rt
         assert "hierarchy" not in node
 
 
+def test_w107_inactive_task_with_missing_source_file_is_skipped_quietly(
+    tmp_path, rtie_caplog
+):
+    """W107: an inactive task whose source_file no longer exists on disk
+    must be counted as skipped, NOT failed. The manifest validator already
+    tolerates this case at load time (manifest.py:_validate_task line 716);
+    the loader needs to encode the same rule at parse time."""
+    mod = tmp_path / "W107_INACTIVE_MISSING"
+    fns = mod / "functions"
+    fns.mkdir(parents=True)
+    # Active task whose file exists — to keep manifest validation happy and
+    # exercise the normal path alongside the W107 branch.
+    _write_sql(fns / "fn_present.sql", "FN_PRESENT")
+    # Inactive task that references a missing file. The manifest validator
+    # already returns early for inactive entries (manifest.py:716), so this
+    # manifest still passes validation despite the missing source.
+    (mod / "manifest.yaml").write_text(
+        """\
+batch: W107_INACTIVE_MISSING
+schema: OFSMDM
+processes:
+  - name: LOAD
+    sub_processes:
+      - name: SUB
+        tasks:
+          - order: 1
+            name: FN_PRESENT
+            type: FUNCTION
+            source_file: fn_present.sql
+            active: true
+          - order: 2
+            name: FN_GHOST
+            type: FUNCTION
+            source_file: fn_ghost.sql
+            active: false
+            inactive_reason: "removed from batch per run chart"
+""",
+        encoding="utf-8",
+    )
+
+    from src.parsing.loader import load_all_functions
+    from src.parsing.store import get_function_graph
+
+    redis = FakeRedis()
+    result = load_all_functions(
+        functions_dir=str(fns),
+        schema="OFSMDM",
+        redis_client=redis,
+        force_reparse=True,
+    )
+
+    # The W107 acceptance criterion: failed == 0, missing inactive entry is
+    # counted as skipped, indexing for the present active task succeeds.
+    assert result["functions_failed"] == 0, (
+        f"inactive task with missing source file must not be a failure "
+        f"(errors={result.get('errors')})"
+    )
+    assert result["functions_parsed"] == 1
+    assert result["functions_skipped"] >= 1
+
+    # The ghost graph is correctly absent from Redis (nothing was parsed).
+    assert get_function_graph(redis, "OFSMDM", "FN_GHOST") is None
+    # The present active task did parse.
+    assert get_function_graph(redis, "OFSMDM", "FN_PRESENT") is not None
+
+    # Diagnostic log line identifies the skipped function.
+    assert "Skipped (inactive, source file absent)" in rtie_caplog.text
+    assert "FN_GHOST" in rtie_caplog.text
+
+
+def test_w107_active_task_with_missing_source_file_still_fails_loud(tmp_path):
+    """W107 guard: the loader's pre-flight skip must NOT swallow missing-file
+    failures for active tasks. The manifest validator is the primary line of
+    defence — it raises :class:`ManifestValidationError` at
+    :func:`load_manifest` time when an active task references a missing file
+    (manifest.py:_validate_task, lines 719-724). :func:`load_all_functions`
+    invokes ``load_manifest`` internally, so this validator error surfaces
+    before the parse loop ever runs. That makes the active+missing case
+    even louder than a per-file failure: the entire indexer load aborts.
+
+    This test pins that contract — if a future refactor relaxes validation
+    (cf. W101's relaxation that exposed W107 in the first place), the
+    loader's pre-flight skip must not silently absorb active-task failures
+    in its place.
+    """
+    mod = tmp_path / "W107_ACTIVE_MISSING"
+    fns = mod / "functions"
+    fns.mkdir(parents=True)
+    # File exists at manifest-authoring time so the yaml is structurally
+    # plausible, but we delete it before invoking the loader.
+    _write_sql(fns / "fn_disappears.sql", "FN_DISAPPEARS")
+
+    (mod / "manifest.yaml").write_text(
+        """\
+batch: W107_ACTIVE_MISSING
+schema: OFSMDM
+processes:
+  - name: LOAD
+    sub_processes:
+      - name: SUB
+        tasks:
+          - order: 1
+            name: FN_DISAPPEARS
+            type: FUNCTION
+            source_file: fn_disappears.sql
+            active: true
+""",
+        encoding="utf-8",
+    )
+
+    from src.parsing.loader import load_all_functions
+    from src.parsing.manifest import ManifestValidationError
+
+    # Remove the file so the validator inside load_all_functions sees the
+    # missing source for an active task.
+    (fns / "fn_disappears.sql").unlink()
+
+    with pytest.raises(ManifestValidationError, match="no such file exists"):
+        load_all_functions(
+            functions_dir=str(fns),
+            schema="OFSMDM",
+            redis_client=FakeRedis(),
+            force_reparse=True,
+        )
+
+
 def test_malformed_manifest_raises_validation_error(tmp_path):
     mod = tmp_path / "BAD_BATCH"
     fns = mod / "functions"

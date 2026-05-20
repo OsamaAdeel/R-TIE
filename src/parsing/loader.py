@@ -333,6 +333,27 @@ def load_all_functions(
 
     for sql_file in sql_files:
         func_name = _function_name_from_file(sql_file)
+
+        # W107: mirror the manifest validator's rule (manifest.py:_validate_task,
+        # line 716): an inactive task may keep its source_file populated for
+        # audit even after the on-disk .sql has been removed from the batch.
+        # Skip those quietly here so the indexer reports them under `skipped`
+        # rather than `failed`. Active tasks with a missing file fall through
+        # to the try/except below — that is a real bug that should surface as
+        # a load failure with full traceback (the manifest validator normally
+        # catches it at load_manifest time, but a race-condition delete
+        # between manifest load and parse should still be loud).
+        if manifest is not None and not os.path.isfile(sql_file):
+            task = manifest.get_task_by_file(sql_file)
+            if task is not None and not task.active:
+                skipped_count += 1
+                logger.info(
+                    "Skipped (inactive, source file absent) %s — manifest "
+                    "lists %s but no .sql on disk",
+                    func_name, os.path.basename(sql_file),
+                )
+                continue
+
         try:
             # Read source lines up-front so we can detect the schema prefix
             # before the staleness/storage path (which writes under that schema).
