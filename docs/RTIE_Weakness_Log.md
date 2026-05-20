@@ -765,3 +765,30 @@ Active tasks with missing files still fall through to the existing failure path.
 All 7 tests in `test_loader_manifest.py` pass. The pre-existing 3 failures in `test_abl_car_cstm_v4_contract.py` (`test_iter_*_tasks_count`) are stale pinned counts invalidated by yesterday's b68918a corpus expansion (expects 203/166/37, actual 460/323/137); unrelated to W107 and unchanged by this branch.
 
 **Expected post-restart behavior.** Next `python run.py` should report `failed=0` and the 23 previously-failing inactive entries should appear under `skipped` (the count of total skipped rises by ~23 from yesterday's baseline — they were not previously contributing to either bucket because they crashed on `open()`).
+
+---
+
+## W106. ABL_CAR_CSTM_V4 contract-test pinned counts stale after corpus expansion — FIXED 2026-05-20
+
+**Status:** Constant rebaseline on `fix/w106-contract-test-rebaseline`. Updated three module-level constants in [tests/unit/parsing/test_abl_car_cstm_v4_contract.py](tests/unit/parsing/test_abl_car_cstm_v4_contract.py).
+
+**Failure surface.** Three tests in `test_abl_car_cstm_v4_contract.py` (`test_iter_all_tasks_count`, `test_iter_active_tasks_count`, `test_iter_inactive_tasks_count`) failed against the current `ABL_CAR_CSTM_V4/manifest.yaml`:
+
+| Constant | Pinned value | Actual |
+|---|---:|---:|
+| `EXPECTED_TOTAL` | 203 | 460 |
+| `EXPECTED_ACTIVE` | 166 | 323 |
+| `EXPECTED_INACTIVE` | 37 | 137 |
+
+**Root cause.** Yesterday's b68918a (Stage 1-3 corpus expansion: 372 → 402 `.sql` files, +30 net-new active functions) widened the manifest's task coverage across multiple processes but didn't update these contract pins in the same commit. The file header explicitly states this is the workflow — *"If the real manifest legitimately changes, update the constants here in the same commit so the new contract is explicit"* — so the pinned drift was a missed step in b68918a, not a manifest authoring bug. The tripwire fired exactly as designed; it just hadn't been re-armed.
+
+**Fix.** Rebaseline the three constants to the post-expansion counts (`460/323/137`). The contract guard (`test_flat_process_tasks_visible`) that proved its worth in the original `_walk_tasks` regression — where process-level flat tasks were silently dropped — remains intact and unchanged. No production-code logic touched.
+
+The comment block above the constants was rewritten to:
+- record W106 as the rebaseline event with the new counts
+- explain that the growth landed across multiple processes (so no per-container enumeration of the delta is attempted)
+- re-affirm the "update constants in the same commit as the manifest change" workflow
+
+**Tests.** All 4 tests in `test_abl_car_cstm_v4_contract.py` pass.
+
+**Out-of-scope.** Tighter coupling between the manifest and the contract pin (e.g., a pre-commit hook that recounts on `manifest.yaml` change and rejects mismatched pins) would prevent the next drift. Not implemented here — workflow discipline is the current control, and W106's surfacing during the W107 close-out shows the existing safety net (CI + the file header guidance) does catch the drift quickly. Worth re-evaluating if a third rebaseline lands in the next quarter.
