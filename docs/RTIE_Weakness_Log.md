@@ -792,3 +792,126 @@ The comment block above the constants was rewritten to:
 **Tests.** All 4 tests in `test_abl_car_cstm_v4_contract.py` pass.
 
 **Out-of-scope.** Tighter coupling between the manifest and the contract pin (e.g., a pre-commit hook that recounts on `manifest.yaml` change and rejects mismatched pins) would prevent the next drift. Not implemented here — workflow discipline is the current control, and W106's surfacing during the W107 close-out shows the existing safety net (CI + the file header guidance) does catch the drift quickly. Worth re-evaluating if a third rebaseline lands in the next quarter.
+
+---
+
+## W108. Explainer multi-source concat exceeds LLM context after corpus expansion — FIXED 2026-05-20
+
+**Status:** Implemented and merged on `fix/w108-multi-source-token-cap`. Live in `LogicExplainer._build_capped_concat_sections` and `stream_semantic` in [src/agents/logic_explainer.py](src/agents/logic_explainer.py).
+
+**Architectural principle.** Prompt-size budgeting at the LLM call site cannot live solely in retrieval. Retrieval can cap function count and graph_rerank can cap node count, but the *source-body* size of each function is unbounded — a corpus expansion that adds large functions to the retrieval surface can blow the prompt past the model's context window even when the function count is stable. The explainer is the boundary between "data we retrieved" and "data the model can ingest"; it owns the final cap.
+
+**Failure surface.** Post-corpus-expansion canary run (2026-05-20 16:52:44, after b68918a Stage 1-3 added 30 net-new active functions and refreshed several Stage 3 raw-`FUNCTION` source bodies):
+
+```
+correlation_id: 40553ec0-15b8-4fee-8bff-f37786d2fc0b
+query:          "How does FN_LOAD_OPS_RISK_DATA work?"
+stage:          stream_semantic (raw-source fallback)
+LLM:            openai gpt-4o-mini
+result:         openai.BadRequestError: Error code: 400 -
+                "This model's maximum context length is 128000 tokens.
+                 However, your messages resulted in 134652 tokens.
+                 Please reduce the length of the messages."
+```
+
+Yesterday's W98 canary baseline (2026-05-19 12:48) had Canary A passing with badge=VERIFIED on the same 35-function retrieval surface; today the same surface produced a 134,652-token prompt (+5% over the gpt-4o-mini 128K limit) and the explainer surfaced DECLINED with `type=llm_api_error`. The W70 anchor cascade fired correctly (`apply_w70_anchor: anchored on FN_LOAD_OPS_RISK_DATA, confidence=high`) and the W97 promote-anchor-to-front moved it from position 29 to 0 as designed — both upstream of the OpenAI 400. The regression was confined to the explainer's concat-and-send path.
+
+Attribution: corpus-expansion side effect from b68918a, not introduced by W107 or W106 (loader/test only). Every broad "How does X work?" query that pulled a large multi_source was bricked. The same retrieval surface also affects Stage 3 sample queries (`ABL_MKT_RISK_GENRSK_IR`, `FN_STRESS_DATALOAD_CSTM`, `FN_G_TEST_CSTM`) and any other COLUMN_LOGIC query that falls through to the raw-source path (cf. W109 — the orchestrator's question-text-as-target_variable bug causes the graph-resolve path to return 0 nodes, forcing this fallback for almost all explainer queries).
+
+**Fix (Path 1 — token-budget cap).** Defensive char-budget cap on the multi_source concatenation, applied just before the prompt is built. Module-level constant `SOURCE_CONCAT_CHAR_BUDGET = 400_000` (≈100K tokens at the ~4 chars/token ratio observed in the failing prompt — 134,652 tokens for ~540K chars). Headroom budget for the rest of the request:
+
+| Component | Tokens |
+|---|---:|
+| System prompt + W70 anchor block | ~2,000 |
+| Raw-source concat (capped) | ≤100,000 |
+| User query | ~200 |
+| Response (`max_tokens=4096`) | 4,096 |
+| **Total** | **~106,300** |
+
+Comfortably under the 128K limit with ~21K tokens of headroom for tokenizer drift across PL/SQL idioms.
+
+Helper signature:
+
+```python
+def _build_capped_concat_sections(
+    self,
+    multi_source: dict,
+    char_budget: int = SOURCE_CONCAT_CHAR_BUDGET,
+) -> tuple[list[str], int, list[str], int]:
+    """Returns (sections, kept_count, dropped_names, total_chars)."""
+```
+
+Iterates `multi_source` in dict-order (which `promote_anchor_to_front` has set to anchor-first per W97). Accumulates sections until the next section would push past `char_budget`, then drops the rest. **Position 0 is exempt** — the anchor section is always retained even when it alone exceeds the budget, because an explainer response without the anchor is functionally useless. When the cap fires, `stream_semantic` emits a `logger.warning` with `kept_count`, total chars, budget, dropped count, and the first five dropped names — visibility for monitoring without polluting INFO-level logs.
+
+**Tests** ([tests/unit/agents/test_w108_token_cap.py](tests/unit/agents/test_w108_token_cap.py)):
+
+- `TestNoCapNeeded::test_small_multi_source_passes_through_unchanged` — 5 small functions, total well under budget → no drops, no warning, original order preserved.
+- `TestNoCapNeeded::test_empty_multi_source_returns_empty_lists` — defensive edge case.
+- `TestCapFires::test_lower_ranked_dropped_when_budget_exceeded` — 10 functions, 20K-char budget → partial keep, dropped tail in order.
+- `TestCapFires::test_anchor_preserved_even_when_its_own_section_exceeds_budget` — W97 contract: position 0 survives even at oversized; followers all drop.
+- `TestCapFires::test_cap_default_uses_module_constant` — default arg matches `SOURCE_CONCAT_CHAR_BUDGET`; documents the public-default contract.
+- `TestBudgetBoundary::test_follower_fitting_within_budget_is_kept` — strict-inequality boundary pin (catches future `>` ↔ `>=` flips).
+
+All 6 W108 tests pass. 166 adjacent tests in the explainer suites (`test_w70_anchor_injection.py`, `test_w97_promote_anchor.py`, `test_w91_schema_placeholder.py`, `test_w92_schema_label_consistency.py`, `test_grounding.py`, `test_w57_grounding.py`) pass unchanged.
+
+**Expected post-restart canary behavior.** Canary A ("How does FN_LOAD_OPS_RISK_DATA work?") should return badge=VERIFIED with the W70 anchor surfacing in `diag.w70_anchor`. The `app.log` should show one new line when the cap fires:
+
+```
+stream_semantic: W108 source-concat cap fired — kept N of 35 functions
+  (X chars, budget 400000), dropped M lower-ranked (first: …)
+```
+
+`N` will land around 25-28 once the largest Stage 3 raw-FUNCTION bodies are dropped. The retained functions preserve the W97 anchor at position 0 and the highest-scored followers, which is the relevant context for explaining what FN_LOAD_OPS_RISK_DATA does.
+
+**Out-of-scope (deliberately).** Three deeper fixes remain on the backlog and were considered but not pursued today:
+
+1. **Swap the explainer LLM to a 200K-context model** (claude-3-5-sonnet, gpt-4-turbo). Would obviate the cap for current corpus growth but the cap is still a good defensive boundary regardless; chose Path 1 alone for minimal blast radius. Track as a follow-up if the cap starts firing on >50% of queries.
+2. **Fix W109** (see entry below) — orchestrator passes question text as `target_variable`, forcing nearly every explainer query through the raw-source concat path even when the graph path would work. Real architectural fix; intentionally deferred — Path 1 unblocks canaries without touching orchestrator semantics.
+3. **Real-tokenizer budgeting** (use the model's tokenizer to count exact tokens instead of the 4 chars/token heuristic). Would let the cap operate closer to the actual limit. Not pursued because (a) the chars heuristic has known ~25-30% conservative slack already built in to the 400K budget, and (b) adding tiktoken or a model-specific tokenizer dependency to the explainer hot path raises latency. Re-evaluate if cap-fired warnings show false-positive drops on small-but-information-dense corpora.
+
+---
+
+## W109. Orchestrator passes question text as `target_variable` to graph-resolve — PLANNED
+
+**Status:** Logged; not scheduled.
+
+**Surface.** When an explainer query names a specific function (e.g. "How does FN_LOAD_OPS_RISK_DATA work?"), the orchestrator currently passes the full question text as `target_variable` to `resolve_query_to_nodes`. The W43 diagnostic instrumentation shows this verbatim:
+
+```
+[W43_DIAG] stage=resolve_query_to_nodes_entry query_type='variable'
+  qt='variable' target_variable='How does FN_LOAD_OPS_RISK_DATA work?'
+  function_name=None table_name=None schema='OFSMDM'
+[W43_DIAG] stage=graph_resolve_nodes_result node_ids_count=0
+  fallback_triggered=True
+Graph returned no nodes, falling back to raw source for query: …
+```
+
+The resolver cannot match the question prose against a column or alias, returns 0 nodes, and the pipeline falls through to `stream_semantic`'s raw-source concatenation path — which is where W108 lives. So today nearly every explainer query takes the broad-multi-source path; W108's cap is what keeps that path safe.
+
+**Correct shape.** For explainer queries that name a specific function, the orchestrator should pass `function_name=FN_LOAD_OPS_RISK_DATA, target_variable=None` so the graph-resolve path can return the anchor function's nodes directly. That avoids the broad multi_source concat in the first place and means W108's cap should rarely fire in normal operation.
+
+**Why not today.** Touches orchestrator routing + query_engine entry contracts + the downstream `LogicState` field semantics. Risk of regressing the existing W43 diagnostic and the W76 prefix-anchor cascade. The W108 cap is a sufficient unblocker for the canary battery and the broader Stage 3 verification work; W109 is a quality improvement, not a correctness fix.
+
+**Backlog gate.** Re-prioritise W109 if either:
+
+- the W108 cap-fired warning starts appearing on >50% of explainer queries in `app.log` (signal: the corpus has grown enough that even the cap is dropping useful context), or
+- a future prompt requires deeper graph-pipeline reasoning that today's raw-source fallback can't deliver.
+
+---
+
+## Backlog — informal observation (not ticketed yet)
+
+**Trace N_EOP_BAL retrieves wrong functions despite N_EOP_BAL being indexed.** Surfaced during the 2026-05-20 W107 post-restart validation pass.
+
+Redis probe (`graph:index:OFSERM`, 2,737 columns total) shows N_EOP_BAL is correctly indexed against 4 functions:
+
+```
+- ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION:..._N1
+- ABL_BANKING_LC_EXPOSURE_DATA_CREATION:..._N1
+- BANKING_OD_EXPOSURE_DATA_CREATION:..._N1
+- ABL_BANKING_LOAN_EXPOSURE_DATA_CREATION:..._N1
+```
+
+Live `/v1/stream` on "Trace N_EOP_BAL" retrieves a 5-function multi_source consisting of the unrelated significant-investment cluster (ABL_INSIGNFCNT_INVSTMNT_*, CAP_CONSL_*, ABL_LEV_RATIO) — none of the 4 actual N_EOP_BAL-bearing functions are pulled. The LLM still cites the correct functions (ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION and ABL_BANKING_LC_EXPOSURE_DATA_CREATION appear in its response) — likely from the W70 anchor cascade or general knowledge — but they're not in `multi_source`, so the W57 grounding overlay correctly flags them as GROUNDING-HIGH.
+
+This is a retrieval-side coverage gap, latent and pre-existing (W43 instrumentation has been logging the question-as-target_variable pattern for a while; cf. W109). Worth investigating eventually — likely a query-engine path that prefers embedding-similarity over column-index direct-lookup for VARIABLE_TRACE on widely-used columns — but not today.
