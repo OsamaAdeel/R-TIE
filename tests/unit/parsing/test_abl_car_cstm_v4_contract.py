@@ -16,17 +16,19 @@ from src.parsing.manifest import load_manifest
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MODULE_DIR = PROJECT_ROOT / "db" / "modules" / "ABL_CAR_CSTM_V4"
 
-# 185 raw YAML tasks under ABL_CAPITAL_STRUCTURE_DATA_POPULATION (16 flat) +
-# ABL_CAPITAL_STRUCTURE_DATA_PROCESSING (171 nested) = 187 total.
-# 148 active in sub_processes + 9 active flat (7 pre-existing + 2 added in
-# this commit) = 150 active. 37 inactive unchanged.
-# Bumped by CAT_8 add (fix/cat8-add-16-functions): +13 under
-# ABL_CAPITAL_STRUCTURE_DATA_POPULATION sub_processes (CR_INPUT_DATA_POPULATION,
-# RW_MAP_SETUP, OPS_RISK_INPUT_POPULATION, CONSOLIDATION_DATA_POPULATION) +3
-# under ABL_CAPITAL_STANDARD_ACCOUNTING_POPULATION = 16 new active tasks.
-EXPECTED_TOTAL = 203
-EXPECTED_ACTIVE = 166
-EXPECTED_INACTIVE = 37
+# W106 (2026-05-20) — rebaseline after b68918a corpus expansion (Stage 1-3,
+# 372 → 402 .sql files, +30 net-new active functions). The prior constants
+# (203/166/37) tracked the pre-expansion authoring; the current
+# ABL_CAR_CSTM_V4/manifest.yaml ships 460 total / 323 active / 137 inactive
+# task entries. The growth landed across multiple processes — the runchart
+# coverage was widened rather than scoped to a single sub-process — so no
+# attempt is made here to enumerate the delta per container. When the
+# manifest legitimately changes again, update these in the same commit so
+# the new contract is explicit (this is the regression guard the file
+# header describes).
+EXPECTED_TOTAL = 460
+EXPECTED_ACTIVE = 323
+EXPECTED_INACTIVE = 137
 
 
 @pytest.fixture(scope="module")
