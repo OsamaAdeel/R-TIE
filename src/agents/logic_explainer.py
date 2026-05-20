@@ -25,6 +25,14 @@ from src.parsing.schema_discovery import fallback_to_default_schema
 
 logger = get_logger(__name__, concern="app")
 
+# W108: defensive cap on raw-source concatenation in stream_semantic.
+# Budgeted at ~100K tokens (assuming ~4 chars/token observed in practice
+# for PL/SQL source — gpt-4o-mini's 128K window minus headroom for the
+# system prompt, anchor block, user query, and the model's 4096-token
+# response budget). When the cap fires, lower-ranked functions are
+# dropped while position 0 (the W97 anchor) is always preserved.
+SOURCE_CONCAT_CHAR_BUDGET = 400_000
+
 # Phrases that signal the LLM is flagging missing information. If the model
 # emits one of these AND then continues to generate substantive text, we
 # treat the response as self-contradictory and downgrade the badge.
@@ -3208,21 +3216,26 @@ class LogicExplainer:
         else:
             logger.info("stream_semantic: falling back to raw source")
             multi_source = state.get("multi_source", {})
-            function_sections = []
-            for fn_name, fn_data in multi_source.items():
-                source_text = self._format_source_code(fn_data.get("source_code", []))
-                section = (
-                    f"=== FUNCTION: {fn_name} (relevance: {fn_data.get('score', 0):.4f}) ===\n"
-                    f"Description: {fn_data.get('description', 'N/A')}\n"
-                    f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
-                    f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
-                    f"Source Code:\n{source_text}\n"
+            function_sections, kept_count, dropped_names, total_chars = (
+                self._build_capped_concat_sections(multi_source)
+            )
+            if dropped_names:
+                logger.warning(
+                    "stream_semantic: W108 source-concat cap fired — kept %d of "
+                    "%d functions (%d chars, budget %d), dropped %d lower-ranked "
+                    "(first: %s)",
+                    kept_count,
+                    len(multi_source),
+                    total_chars,
+                    SOURCE_CONCAT_CHAR_BUDGET,
+                    len(dropped_names),
+                    ", ".join(dropped_names[:5])
+                    + (" …" if len(dropped_names) > 5 else ""),
                 )
-                function_sections.append(section)
 
             user_prompt = (
                 f"User Question: {query}\n\n"
-                f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+                f"The following {kept_count} functions were found via semantic search:\n\n"
                 + "\n".join(function_sections)
                 + "\n\nAnswer the user's question with a detailed markdown explanation. "
                 "Cite specific function names and line numbers for every claim."
@@ -3262,6 +3275,55 @@ class LogicExplainer:
             raise sanitize_llm_exception(
                 exc, context="stream_semantic"
             ) from exc
+
+    def _build_capped_concat_sections(
+        self,
+        multi_source: dict,
+        char_budget: int = SOURCE_CONCAT_CHAR_BUDGET,
+    ) -> tuple[list[str], int, list[str], int]:
+        """W108: build per-function source sections with a char budget.
+
+        Iterates ``multi_source`` in its current order (which the W97
+        ``promote_anchor_to_front`` step has set to anchor-first) and
+        accumulates sections until the running char total would exceed
+        ``char_budget``. Position 0 (the anchor) is always retained —
+        even if its single section alone exceeds the budget — because
+        an explainer response without the anchor is functionally
+        useless.
+
+        Returns:
+            ``(sections, kept_count, dropped_names, total_chars)``.
+
+            * ``sections``: list of formatted section strings, in
+              original order, suitable for concatenation into the
+              user prompt body.
+            * ``kept_count``: ``len(sections)``.
+            * ``dropped_names``: function names dropped from the tail
+              (also in original order). Empty when no cap fired.
+            * ``total_chars``: total chars across kept sections.
+        """
+        sections: list[str] = []
+        dropped: list[str] = []
+        running_chars = 0
+        for fn_name, fn_data in multi_source.items():
+            source_text = self._format_source_code(fn_data.get("source_code", []))
+            section = (
+                f"=== FUNCTION: {fn_name} "
+                f"(relevance: {fn_data.get('score', 0):.4f}) ===\n"
+                f"Description: {fn_data.get('description', 'N/A')}\n"
+                f"Tables Read: {fn_data.get('tables_read', 'N/A')}\n"
+                f"Tables Written: {fn_data.get('tables_written', 'N/A')}\n\n"
+                f"Source Code:\n{source_text}\n"
+            )
+            # Always keep position 0 (the W97 anchor) — even if it alone
+            # exceeds the budget. The alternative is a response with no
+            # anchor at all.
+            if sections and running_chars + len(section) > char_budget:
+                dropped.append(fn_name)
+                continue
+            sections.append(section)
+            running_chars += len(section)
+        return sections, len(sections), dropped, running_chars
 
     def _format_source_code(self, source_lines: list) -> str:
         """Format source code lines for LLM consumption.
