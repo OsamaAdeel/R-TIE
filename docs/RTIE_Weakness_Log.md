@@ -662,3 +662,106 @@ Permanent fix would be one of:
 - Document the `PYTHONIOENCODING=utf-8` requirement in the Windows onboarding doc.
 
 Not blocking; the suite runs to completion under `PYTHONIOENCODING=utf-8`. Not yet ticketed.
+
+---
+
+## Architectural corrections — surfaced during the ABL_CAR_CSTM_V4 extraction passes (2026-05-19)
+
+Two facts about the existing extraction pipeline that contradicted assumptions baked into prompts. Recording so future extraction or indexing work uses the right source and accounts for the existing-file heterogeneity.
+
+### T2T resolved SQL bodies live in LOAD DATA, not Transform Data
+
+The intuitive read of OFSAA's three-log split is that "Transform Data" holds the resolved T2T transformations. It doesn't. T2T resolved bodies (the `INSERT INTO target(...) SELECT /*+PARALLEL (4)*/ ... LOG ERRORS INTO target$ ('jobid') REJECT LIMIT ...` statements that the 190 SELECT-form `.sql` files were extracted from) live in `ofserminfo_logs/LOAD DATA/*_T2TCPP.log`. The trio per task is:
+
+- `LOAD DATA_<jobid>_REVLOADER.log` — task name in `RevLoader : Parameters : OFSERMINFO,Table To Table,<SRC>,<TASK_NAME>,…`
+- `LOAD DATA_<jobid>_T2T.log` — source/target metadata only
+- `LOAD DATA_<jobid>_T2TCPP.log` — resolved SQL body (Pattern A: single-line `INSERT … SELECT …`; Pattern B: parameterised `VALUES(:c1,:c2,…)` INSERT plus separate `directLoad, Select Query : SELECT …` line that must be concatenated to reconstruct the full statement)
+
+`ofserminfo_logs/TRANSFORM DATA/*` is for CSTM_DT stored-procedure invocations only. Those logs show `BEGIN :D := Dt_<NAME>_<n>(…)` and the return code — the procedure *body* is never echoed; it lives in Oracle's `ALL_SOURCE` / `DBA_SOURCE` against the OFSERM schema. CSTM_DT extraction therefore needs an Oracle query, not log parsing (tracked as W102).
+
+`ofserminfo_logs/RULE_EXECUTION/*` is TYPE3 rules and out of scope for code-body extraction — RTIE doesn't index rule bodies via this pipeline.
+
+### The 372 existing `functions/*.sql` are not all the same shape
+
+Convention split as of 2026-05-19 (pre-Stage 1 addition):
+
+- **190 files** = SELECT-form T2T inserts extracted from T2TCPP logs (matches the Section 2 pattern above). `REJECT LIMIT 0` is the dominant tail clause.
+- **182 files** = TYPE3-style rule SQL — typically `UPDATE … SET … CASE WHEN …` for risk-weight / capital classification rules. These were NOT extracted from logs in the original pass; their source is Oracle metadata (likely `RM_RULES` or the OFSAA rule-definition tables) or a runchart-driven generator that pre-dates this extraction pipeline. They share the same 35-line wrapper template as the 190 T2T files, which masks the source-difference.
+
+Practical consequences:
+
+- Anyone writing future extraction logic should not assume all 372 came from logs. Re-extracting "everything" from logs will silently miss 182 rule files.
+- Tooling that keys on `LOG ERRORS INTO … REJECT LIMIT` (e.g., a parser that infers the target table from the error-log clause) will only work on the 190 T2T files. The 182 rule files have no such clause.
+- The Stage 1 additions on 2026-05-19 (11 reconstructed Pattern B files) match the SELECT-form 190-file convention. Easy to identify them by `Wrapped: 2026-05-19` versus the prior pass's `Wrapped: 2026-04-23`.
+
+These corrections override the assumption in the original Stage 1 prompt that "Transform Data log (← T2T resolved SQL bodies live here)" and the implicit assumption that the 372 files share one extraction provenance. Both were caught during execution; reflect them in any future prompt that touches `ABL_CAR_CSTM_V4/functions/`.
+
+---
+
+## W107. Loader doesn't gate on `task.active`; missing inactive source files crash the indexer — FIXED 2026-05-20
+
+**Status:** Implemented and merged on `fix/w107-loader-active-gate`. Live in the per-file parse loop in [src/parsing/loader.py](src/parsing/loader.py).
+
+**Architectural principle.** When the manifest validator and the loader both make decisions about active/inactive entries, they must encode the *same* rule. The two layers see the same manifest objects; drift between their interpretations is a hidden, time-delayed bug — the manifest passes validation under one rule and then crashes under the other, exactly the W107 failure mode.
+
+**Failure surface.** Today's post-restart indexer run (2026-05-20 15:02:45) reported:
+
+```
+Module ABL_CAR_CSTM_V4: loaded 0, skipped 324, failed 23 (status=partial)
+```
+
+All 23 failures were `FileNotFoundError` traces from [loader.py:339](src/parsing/loader.py) opening `.sql` files that the manifest listed but were not on disk. Diagnostic confirmed all 23 manifest entries carried `active: false` with a coherent `inactive_reason: removed_from_batch_per_run_chart`. The manifest was internally consistent — these were correctly authored inactive entries.
+
+Why the inconsistency surfaced now: W101 (the validator relaxation that landed earlier today) and W104 (manifest naming normalization) let inactive entries keep their populated `source_file:` fields without complaint. The loader was never re-taught to gate on `active`, so it inherited an outdated invariant — *"inactive ⇒ `source_file` is empty (because the on-disk SQL was removed alongside)"* — that the new authoring workflow doesn't satisfy. The 23 entries are inactive with a populated `source_file:` that points at a file the corpus no longer carries.
+
+The manifest validator at [manifest.py:_validate_task line 716](src/parsing/manifest.py#L716) already encoded the correct rule:
+
+```python
+# Inactive tasks are retained in the manifest for audit (via
+# inactive_reason) but not executed. If the on-disk SQL was removed when
+# the task was dropped, skip file validation — there is nothing to parse.
+if not task.active or not task.source_file:
+    return
+```
+
+The loader's parse loop did not mirror it.
+
+**Why a narrower fix than the obvious one.** The first instinct was to swap [loader.py:278](src/parsing/loader.py)'s `iter_all_tasks()` → `iter_active_tasks()` (or add `or not task.active` to the filter). That would remove inactive functions from the graph corpus entirely. Several downstream sites depend on those graphs:
+
+1. **[logic_explainer.py:2935-2942](src/agents/logic_explainer.py)** — when a user asks about an inactive function, prepends a "_Note: This task is marked inactive…_" header and explains what the function *would* do. Requires the graph to exist.
+2. **[query_engine.py:158-179](src/parsing/query_engine.py)** — `resolve_variable_nodes(include_inactive=True)` is an opt-in mode that traverses inactive nodes too. Requires them to be indexed.
+3. **[query_engine.py:_is_inactive_node](src/parsing/query_engine.py)** — filters by `hierarchy.active == False`. Built on the assumption that inactive nodes are *present and filtered out by default*, not absent.
+4. **[test_loader_manifest.py:213-215](tests/unit/parsing/test_loader_manifest.py)** — explicit assertion: `# Inactive task's graph is still built, but flagged.`
+
+The Option-B fix would have broken all four. The diagnostic-first stop pattern caught it before any code was written — the first audit (callers of `iter_all_tasks()` at the manifest API) cleared, but the second audit (callers of inactive *graphs* in Redis) tripped the STOP.
+
+**Fix (Option C).** Pre-flight `os.path.isfile()` check inside the per-file parse loop, before `open()`:
+
+```python
+# Mirror the manifest validator's rule (manifest.py:_validate_task line 716):
+# an inactive task may keep its source_file populated for audit even after
+# the on-disk .sql has been removed from the batch. Skip those quietly here
+# so the indexer reports them under `skipped` rather than `failed`.
+if manifest is not None and not os.path.isfile(sql_file):
+    task = manifest.get_task_by_file(sql_file)
+    if task is not None and not task.active:
+        skipped_count += 1
+        logger.info(
+            "Skipped (inactive, source file absent) %s — manifest "
+            "lists %s but no .sql on disk",
+            func_name, os.path.basename(sql_file),
+        )
+        continue
+```
+
+Active tasks with missing files still fall through to the existing failure path. In practice they don't even reach the loader: `load_manifest` runs `_validate_task` at load time, which raises `ManifestValidationError` for active-with-missing-file. The pre-flight skip is a belt-and-suspenders defense for any future scenario where validation gets bypassed (race condition between manifest load and parse; programmatic `BatchManifest` construction that skips the validator).
+
+**Tests** ([tests/unit/parsing/test_loader_manifest.py](tests/unit/parsing/test_loader_manifest.py)):
+
+- `test_w107_inactive_task_with_missing_source_file_is_skipped_quietly` — manifest with one active+present and one inactive+missing entry. Asserts `functions_failed == 0`, the missing entry counts under `functions_skipped`, the active entry parses normally, and the diagnostic log line `"Skipped (inactive, source file absent)"` is emitted.
+- `test_w107_active_task_with_missing_source_file_still_fails_loud` — active task whose file is deleted between manifest authoring and load. Asserts `ManifestValidationError` is raised by `load_all_functions` (validator catches it first, the whole load aborts).
+- `test_module_with_manifest_annotates_graph_with_hierarchy` (pre-existing, preserved) — inactive task whose file *does* exist still parses and produces a graph with `hierarchy.active is False`. This is the downstream-graph capability the simpler fix would have broken; the pre-flight check leaves it intact.
+
+All 7 tests in `test_loader_manifest.py` pass. The pre-existing 3 failures in `test_abl_car_cstm_v4_contract.py` (`test_iter_*_tasks_count`) are stale pinned counts invalidated by yesterday's b68918a corpus expansion (expects 203/166/37, actual 460/323/137); unrelated to W107 and unchanged by this branch.
+
+**Expected post-restart behavior.** Next `python run.py` should report `failed=0` and the 23 previously-failing inactive entries should appear under `skipped` (the count of total skipped rises by ~23 from yesterday's baseline — they were not previously contributing to either bucket because they crashed on `open()`).
