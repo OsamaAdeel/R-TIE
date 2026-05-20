@@ -55,6 +55,12 @@ class Renderer:
             "object_name": state.get("object_name", ""),
             "object_type": state.get("object_type", ""),
             "schema": state.get("schema", ""),
+            # W92: symmetric with /v1/stream — emit the list of schemas
+            # whose bodies were actually fetched into multi_source. The
+            # /v1/query path skips the W57 grounding overlay, but the
+            # contract field is the same so canaries / consumers can
+            # read one field across endpoints.
+            "cited_schemas": state.get("cited_schemas") or [],
             "explanation": explanation,
             "confidence": confidence,
             "validated": validated,

@@ -1239,6 +1239,15 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     w70_anchor,
                 )
 
+            # W92: stamp the per-turn list of schemas whose bodies were
+            # fetched into multi_source. This is what the LLM-rendered
+            # body actually cites, regardless of which schema the
+            # primary anchor (state["schema"]) belongs to. Computed once
+            # here (post-W97 promote-to-front so order is settled);
+            # downstream done_payload reads it from state.
+            cited_schemas = _compute_cited_schemas(state.get("multi_source"))
+            state["cited_schemas"] = cited_schemas
+
             # Send metadata event
             meta = {
                 "schema": state.get("schema", ""),
@@ -1250,6 +1259,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 # answer came from. Single-element list for scoped queries,
                 # multi-element for ALL fan-out hits.
                 "schema_searched": list(state.get("schemas_searched", []) or []),
+                # W92: schemas whose source bodies the response actually
+                # cites. Distinct from schema_searched (retrieval
+                # coverage) and schema (primary anchor) — closes the
+                # heading-vs-body mismatch when multi_source spans
+                # schemas.
+                "cited_schemas": cited_schemas,
                 "schema_scope": schema_scope,
                 "correlation_id": correlation_id,
                 # W80c telemetry: status + (when status=ok) seed_count,
@@ -1566,11 +1581,24 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             target_var, tagged, seeds,
                             function_order=list(functions_source.keys()),
                         )
+                    # W92: align with W97's promote-to-front contract — schema of the position-0 multi_source entry, not state["schema"]
+                    _w92_anchor = state.get("w70_anchor") or None
+                    _w92_anchor_fn = (_w92_anchor or {}).get("function") or ""
+                    _w92_ms = state.get("multi_source") or {}
+                    _w92_heading_schema = ""
+                    if _w92_anchor_fn:
+                        _w92_anchor_fn_upper = _w92_anchor_fn.upper()
+                        for _ms_fn, _ms_entry in _w92_ms.items():
+                            if _ms_fn.upper() == _w92_anchor_fn_upper:
+                                _w92_heading_schema = (_ms_entry or {}).get("schema") or ""
+                                break
+                    if not _w92_heading_schema:
+                        _w92_heading_schema = state.get("schema", "")
                     with stage_timer("llm_stream_variable_trace", correlation_id):
                         _first_token = True
                         async for token in _variable_tracer.stream_chain(
                             target_var, chain_text, request.query, provider, model,
-                            schema=state.get("schema", ""),
+                            schema=_w92_heading_schema,
                         ):
                             if _first_token:
                                 mark_event("llm_first_token", correlation_id, branch="variable_trace")
@@ -1677,6 +1705,21 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 "functions_analyzed": functions_analyzed,
                 # W79: schemas that contributed candidates this turn.
                 "schema_searched": list(state.get("schemas_searched", []) or []),
+                # W92: emit `schema` here too. App.jsx merges meta into
+                # data AFTER the done payload (frontend/src/App.jsx:135-141),
+                # so without this key the merged `data.schema` came
+                # from the meta event only. Having both halves carry
+                # the same value makes the merge a no-op and closes the
+                # observability gap where `data.schema` could disagree
+                # with the body content. Same anchor that meta uses.
+                "schema": state.get("schema", ""),
+                # W92: cited_schemas is the honest list of schemas whose
+                # bodies the response cites — derived once at the meta
+                # event from multi_source. UI / benchmark consumers can
+                # detect a label-vs-body mismatch by checking that
+                # `schema` is in `cited_schemas` (or that cited_schemas
+                # has length 1).
+                "cited_schemas": state.get("cited_schemas") or [],
                 "schema_scope": schema_scope,
                 "correlation_id": correlation_id,
                 "explanation": {
@@ -1843,6 +1886,11 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         # the user-scope override or pivot already settled on), so the
         # UI chip shows that one schema.
         "schema_searched": schemas_searched,
+        # W92: Phase 2 routes to a single schema, so cited_schemas is
+        # the same single-element list. Emitted for shape symmetry
+        # with FUNCTION_LOGIC / DATA_QUERY so consumers can read one
+        # field across all three routes.
+        "cited_schemas": schemas_searched,
         "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
     }
@@ -1867,6 +1915,10 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         "used_fallback": bool(result.get("used_fallback")),
         "badge": "VERIFIED" if not result.get("sanity_warnings") else "REVIEW",
         "schema_searched": schemas_searched,
+        # W92: symmetric with the meta event — Phase 2 cites a single
+        # schema, so the list has one element (or zero when schema
+        # could not be resolved).
+        "cited_schemas": schemas_searched,
         "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
         "explanation": {"markdown": full_markdown},
@@ -1884,6 +1936,28 @@ def _chunk_text(text: str, chunk_size: int = 4):
         return
     for i in range(0, len(text), chunk_size):
         yield text[i:i + chunk_size]
+
+
+def _compute_cited_schemas(multi_source: Optional[Dict[str, Any]]) -> list:
+    """W92: derive the sorted set of distinct schemas in multi_source.
+
+    ``multi_source`` is a ``{function_name: entry}`` dict where each
+    entry carries the per-function source schema (stamped by
+    ``MetadataInterpreter.fetch_logic_multi``). Two functions from
+    different schemas in the same response produce a two-element list;
+    one schema produces a single-element list; an empty / missing
+    multi_source produces ``[]``.
+
+    Sorted for deterministic SSE payloads (snapshot-style tests + the
+    canary driver compare equality, not set membership).
+    """
+    if not multi_source:
+        return []
+    return sorted({
+        entry["schema"]
+        for entry in multi_source.values()
+        if isinstance(entry, dict) and entry.get("schema")
+    })
 
 
 # W79: canonical scope tokens accepted from the request body. The frontend
@@ -2206,6 +2280,11 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
     # here, not the orchestrator-classified default.
     routed_schema = result.get("schema") or schema
     schemas_searched = [routed_schema] if routed_schema else []
+    # W92: DATA_QUERY routes to one schema (the agent already pivoted
+    # via Phase 4 if it had to), so cited_schemas mirrors that single
+    # routed schema. Kept symmetric with FUNCTION_LOGIC / Phase 2 so
+    # consumers can rely on cited_schemas always being present.
+    cited_schemas = [routed_schema] if routed_schema else []
     meta = {
         # Phase 4: prefer the schema DataQueryAgent actually routed to —
         # may differ from the orchestrator-classified `schema` when the
@@ -2216,6 +2295,7 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "query_kind": result.get("query_kind"),
         "row_count": result.get("row_count"),
         "schema_searched": schemas_searched,
+        "cited_schemas": cited_schemas,
         "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
     }
@@ -2253,6 +2333,9 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
         "suspicion_reason": result.get("suspicion_reason"),
         "summary": result.get("summary"),
         "schema_searched": schemas_searched,
+        # W92: symmetric with meta — DataQueryAgent has already pivoted
+        # so the list reflects the schema we actually executed against.
+        "cited_schemas": cited_schemas,
         "schema_scope": state.get("schema_scope") or _SCHEMA_SCOPE_ALL,
         "correlation_id": correlation_id,
         "explanation": {"markdown": explanation},
