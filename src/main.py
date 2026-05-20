@@ -1569,7 +1569,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     with stage_timer("llm_stream_variable_trace", correlation_id):
                         _first_token = True
                         async for token in _variable_tracer.stream_chain(
-                            target_var, chain_text, request.query, provider, model
+                            target_var, chain_text, request.query, provider, model,
+                            schema=state.get("schema", ""),
                         ):
                             if _first_token:
                                 mark_event("llm_first_token", correlation_id, branch="variable_trace")
