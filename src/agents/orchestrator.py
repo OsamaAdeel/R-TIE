@@ -1259,6 +1259,19 @@ _W87_QUERY_STOPWORDS = frozenset({
     "FIND", "SHOW", "TELL", "EXPLAIN", "DESCRIBE", "GIVE", "LIST",
     "THE", "AND", "OR", "BUT", "FOR", "WITH", "FROM", "INTO", "OVER",
     "TRUE", "FALSE", "NULL", "NONE",
+    # W127: calendar terms — months, days, quarters, period words.
+    # Without these, "Where is the December-only gate set?" gets
+    # "December" extracted as a synthetic identifier and declined by W87.
+    "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+    "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
+    "JAN", "FEB", "MAR", "APR", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY",
+    "FRIDAY", "SATURDAY", "SUNDAY",
+    "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN",
+    "Q1", "Q2", "Q3", "Q4",
+    "QUARTER", "YEAR", "MONTH", "WEEK", "DAY",
+    "MONTHLY", "QUARTERLY", "ANNUALLY", "YEARLY", "ANNUAL",
 })
 
 # Query types that ask about a specific entity. W87 only fires on these —

@@ -316,6 +316,58 @@ def test_extract_returns_longest_capitalized_run():
 
 
 # ---------------------------------------------------------------------------
+# W127 — calendar terms are stopwords, must not be extracted as identifiers
+# ---------------------------------------------------------------------------
+
+def test_w127_december_is_stopword():
+    """December should not be extracted as an unrecognized term — quality
+    harness baseline C3: 'Where is the December-only execution gate set?'
+    was previously declined with requested_term=December."""
+    result = _extract_unrecognized_term(
+        "Where is the December-only execution gate set?", "",
+    )
+    assert result is None or result.upper() != "DECEMBER"
+
+
+def test_w127_friday_is_stopword():
+    result = _extract_unrecognized_term(
+        "Which functions ran on Friday?", "",
+    )
+    assert result is None or result.upper() != "FRIDAY"
+
+
+def test_w127_quarterly_is_stopword():
+    result = _extract_unrecognized_term("What runs Quarterly?", "")
+    assert result is None or result.upper() != "QUARTERLY"
+
+
+def test_w127_q3_is_stopword():
+    result = _extract_unrecognized_term(
+        "Which batches failed in Q3?", "",
+    )
+    assert result is None or result.upper() != "Q3"
+
+
+def test_w127_preserves_named_function_extraction():
+    """Adding calendar stopwords must not block legitimate identifiers.
+    FN_LOAD_OPS_RISK_DATA still extracts via the priority-4 single-token
+    regex (capitalized first letter + `[A-Za-z0-9_]{2,}`)."""
+    result = _extract_unrecognized_term(
+        "How does FN_LOAD_OPS_RISK_DATA work?", "",
+    )
+    assert result == "FN_LOAD_OPS_RISK_DATA"
+
+
+def test_w127_preserves_cap_code_extraction():
+    """CAP-codes (CAP973) must still extract — the W127 stopword
+    additions must not regress business-identifier surfaces."""
+    result = _extract_unrecognized_term(
+        "How is CAP973 calculated?", "",
+    )
+    assert result == "CAP973"
+
+
+# ---------------------------------------------------------------------------
 # Variation-generation
 # ---------------------------------------------------------------------------
 
