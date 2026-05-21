@@ -1,0 +1,74 @@
+
+==============================================================================
+CANARY A — "How does FN_LOAD_OPS_RISK_DATA work?"
+==============================================================================
+badge:              'VERIFIED'
+diag.w70_anchor:    'FN_LOAD_OPS_RISK_DATA'
+diag.w76_anchor:    None
+functions_analyzed: ['FN_LOAD_OPS_RISK_DATA', 'FSI_OPTMIZER_EXPOSURE_MAPPING_DATA_POP', 'RUN_PARAMETERS_DATA_POP', 'SUB_EXPOSURES_BANKING_DATA_POP', 'SUB_EXPOSURES_INVESTMENTS_DATA_POP', 'SUB_EXPOSURES_BANKING_UNCOV_DATA_POP', 'SUB_EXPOSURES_INVESTMENT_UNCOV_DATA_POP', 'T2T_FSI_CAP_NET_POOL_SUB_EXPOSURES', 'T2T_FSI_CAP_NET_POOL_UNCOV_SUB_EXPOSURES', 'T2T_NON_SEC_FSI_CAP_BANKING_EXPOSURES', 'T2T_NON_SEC_FSI_CAP_DERIVATIVES', 'T2T_NON_SEC_FSI_CAP_INVESTMENT_EXPOSURES', 'T2T_NON_SEC_FSI_CAP_SFT_EXPOSURES', 'OPS_RISK_SUMMARY_POPULATION', 'MKT_RISK_DR_NDEQ_POP', 'PC_CREDIT_DERIVATIVES_POPULATION', 'T2T_FSI_CAP_CURRENCY_CONVERSION_POP', 'ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR', 'MKT_RISK_BSKT_UL_BNDFUT_POPULATION', 'ABL_MR_SPEC_CAT_INV_QUAL', 'ABL_MR_SPEC_RISK_CATEGORY', 'FN_STRESS_COLUMN_FILLING_CSTM', 'OPS_RISK_DATA_POPULATION_CSTM', 'FSI_OPTIMIZER_PROCESSING_DATA_POP', 'FN_STRESS_DATALOAD_CSTM', 'FN_OTH_ITR_RW_CSTM', 'BANKING_UNDERLYING_INVESTMENT_DATA_POP', 'CR_RISK_POSITION_MAPPING_POPULATION', 'SCP_RISK_WEIGHT_MAPPING_POPULATION', 'CS_THRESHOLD_TREATMENT_RISK_WEIGHT_ASSIGNMENT', 'TLX_LOB_MAPPING', 'POPULATE_PP_FROMGL', 'TLX_LOAD_DELETE_OFSMDM', 'POPULATE_GL_FROMGLBAL', 'MAP_999999_ENTRIES_EXPO']
+functions_analyzed[0] (upper): 'FN_LOAD_OPS_RISK_DATA'
+warnings:           []
+
+checks:
+  [PASS] badge_VERIFIED
+  [PASS] diag_w70_eq_FN_LOAD
+  [PASS] fns0_eq_FN_LOAD
+  [PASS] no_GROUNDING_HIGH
+  [PASS] no_ANCHOR_MISMATCH_HIGH
+
+=> CANARY A PASS
+
+==============================================================================
+CANARY B — "How is CAP973 calculated?" (W97 contract unchanged)
+==============================================================================
+diag.w70_anchor:    'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT'
+functions_analyzed[0]: 'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT'
+functions_analyzed head: ['CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT', 'CS_PHASE_IN_TREATMENT_SIGNIFICANT_INVST_DEDUCTION_AMOUNT_ASSIGNMENT', 'CS_PHASE_IN_TREATMENT_INDIVIDUAL_THRESHOLD_DEDUCTION_AMOUNT_ASSIGNMENT']
+
+checks:
+  [PASS] diag_w70_eq_expected
+  [PASS] fns0_eq_expected
+
+=> CANARY B PASS
+
+==============================================================================
+CANARY C — "Trace N_EOP_BAL" (post-corpus retrieval-gap shape)
+==============================================================================
+badge:    'UNVERIFIED'
+type:     None
+status:   None
+decline:  name=None reason=''
+summary:  type=? badge=UNVERIFIED validated=False confidence=0.4 citations=1 warnings=["GROUNDING-HIGH: cited function 'ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION' not in retrieved sources (analyzed: ['ABL_INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'ABL_LEV_RATIO', 'ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'CAP_CONSL_EFFECTIVE_SHAREHOLDING_PERCENT_FOR_AN_ENTITY_BASED_ON_CONSOLIDATION_APPROACH', 'CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION'])", "GROUNDING-HIGH: cited function 'ABL_BANKING_LC_EXPOSURE_DATA_CREATION' not in retrieved sources (analyzed: ['ABL_INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'ABL_LEV_RATIO', 'ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'CAP_CONSL_EFFECTIVE_SHAREHOLDING_PERCENT_FOR_AN_ENTITY_BASED_ON_CONSOLIDATION_APPROACH', 'CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION'])", 'GROUNDING-LOW: Line 24 cited 4 times (threshold 3); likely line-by-line padding rather than per-claim binding']
+
+checks:
+  [PASS] badge_UNVERIFIED
+  [PASS] type_is_None
+  [PASS] warnings_non_empty
+  [PASS] grounding_high_present
+
+=> CANARY C PASS
+
+==============================================================================
+CANARY D — W80c significant-investment regression (recall 5/5)
+==============================================================================
+matched:            5/5
+matched_fns:        ['ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP', 'CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION', 'SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES', 'SIGNIFICANT_INVESTMENT_IN_PARTY_FOR_REPORTING_BANK_IDENTIFICATION', 'SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP']
+rerank_status:      ok
+rank_change_count:  35
+
+checks:
+  [PASS] recall_5_of_5
+  [PASS] rerank_status_ok
+  [PASS] rerank_moved
+
+=> CANARY D PASS
+
+==============================================================================
+SUMMARY
+==============================================================================
+  [PASS] A — FN_LOAD
+  [PASS] B — CAP973
+  [PASS] C — N_EOP_BAL
+  [PASS] D — W80c 5/5
+
+Total: 4/4
