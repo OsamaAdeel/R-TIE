@@ -915,3 +915,26 @@ Redis probe (`graph:index:OFSERM`, 2,737 columns total) shows N_EOP_BAL is corre
 Live `/v1/stream` on "Trace N_EOP_BAL" retrieves a 5-function multi_source consisting of the unrelated significant-investment cluster (ABL_INSIGNFCNT_INVSTMNT_*, CAP_CONSL_*, ABL_LEV_RATIO) — none of the 4 actual N_EOP_BAL-bearing functions are pulled. The LLM still cites the correct functions (ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION and ABL_BANKING_LC_EXPOSURE_DATA_CREATION appear in its response) — likely from the W70 anchor cascade or general knowledge — but they're not in `multi_source`, so the W57 grounding overlay correctly flags them as GROUNDING-HIGH.
 
 This is a retrieval-side coverage gap, latent and pre-existing (W43 instrumentation has been logging the question-as-target_variable pattern for a while; cf. W109). Worth investigating eventually — likely a query-engine path that prefers embedding-similarity over column-index direct-lookup for VARIABLE_TRACE on widely-used columns — but not today.
+
+---
+
+## Dedup-chain weakness — sibling check defers to earlier check via dedup contract
+
+**Pattern, not a single weakness.** RTIE's W57 post-generation grounding overlay has at least three sites where a later check defers to an earlier check via a dedup contract:
+
+  - **W83a → Check 5** ([src/agents/logic_explainer.py:2275-2276](src/agents/logic_explainer.py#L2275-L2276)) — `_w57_check_december_paraphrase` skips when any literal phrase from `_W57_CHECK5_DECEMBER_LITERAL_PHRASES` is present in the body. The intent: Check 5 names the exact literal phrase, which is more informative than W83a's paraphrase warning.
+  - **W83b → Check 5 OR W83a** ([src/agents/logic_explainer.py:2363-2369](src/agents/logic_explainer.py#L2363-L2369)) — `_w57_check_calendar_gating_grounded` skips when either a Check 5 literal phrase OR a W83a paraphrase pattern matches the body. The intent: a narrower-shape check already covered the claim.
+  - **`seen_cited_fn` dedup** ([src/agents/logic_explainer.py:1778-1811](src/agents/logic_explainer.py#L1778-L1811)) — Check 1's three sub-checks (1.0a prose framing, 1.0b heading framing, 1.0b responsibility framing) share a `seen_cited_fn` set so the same fabricated function name cited in multiple framings fires exactly one warning. The intent: avoid trust-banner noise when the same fabrication appears in heading AND prose.
+
+**Rule the pattern implies (and why future detector work must respect it).** A sibling check that defers to an earlier check **inherits that earlier check's bugs invisibly**. If the earlier check's predicate becomes lenient or broken — too narrow a phrase set, a validator that returns True-supported when it shouldn't, an over-eager `seen_cited_fn` add — the deferring sibling silently skips on the same body and the trust-contract signal disappears entirely.
+
+W137 was exactly this failure mode. Pre-W137 Check 5's December-literal lambda used a lenient substring predicate (`"EXTRACT(MONTH" in src OR "TO_CHAR" in src) AND "12" in src`). `TO_CHAR` appears in nearly every OFSAA function (skey conversion in INSERTs); the literal `"12"` appears in arithmetic (`365/12`), stage counters (`LV_STAGE := 12`), and constants. The predicate returned True-supported for most of the corpus. Because both W83a and W83b dedup to Check 5 when a literal December phrase is in the body, a False-positive supported signal at Check 5 silently suppressed both downstream checks. P1 query B4 surfaced the result: response asserted December gating, no calendar warning fired, badge VERIFIED on a fabrication. W137 replaced Check 5's predicate with the strict `_w57_calendar_gate_supports_claim` gate.
+
+**Constraint for new detector work.** A new sibling check that follows the dedup-chain pattern must **independently verify the earlier check's predicate against the same body**, not just rely on its dedup contract. Two acceptable shapes:
+
+1. The new check re-runs the earlier check's predicate on the body itself, and only defers when the earlier check would have fired correctly — i.e., predicate True AND the earlier check's source-content gate confirmed.
+2. The new check does not dedup against the earlier check at all (fires independently), and dedup is handled at the enforce-grounding layer via the existing set-based exact-message dedup.
+
+The current sites (W83a→Check 5, W83b→Check 5/W83a) take option 1's "defer to narrower check" stance — acceptable as long as the narrower check's predicate stays strict. W137 hardened Check 5's predicate accordingly. Future calendar-class detectors that want to defer to Check 5 must keep this invariant alive.
+
+**Out of scope.** `seen_cited_fn` dedup is a different shape (same-message dedup across structurally-similar sub-checks within Check 1, not predicate-deferring across distinct detectors), but is listed above because the failure mode is structurally similar — a fabrication added to the seen set on one path skips the other paths regardless of whether they would have produced a more informative warning. Worth a separate audit if the seen-set construction proves load-bearing for a future fabrication class.
