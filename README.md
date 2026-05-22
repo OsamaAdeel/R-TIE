@@ -79,7 +79,7 @@ docker compose up -d --build
 Watch the cold start:
 
 ```bash
-docker compose logs -f rtie-backend
+docker compose logs -f rtie-app-backend
 ```
 
 **Access points after startup:**
@@ -94,10 +94,25 @@ docker compose logs -f rtie-backend
 
 | Container | Role |
 |---|---|
-| `rtie-backend` | FastAPI + LangGraph orchestrator + corpus baked into the image |
-| `rtie-frontend` | nginx-served Vite build of the React UI |
+| `rtie-app-backend` | FastAPI + LangGraph orchestrator + corpus baked into the image |
+| `rtie-app-frontend` | nginx-served Vite build of the React UI |
 | `rtie-redis` | Redis Stack with RediSearch (vector store + graph store + indexes) |
 | `rtie-postgres` | LangGraph checkpointer + correlation tracking + conversation memory |
+
+The compose file splits the stack into two logical groups under the same `rtie` project:
+
+- **Data services** — service names `redis` / `postgres`; container names `rtie-redis` / `rtie-postgres`; volumes `rtie_redis_data` / `rtie_postgres_data` (persistent).
+- **App services** — service names `rtie-app-backend` / `rtie-app-frontend`; container names match.
+
+That distinction matters for the CLI: `docker compose <verb>` takes **service** names, `docker exec <name>` and `docker ps` show **container** names. The two are deliberately different so you can rebuild / restart the app without touching the data side:
+
+```bash
+docker compose up -d redis postgres                       # data-only (hybrid dev with `python run.py`)
+docker compose up -d rtie-app-backend rtie-app-frontend   # app-only, against already-running data
+docker compose up -d                                      # everything
+docker compose restart rtie-app-backend                   # bounce only the backend
+docker compose down rtie-app-backend rtie-app-frontend    # tear down app, leave data running
+```
 
 Oracle is external — the backend dials it via the DSN you put in `.env.dev`.
 
@@ -113,9 +128,9 @@ Oracle is external — the backend dials it via the DSN you put in `.env.dev`.
 docker compose down              # stop, preserve volumes (fast restart next time)
 docker compose down -v           # stop and wipe volumes (re-runs the indexer)
 docker compose up -d --build     # rebuild after Dockerfile / source changes
-docker compose logs -f rtie-backend
-docker compose exec rtie-backend bash
-docker compose restart rtie-backend
+docker compose logs -f rtie-app-backend
+docker compose exec rtie-app-backend bash
+docker compose restart rtie-app-backend
 ```
 
 ### Docker-specific notes
@@ -132,7 +147,7 @@ A full cold-start → canary → warm-restart validation that proves the stack w
 ```bash
 docker compose down -v
 docker compose up -d
-docker compose logs -f rtie-backend   # wait until /health returns 200
+docker compose logs -f rtie-app-backend   # wait until /health returns 200
 ```
 
 Then in the UI ask:
@@ -152,7 +167,7 @@ Two variants below for Linux/macOS and Windows. Use this when you want to iterat
 | Tool | Version | Notes |
 |---|---|---|
 | Python | 3.11+ (`pyproject.toml` declares `^3.11`) | 3.12 / 3.13 also work |
-| Poetry | 1.x or 2.x | `pip install poetry`; no `requirements.txt` |
+| Python deps | Poetry **or** pip | `poetry install` (managed venv) **or** `pip install -r requirements.txt` (simpler). Both resolve to the same dependency set — `requirements.txt` mirrors `pyproject.toml [tool.poetry.dependencies]` and adds the directly-imported transitives (`langchain-core`, `anthropic`, `openai`, `httpx`, `starlette`, `psycopg-pool`). |
 | Docker Desktop (Windows) or Docker Engine (Linux) | recent | for Redis Stack + PostgreSQL |
 | Node.js + npm | LTS (20.x / 22.x) | for the React/Vite frontend |
 | Oracle access | OFSAA FSAPPS with OFSMDM + OFSERM | read-only credentials; provisioning is out of scope |
@@ -167,16 +182,18 @@ A standalone Windows walkthrough (Git, WSL 2, Docker Desktop, every download lin
 All commands run from inside `RTIE/`.
 
 ```bash
-# 1. Install Python dependencies
-poetry install
-poetry shell                       # or prefix every command with `poetry run`
+# 1. Install Python dependencies — pick ONE
+pip install -r requirements.txt    # simplest, no venv tooling required
+# OR, for a managed venv:
+poetry install && poetry shell     # prefix later commands with `poetry run` if not in shell
 
 # 2. Create .env.dev from template, fill in secrets
 cp .env.example .env.dev
 $EDITOR .env.dev                   # set ORACLE_*, OPENAI_API_KEY, etc.
 
-# 3. Start Redis Stack + PostgreSQL only
-docker compose up -d rtie-redis rtie-postgres
+# 3. Start Redis Stack + PostgreSQL only (service names are `redis` / `postgres`;
+#    container names are `rtie-redis` / `rtie-postgres`)
+docker compose up -d redis postgres
 docker ps                          # expect rtie-redis and rtie-postgres, both Up
 
 # 4. Verify Redis
@@ -209,7 +226,9 @@ Open <http://localhost:5173>. The chat UI streams responses from `/v1/stream`.
 ```powershell
 # All commands run inside the RTIE folder.
 
-# 1. Install dependencies
+# 1. Install Python dependencies — pick ONE
+pip install -r requirements.txt    # simplest
+# OR, for a managed venv:
 pip install poetry
 poetry install
 poetry shell
@@ -219,7 +238,8 @@ Copy-Item .env.example .env.dev
 notepad .env.dev
 
 # 3. Start infrastructure (Docker Desktop must be running first)
-docker compose up -d rtie-redis rtie-postgres
+#    Service names are `redis` / `postgres`; container names are `rtie-redis` / `rtie-postgres`.
+docker compose up -d redis postgres
 
 # 4. Verify Redis + Postgres
 docker exec -it rtie-redis redis-cli PING
@@ -889,15 +909,15 @@ python cli.py index --force
 python run.py
 ```
 
-**Redis container not running (`redis.exceptions.ConnectionError`).** `docker ps` — if `rtie-redis` isn't listed, `docker compose up -d rtie-redis` to bring it back. The Redis Stack image (not vanilla Redis) is required because RediSearch powers the vector index.
+**Redis container not running (`redis.exceptions.ConnectionError`).** `docker ps` — if `rtie-redis` isn't listed, `docker compose up -d redis` to bring it back (service name is `redis`, container name is `rtie-redis`). The Redis Stack image (not vanilla Redis) is required because RediSearch powers the vector index.
 
 **Parallel-worktree friction.** Two specific gotchas: (1) `.env.dev` is gitignored, so a new worktree starts with no env file — copy it explicitly. (2) `sys.path` may pin to the original checkout's `src/`. In PowerShell, set `$env:PYTHONPATH = (Get-Location).Path + '\src'` before starting the worktree's backend. Verify the worktree's code is actually running by hitting a query and grepping the *worktree's* `logs/app.log` for a known signature line.
 
 **`event: done` payload has no `badge` field.** You're reading `/v1/query`, not `/v1/stream`. `/v1/query` returns raw LangGraph state and skips the W57 overlay. Switch to `/v1/stream`.
 
-**Docker backend healthcheck stays "starting" past 30 minutes.** Cold-start indexing is taking longer than expected. Tail `docker compose logs -f rtie-backend` — if the loader/indexer log lines aren't progressing, OpenAI key is likely missing or rate-limited.
+**Docker backend healthcheck stays "starting" past 30 minutes.** Cold-start indexing is taking longer than expected. Tail `docker compose logs -f rtie-app-backend` — if the loader/indexer log lines aren't progressing, OpenAI key is likely missing or rate-limited.
 
-**Docker Oracle connection fails.** Confirm `ORACLE_HOST` is reachable from inside the container: `docker compose exec rtie-backend curl -v telnet://$ORACLE_HOST:$ORACLE_PORT`. From a developer laptop where Oracle runs locally, use `host.docker.internal` (Windows / macOS) instead of `localhost`.
+**Docker Oracle connection fails.** Confirm `ORACLE_HOST` is reachable from inside the container: `docker compose exec rtie-app-backend curl -v telnet://$ORACLE_HOST:$ORACLE_PORT`. From a developer laptop where Oracle runs locally, use `host.docker.internal` (Windows / macOS) instead of `localhost`.
 
 **Docker port conflicts (5173 / 8000 / 6379 / 5432 already in use).** Either stop the conflicting process or remap the host-side port in `docker-compose.yml` (`"5174:80"` etc.).
 
