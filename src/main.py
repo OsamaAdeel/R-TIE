@@ -57,6 +57,7 @@ from src.agents.variable_tracer import VariableTracer
 from src.agents.chain_ordering import reorder_multi_source
 from src.agents.value_tracer import ValueTracerAgent
 from src.agents.data_query import DataQueryAgent
+from src.agents.computation_router import detect_named_computation
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -897,16 +898,57 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # First: run classify + search + fetch via the graph (stop before explain)
             state = dict(initial_state)
 
-            # Stage 1: Classify
-            yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Understanding your question...'})}\n\n"
-            with stage_timer("orchestrator_classify", correlation_id):
-                state = await _orchestrator.classify_query(
-                    request.query, state, provider=provider, model=model
+            # W130 — pre-classifier W88 detect. The W88 named-computation
+            # registry's decline arm (LCR, NSFR, Leverage Ratio) was being
+            # shadowed at baseline: W87 caught LCR / NSFR as unrecognized
+            # terms first, and the DATA_QUERY MIS-date gate caught Leverage
+            # Ratio before W88 could fire. Running detect_named_computation
+            # as the first orchestration step lets the static registry win
+            # the routing decision when its patterns match — saving the
+            # LLM classify call and surfacing W88's authoritative reason
+            # text + alternative-metric suggestions (CAP214 for Leverage
+            # Ratio). detect_named_computation is intentionally called
+            # again downstream at data_query.py:328 — the function is
+            # reused, not refactored. The downstream call covers the
+            # normal DATA_QUERY-with-MIS-date path that never goes through
+            # this hook (classifier emits DATA_QUERY, pipeline routes to
+            # DataQueryAgent, W88 fires there). Do not "optimize" the
+            # downstream call away. Baseline: F1 / F2 / F3 of
+            # scratch/quality_harness_report_baseline.md. Closes the
+            # documented W88b backlog (Weakness Log 2026-05-18).
+            w88_pre = detect_named_computation(
+                raw_query=request.query, query_type="DATA_QUERY",
+            )
+            if w88_pre is not None:
+                logger.info(
+                    "W130: W88 matched pre-classifier | computation=%s "
+                    "arm=%s pattern=%r | correlation_id=%s",
+                    w88_pre.definition.name,
+                    w88_pre.definition.arm,
+                    w88_pre.matched_pattern,
+                    correlation_id,
                 )
+                state["query_type"] = "DATA_QUERY"
+                state["w88_pre_detected"] = True
+                yield (
+                    "event: stage\ndata: "
+                    + json_mod.dumps({
+                        "stage": "classify",
+                        "message": "Recognized named computation...",
+                    })
+                    + "\n\n"
+                )
+            else:
+                # Stage 1: Classify (existing path, unchanged)
+                yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Understanding your question...'})}\n\n"
+                with stage_timer("orchestrator_classify", correlation_id):
+                    state = await _orchestrator.classify_query(
+                        request.query, state, provider=provider, model=model
+                    )
 
-            if state.get("partial_flag"):
-                yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
-                return
+                if state.get("partial_flag"):
+                    yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
+                    return
 
             # W79: when the user scoped to a specific schema in the UI,
             # the dropdown wins over the classifier's schema_name. The
@@ -2188,7 +2230,17 @@ async def _data_query_stream(state, user_query, correlation_id, provider, model)
 
     require_mis_date = (_settings.get("phase2") or {}).get("require_mis_date", True)
     has_date_range = bool(filters.get("start_date") and filters.get("end_date"))
-    if require_mis_date and not filters.get("mis_date") and not has_date_range:
+    # W130: W88 pre-detected paths don't need a user-supplied MIS date.
+    # Anchor-arm SQL uses DENSE_RANK on the latest run; decline-arm payloads
+    # are hand-built and emit no SQL. The MIS-date clarification is for
+    # LLM-generated SQL paths that can't safely default a date scope.
+    w88_pre_detected = bool(state.get("w88_pre_detected"))
+    if (
+        require_mis_date
+        and not filters.get("mis_date")
+        and not has_date_range
+        and not w88_pre_detected
+    ):
         payload = {
             "type": "clarification",
             "message": (
