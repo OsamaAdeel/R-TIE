@@ -1160,12 +1160,23 @@ _W83B_GATING_LANGUAGE = (
 # Class B — restrictive qualifier (the gating-ness). Includes hedged
 # multi-word forms ("under the condition that", "particularly when")
 # that the W83a verb-direct regex set deliberately excluded.
+#
+# W136 (2026-05-22): added "primarily when" / "mainly when" /
+# "principally when" / "chiefly when". E3 of the P1 quality harness
+# surfaced "executed under specific conditions, primarily when the
+# reporting month is December" as a HOLLOW VERIFIED — same gating
+# semantics as the existing "particularly when" entry, different
+# surface form. Diagnostic: scratch/w83d_diagnostic.md §E3.
 _W83B_RESTRICTIVE_QUALIFIER = (
     "only", "exclusively", "solely",
     "limited to", "restricted to",
     "contingent on", "conditional on",
     "under the condition that", "under the condition",
     "particularly when", "specifically when",
+    # W136 — additional restrictive-hedge phrases (general English
+    # synonyms of "particularly when" / "specifically when").
+    "primarily when", "mainly when",
+    "principally when", "chiefly when",
     "is fired when", "is executed when", "is triggered when",
     "is run when",
 )
@@ -2414,6 +2425,117 @@ def _w57_check_calendar_gating_grounded(
     ]
 
 
+# W135: maximum length of the phrase substring embedded in the
+# GROUNDING-CALENDAR-UNANCHORED warning. Paraphrase regex captures
+# (via .group(0)) have variable width; truncate to keep the trust-
+# banner line bounded. Hygiene only — does not affect detection.
+_W135_PHRASE_MAX_CHARS = 80
+
+
+def _w57_check_unanchored_calendar_claims(
+    markdown: str,
+    multi_source: Dict[str, Any],
+    asked_about_function: Optional[str] = None,
+    w70_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W135 (W57 Check 9): diagnostic when a calendar-claim phrase is
+    present in the body but no anchor resolves a retrieved function
+    as the claim subject.
+
+    The three existing calendar checks (Check 5 template phrases,
+    W83a December paraphrase, W83B hedged-framing co-occurrence) all
+    silently skip when their anchor cascade returns None. P1 query A2
+    surfaced the failure mode: response asserts a December gate
+    attributed to a function not in retrieved sources; resolver
+    exhausts its three priorities; calendar checks skip silently;
+    the fabrication goes unflagged.
+
+    W135 fires when the same anchor cascade W83B uses — W70 anchor
+    first, then :func:`_w57_resolve_primary_function` — returns None
+    for BOTH and at least one calendar-claim phrase class is present:
+
+      1. Check 5 literal phrase from
+         :data:`_W57_CHECK5_DECEMBER_LITERAL_PHRASES`.
+      2. W83a paraphrase regex match from
+         :data:`_W57_DECEMBER_PARAPHRASE_PATTERNS`.
+      3. W83b co-occurrence claim tag from
+         :func:`_w83b_collect_claim_tags`.
+
+    Detect-only: no new pattern definitions. Does NOT attempt to
+    guess the resolution target — guessing would re-open the
+    fabrication surface RTIE was built to close.
+
+    Emits exactly one warning per response. When multiple phrase
+    classes match, the most informative is named first (literal >
+    paraphrase > co-occurrence label). The embedded phrase
+    substring is bounded at :data:`_W135_PHRASE_MAX_CHARS` chars to
+    keep the warning string compact when a paraphrase
+    ``re.Match.group(0)`` captures unusually long spans.
+
+    Severity category ``GROUNDING-CALENDAR-UNANCHORED:`` is
+    distinct from ``GROUNDING-CALENDAR-HIGH:`` (W83B, "gate
+    disagrees with claim") so future benchmark runs can distinguish
+    "calendar pipeline could not run" from "calendar pipeline ran
+    and disagreed". Both are blocking via the existing
+    not-``GROUNDING-LOW:`` filter at the badge-calculation step.
+    """
+    if not multi_source:
+        return []
+
+    # Anchor cascade: mirror W83B (W70 anchor → resolver). If either
+    # resolves a target, the existing checks handle the calendar
+    # validation and W135 must not fire.
+    target_fn: Optional[str] = None
+    if isinstance(w70_anchor, dict):
+        candidate = (w70_anchor.get("function") or "").strip()
+        if candidate:
+            cu = candidate.upper()
+            for fn in multi_source:
+                if fn.upper() == cu:
+                    target_fn = fn
+                    break
+    if target_fn is None:
+        target_fn = _w57_resolve_primary_function(
+            markdown, asked_about_function, multi_source,
+        )
+    if target_fn is not None:
+        return []
+
+    body = _w57_ascii_normalize(markdown)
+    body_lower = body.lower()
+
+    detected_phrase: Optional[str] = None
+    for literal in _W57_CHECK5_DECEMBER_LITERAL_PHRASES:
+        if literal in body_lower:
+            detected_phrase = literal
+            break
+    if detected_phrase is None:
+        for pat in _W57_DECEMBER_PARAPHRASE_PATTERNS:
+            m = pat.search(body)
+            if m is not None:
+                detected_phrase = m.group(0)
+                break
+    if detected_phrase is None:
+        tags = _w83b_collect_claim_tags(body_lower)
+        if tags:
+            detected_phrase = tags[0][2]
+
+    if detected_phrase is None:
+        return []
+
+    if len(detected_phrase) > _W135_PHRASE_MAX_CHARS:
+        truncated = detected_phrase[:_W135_PHRASE_MAX_CHARS - 3].rstrip() + "..."
+    else:
+        truncated = detected_phrase
+
+    return [
+        f"GROUNDING-CALENDAR-UNANCHORED: response contains calendar-claim "
+        f"phrase '{truncated}' but neither the cascade anchor nor the "
+        f"most-cited-in-sources rule resolved a retrieved function as the "
+        f"claim subject; calendar gate validation skipped"
+    ]
+
+
 def _w57_check_anchor_vs_asked_mismatch(
     raw_query: str,
     redis_client: Any = None,
@@ -2628,6 +2750,18 @@ def w57_enforce_grounding(
     # when both would fire on the same body. Prefers W84's w70_anchor
     # over the W76-based asked_about_function path.
     warnings.extend(_w57_check_calendar_gating_grounded(
+        markdown, multi_source,
+        asked_about_function=asked_about_function,
+        w70_anchor=w70_anchor,
+    ))
+    # W135 (Check 9): unanchored-calendar-claim diagnostic. Fires when
+    # a calendar phrase is present AND the W83B anchor cascade (W70
+    # anchor → resolver) returns None for BOTH — i.e., the calendar
+    # validation pipeline cannot run because no retrieved function
+    # could be resolved as the subject of the claim. Position-last
+    # among calendar checks: relies on the same anchor cascade as
+    # W83B and only fires when W83B would have silently skipped.
+    warnings.extend(_w57_check_unanchored_calendar_claims(
         markdown, multi_source,
         asked_about_function=asked_about_function,
         w70_anchor=w70_anchor,
