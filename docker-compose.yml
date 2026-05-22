@@ -1,26 +1,35 @@
 # RTIE local-dev stack (v1, internal-Techlogix persona).
 #
-# Four services: backend (FastAPI), frontend (nginx-served Vite build),
-# Redis Stack (with RediSearch + RedisJSON modules — load-bearing for the
-# vector store), and Postgres (LangGraph checkpointer + memory tables).
+# Two logical stacks under the same compose project `rtie`:
+#   - Data stack:  `redis` + `postgres` services.
+#                  Containers: rtie-redis, rtie-postgres.
+#                  Volumes:    rtie_redis_data, rtie_postgres_data (preserve existing data).
+#                  Bring up with: `docker compose up -d redis postgres`.
+#   - App stack:   `rtie-app-backend` + `rtie-app-frontend` services.
+#                  Containers: rtie-app-backend, rtie-app-frontend.
+#                  Bring up with: `docker compose up -d rtie-app-backend rtie-app-frontend`.
+#                  (Or `docker compose up -d` for everything.)
+#
+# Data and app services use distinct names so the app can be torn down / rebuilt
+# without touching the persistent data containers.
 #
 # Oracle is EXTERNAL: the backend reaches it via ORACLE_HOST/PORT/SID/USER
 # /PASSWORD in .env.dev. Add no oracle service here.
 #
 # REDIS_HOST and POSTGRES_HOST are overridden in the backend `environment:`
-# block below to point at service names — that way .env.dev can keep
-# `localhost` for the bare-metal `python run.py` workflow without breaking
-# the compose deployment.
+# block below to point at the data containers' container_name values — that
+# way .env.dev can keep `localhost` for the bare-metal `python run.py`
+# workflow without breaking the compose deployment.
 
 services:
-  rtie-redis:
+  redis:
     image: redis/redis-stack:latest
     container_name: rtie-redis
     ports:
       - "6379:6379"
       - "8001:8001"  # RedisInsight UI (optional, dev-only)
     volumes:
-      - rtie-redis-data:/data
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -28,7 +37,7 @@ services:
       retries: 10
     restart: unless-stopped
 
-  rtie-postgres:
+  postgres:
     image: postgres:15-alpine
     container_name: rtie-postgres
     ports:
@@ -38,7 +47,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres123}
     volumes:
-      - rtie-postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
       # Memory tables — applied once on first volume init via Postgres's
       # docker-entrypoint-initdb.d mechanism. Subsequent boots ignore it.
       # LangGraph checkpointer creates its own tables via checkpointer.setup()
@@ -51,16 +60,17 @@ services:
       retries: 10
     restart: unless-stopped
 
-  rtie-backend:
+  rtie-app-backend:
     build:
       context: .
       dockerfile: deploy/backend/Dockerfile
-    container_name: rtie-backend
+    container_name: rtie-app-backend
     env_file:
       - .env.dev
     environment:
       # Force inter-container hostnames regardless of what .env.dev says, so
       # the same .env.dev works for bare-metal dev (localhost) and compose.
+      # These resolve via container_name DNS on the shared compose network.
       REDIS_HOST: rtie-redis
       REDIS_PORT: "6379"
       POSTGRES_HOST: rtie-postgres
@@ -72,9 +82,9 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      rtie-redis:
+      redis:
         condition: service_healthy
-      rtie-postgres:
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -86,18 +96,22 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  rtie-frontend:
+  rtie-app-frontend:
     build:
       context: .
       dockerfile: deploy/frontend/Dockerfile
-    container_name: rtie-frontend
+    container_name: rtie-app-frontend
     ports:
       - "5173:80"
     depends_on:
-      rtie-backend:
+      rtie-app-backend:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  rtie-redis-data:
-  rtie-postgres-data:
+  # Names map to existing host volumes `rtie_redis_data` and
+  # `rtie_postgres_data` via the `rtie_` project-name prefix. Do NOT rename —
+  # the data containers were created against these names and Postgres /
+  # RediSearch state lives in them.
+  redis_data:
+  postgres_data:
