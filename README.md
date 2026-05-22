@@ -74,10 +74,6 @@ cd R-TIE/RTIE
 cp .env.example .env.dev
 # Edit .env.dev — fill ORACLE_HOST/PORT/SID/USER/PASSWORD, OPENAI_API_KEY, POSTGRES_PASSWORD.
 
-# One-time: log in to GitHub Container Registry to pull the pre-warmed Redis image.
-# Create a PAT (classic) with `read:packages` at https://github.com/settings/tokens
-echo <PAT> | docker login ghcr.io -u <github-username> --password-stdin
-
 docker compose up -d --build
 ```
 
@@ -136,18 +132,13 @@ If you opt out of the prewarmed image (`RTIE_REDIS_IMAGE=redis/redis-stack:lates
 
 ### Pre-warmed Redis image (maintainer + teammate workflow)
 
-The prewarmed image is hosted privately on GitHub Container Registry. Image: `ghcr.io/toheedasghar/r-tie-redis-prewarmed`.
+The prewarmed image is published **publicly** on GitHub Container Registry: `ghcr.io/toheedasghar/r-tie-redis-prewarmed`. Public visibility means teammates pull it anonymously — no `docker login`, no PAT, nothing in their `.env`. `docker compose up -d` just works.
 
-**Teammate one-time setup** — authenticate Docker to GHCR so the pull works:
+**Maintainer first-time setup** — pushing to GHCR still needs auth even when the package is public. One-time per maintainer machine:
 
-```bash
-# Create a GitHub Personal Access Token (classic) with `read:packages` scope:
-#   https://github.com/settings/tokens
-# Then log in once per machine:
-echo <PAT> | docker login ghcr.io -u <github-username> --password-stdin
-```
-
-After that, `docker compose up -d` pulls the image automatically. No manual indexing required.
+1. Create a GitHub PAT (classic) at https://github.com/settings/tokens with scopes: `write:packages`, `read:packages`, `delete:packages`.
+2. `docker login ghcr.io -u toheedasghar` and paste the PAT.
+3. After the first `docker push`, flip the package to public in the GitHub UI: open https://github.com/users/ToheedAsghar/packages/container/r-tie-redis-prewarmed/settings → "Danger Zone" → Change visibility → Public. (GHCR creates new packages private by default.)
 
 **Maintainer republish workflow** — when you add a new module or otherwise re-index locally, refresh the published image so teammates pick up the new corpus:
 
