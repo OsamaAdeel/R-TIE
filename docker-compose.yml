@@ -23,7 +23,14 @@
 
 services:
   redis:
-    image: redis/redis-stack:latest
+    # Pre-warmed Redis Stack image: ships the indexed corpus inside /data/dump.rdb
+    # so teammates skip the 5-30 minute cold-start indexing on first boot.
+    # On a fresh `rtie_redis_data` volume, Docker copies the baked-in dump.rdb
+    # into the volume on first mount; on a warm volume the existing contents win.
+    # Override with `RTIE_REDIS_IMAGE=redis/redis-stack:latest` to opt out
+    # (e.g. when re-indexing from scratch). See scripts/publish_redis_image.ps1
+    # for the maintainer publish workflow.
+    image: ${RTIE_REDIS_IMAGE:-ghcr.io/toheedasghar/r-tie-redis-prewarmed:latest}
     container_name: rtie-redis
     ports:
       - "6379:6379"
