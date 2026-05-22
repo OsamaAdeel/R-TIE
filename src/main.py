@@ -58,6 +58,7 @@ from src.agents.chain_ordering import reorder_multi_source
 from src.agents.value_tracer import ValueTracerAgent
 from src.agents.data_query import DataQueryAgent
 from src.agents.computation_router import detect_named_computation
+from src.agents.structural_question_router import detect_structural_question
 from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
@@ -949,6 +950,53 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 if state.get("partial_flag"):
                     yield f"event: done\ndata: {json_mod.dumps({'type': 'clarification', 'message': state.get('output', {}).get('message', 'Could you clarify?')})}\n\n"
                     return
+
+                # W129 — post-classifier structural-question override. The
+                # classifier over-fires DATA_QUERY on structural questions
+                # ("what runs in December", "what functions update FCT_*"):
+                # date-shape tokens and bare FCT_* table references both
+                # trigger the DATA_QUERY heuristic, which then hits the
+                # MIS-date gate and returns the wrong-shape "include a
+                # date" clarification. W129 detects a narrow set of
+                # structural shapes (P1 = "what/which <code-noun>
+                # <data-op-verb>"; P2 = "what <run-verb> in/on/during
+                # <time>") and overrides query_type to COLUMN_LOGIC so
+                # the logic_explainer pipeline runs instead (same path
+                # validated by C3's W127 post-fix routing).
+                #
+                # Override is POST-classifier (not pre-) so the classifier-
+                # populated state (target_variable, schema, search_terms)
+                # is preserved and feeds the explainer prompt correctly.
+                # An earlier pre-classifier draft bypassed classify_query
+                # and left these fields empty, which broke the explainer
+                # LLM call with BadRequestError on E1 (35-function
+                # retrieval + empty prompt slots). Pattern divergence
+                # from W130's pre-classifier hook is justified: W88 paths
+                # short-circuit to canned payloads (no downstream LLM
+                # call); structural-question paths flow through the full
+                # logic pipeline (LLM call inevitable, classifier cost
+                # worth paying for clean state).
+                #
+                # Gated on query_type == "DATA_QUERY" so legitimate
+                # classifier routes (VARIABLE_TRACE / COLUMN_LOGIC /
+                # UNSUPPORTED / FUNCTION_LOGIC) are never overridden.
+                # The W88 pre-detect path (state["w88_pre_detected"])
+                # does not reach this branch — W130's `if` arm above
+                # bypasses classify_query and skips this else block.
+                # Baseline: E1 / E2 of
+                # scratch/quality_harness_report_baseline.md.
+                if state.get("query_type") == "DATA_QUERY":
+                    w129_structural = detect_structural_question(request.query)
+                    if w129_structural is not None:
+                        logger.info(
+                            "W129: structural override | was=DATA_QUERY "
+                            "to=%s pattern=%r | correlation_id=%s",
+                            w129_structural.suggested_route,
+                            w129_structural.pattern,
+                            correlation_id,
+                        )
+                        state["query_type"] = w129_structural.suggested_route
+                        state["w129_structural"] = True
 
             # W79: when the user scoped to a specific schema in the UI,
             # the dropdown wins over the classifier's schema_name. The
