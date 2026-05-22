@@ -1282,6 +1282,40 @@ _W87_ENTITY_SEEKING_TYPES = frozenset({
 })
 
 
+def _w121b2_is_synthesized_target(
+    target_variable: str,
+    raw_query: str,
+) -> bool:
+    """W121-broad-2: detect classifier-synthesized compound target_variables.
+
+    The LLM classifier is instructed to "extract the exact column/variable
+    name" and tends to normalize prose like "LVE cap" / "RRP eligibility"
+    into OFSAA-shaped column identifiers "LVE_CAP" / "RRP_ELIGIBILITY".
+    W87 then declines on the synthesized form because no such column
+    exists. Baseline: A4 / B1 of quality harness baseline; see
+    scratch/w121b_empirical_finding.md for the data-flow trace.
+
+    Returns True (reject as synthesized) when all hold:
+      (a) target_variable contains an underscore (a join character)
+      (b) target_variable does NOT appear (case-insensitive) in raw_query
+          — the user did not type the joined form
+      (c) every underscore-split token of target_variable appears as a
+          standalone word in raw_query (case-insensitive, word-boundary)
+    """
+    if "_" not in target_variable:
+        return False
+    if target_variable.lower() in raw_query.lower():
+        return False
+    tokens = [t for t in target_variable.split("_") if t]
+    if len(tokens) < 2:
+        return False
+    raw_lower = raw_query.lower()
+    return all(
+        re.search(rf"\b{re.escape(t.lower())}\b", raw_lower) is not None
+        for t in tokens
+    )
+
+
 def _extract_unrecognized_term(
     raw_query: str,
     target_variable: str,
@@ -1291,7 +1325,8 @@ def _extract_unrecognized_term(
     Priority:
       1. The classifier's ``target_variable`` (its best guess at the entity
          the user named) — already extracted during classification, no need
-         to re-derive.
+         to re-derive. W121-broad-2 rejects target_variables that look
+         synthesized from prose (see _w121b2_is_synthesized_target).
       2. The first quoted phrase in the raw query.
       3. The longest run of consecutive capitalized words.
       4. The longest single capitalized token that is not a query stopword
@@ -1301,7 +1336,9 @@ def _extract_unrecognized_term(
     as "W87 cannot identify what the user meant, fall through to the
     existing classifier-partial_flag clarification path."
     """
-    if target_variable:
+    if target_variable and not _w121b2_is_synthesized_target(
+        target_variable, raw_query,
+    ):
         return target_variable.strip()
     if not raw_query:
         return None
