@@ -971,16 +971,41 @@ def _w57_supports_passthrough(src: str) -> bool:
 # validator(source_text) returns True iff the source actually supports
 # the claim. Phrases that don't appear in any cited source mean the
 # model produced a generic template without reading the body.
+#
+# W137 (2026-05-22): the two December literal phrases delegate to
+# :func:`_w57_calendar_gate_supports_claim` under the
+# ``("december", "month", "December")`` claim tag instead of the
+# pre-W137 substring lambda
+# (``("EXTRACT(MONTH" in src.upper() or "TO_CHAR" in src.upper())
+# and "12" in src``). The substring shape returned True-supported for
+# ~the entire corpus because ``TO_CHAR`` appears in nearly every OFSAA
+# function (skey-to-text conversion in INSERTs) and the literal ``"12"``
+# appears in arithmetic constants (``365/12``, ``* 12``), stage counters
+# (``LV_STAGE := 12``), account numbers, and debug literals. Because
+# W83a and W83b dedup to Check 5 when a literal December phrase is in
+# the body (:data:`_W57_CHECK5_DECEMBER_LITERAL_PHRASES`), a lenient-
+# True from Check 5 silently suppressed all three calendar checks.
+# Baseline failure: P1 query B4 ("What determines if an exposure gets
+# deducted from capital?") landed on the ABL_MARKET_RISK_EXPOSURES_FROM_
+# MRVAR anchor whose source contains TO_CHAR + ``LV_STAGE`` arithmetic
+# noise but no MONTH=12 / EXTRACT(MONTH ...) = 12 / ``'DECEMBER'`` /
+# YYYY1231 evidence; the response asserted December gating and badged
+# VERIFIED. Choice of ``month`` over ``year-end`` matches W83B's
+# December claim tag at line 1279 and W83C's design intent (date
+# literals deliberately excluded for month claims, lines 1485-1487).
+# Diagnostic: scratch/w83d_diagnostic.md.
 _W57_TEMPLATE_PHRASES = (
     (
         "only runs when the reporting month is december",
-        lambda src: ("EXTRACT(MONTH" in src.upper() or
-                     "TO_CHAR" in src.upper()) and "12" in src,
+        lambda src: _w57_calendar_gate_supports_claim(
+            ("december", "month", "December"), src,
+        ),
     ),
     (
         "only runs in december",
-        lambda src: ("EXTRACT(MONTH" in src.upper() or
-                     "TO_CHAR" in src.upper()) and "12" in src,
+        lambda src: _w57_calendar_gate_supports_claim(
+            ("december", "month", "December"), src,
+        ),
     ),
     (
         "no internal gating",
