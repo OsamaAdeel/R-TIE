@@ -66,17 +66,24 @@ The frontend's `ValidationHeader` (W46) renders the badge and warnings above the
 
 ## Quick start — Docker (recommended)
 
-Three-command setup, assuming Docker Desktop is installed and an Oracle FSAPPS instance is reachable.
+Assuming Docker Desktop is installed and an Oracle FSAPPS instance is reachable.
 
 ```bash
 git clone https://github.com/ToheedAsghar/R-TIE.git
 cd R-TIE/RTIE
 cp .env.example .env.dev
 # Edit .env.dev — fill ORACLE_HOST/PORT/SID/USER/PASSWORD, OPENAI_API_KEY, POSTGRES_PASSWORD.
+
+# One-time: log in to GitHub Container Registry to pull the pre-warmed Redis image.
+# Create a PAT (classic) with `read:packages` at https://github.com/settings/tokens
+echo <PAT> | docker login ghcr.io -u <github-username> --password-stdin
+
 docker compose up -d --build
 ```
 
-Watch the cold start:
+The Redis service pulls a **pre-warmed image** (`ghcr.io/toheedasghar/r-tie-redis-prewarmed`) that already contains the indexed corpus — first boot completes in **seconds**, not the 5–30 minutes a cold indexing would take. See [Pre-warmed Redis image](#pre-warmed-redis-image-maintainer--teammate-workflow) for the maintainer republish workflow and opt-out path.
+
+Watch the startup:
 
 ```bash
 docker compose logs -f rtie-app-backend
@@ -118,9 +125,50 @@ Oracle is external — the backend dials it via the DSN you put in `.env.dev`.
 
 ### What to expect on first boot
 
-- **~5–30 minutes of indexing.** The lifespan walks `db/modules/` (the Techlogix corpus baked into the image), populates the Redis graph, generates LLM descriptions, builds the vector index. Watch the log for lines like `Module ABL_CAR_CSTM_V4: loaded N, skipped 0, failed 0` and `Auto-index OFSMDM: N indexed`.
-- After indexing, `/health` returns 200 and the frontend becomes usable.
-- Subsequent `docker compose down && up -d` (without `-v`) is seconds — the Redis volume is warm and the loader/indexer skip everything.
+By default the compose file pulls a **pre-warmed Redis image** (`ghcr.io/toheedasghar/r-tie-redis-prewarmed`) that already contains the indexed corpus — graph, vector index, BI literals, column index, the lot. First boot for a teammate looks like this:
+
+- Docker pulls `r-tie-redis-prewarmed` (5–10 MB compressed) and `r-tie-rtie-app-backend` / `r-tie-rtie-app-frontend`.
+- Compose creates a fresh `rtie_redis_data` volume; Docker copies the image's baked-in `/data/dump.rdb` into it on first mount.
+- Redis starts and loads the corpus from RDB in <1 second.
+- Backend lifespan runs the loader/indexer, sees every function already cached, skips it. `/health` returns 200 in **seconds**.
+
+If you opt out of the prewarmed image (`RTIE_REDIS_IMAGE=redis/redis-stack:latest`) or wipe the volume (`docker compose down -v`), you fall back to **~5–30 minutes of cold indexing**: the lifespan walks `db/modules/` (the Techlogix corpus baked into the backend image), populates the Redis graph, generates LLM descriptions, builds the vector index. Watch the log for lines like `Module ABL_CAR_CSTM_V4: loaded N, skipped 0, failed 0` and `Auto-index OFSMDM: N indexed`. After indexing, `/health` returns 200 and the frontend becomes usable.
+
+### Pre-warmed Redis image (maintainer + teammate workflow)
+
+The prewarmed image is hosted privately on GitHub Container Registry. Image: `ghcr.io/toheedasghar/r-tie-redis-prewarmed`.
+
+**Teammate one-time setup** — authenticate Docker to GHCR so the pull works:
+
+```bash
+# Create a GitHub Personal Access Token (classic) with `read:packages` scope:
+#   https://github.com/settings/tokens
+# Then log in once per machine:
+echo <PAT> | docker login ghcr.io -u <github-username> --password-stdin
+```
+
+After that, `docker compose up -d` pulls the image automatically. No manual indexing required.
+
+**Maintainer republish workflow** — when you add a new module or otherwise re-index locally, refresh the published image so teammates pick up the new corpus:
+
+```powershell
+# From the RTIE folder (rtie-redis must be running with the desired state)
+.\scripts\publish_redis_image.ps1                # build + push :latest + :YYYYMMDD-HHmm
+.\scripts\publish_redis_image.ps1 -NoPush        # build only, no push (for local validation)
+.\scripts\publish_redis_image.ps1 -Tag v2        # also tag :v2
+```
+
+The script triggers `BGSAVE`, copies the resulting `dump.rdb` into `deploy/redis/`, builds the image, and pushes to GHCR. The `dump.rdb` is gitignored — only the image itself ships.
+
+**Opting out** — to bring up vanilla Redis Stack (e.g. to validate the cold-start indexer path):
+
+```powershell
+$env:RTIE_REDIS_IMAGE = "redis/redis-stack:latest"
+docker compose down -v       # wipe the prewarmed volume
+docker compose up -d         # cold indexing path
+```
+
+**How the warming actually reaches the running Redis.** Compose mounts the named volume `rtie_redis_data` at `/data`. On a **fresh** volume, Docker copies the image's baked-in `/data/dump.rdb` into it before redis-server starts — so the corpus is there from boot. On a **warm** volume (e.g. your laptop after re-indexing), the existing volume contents win and the baked-in RDB is shadowed; that's why publishing a new image doesn't accidentally overwrite your in-progress local index.
 
 ### Common Docker operations
 
