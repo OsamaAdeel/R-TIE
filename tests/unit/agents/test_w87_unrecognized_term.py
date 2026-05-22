@@ -47,9 +47,11 @@ def test_fires_on_g_test_query_with_target_variable():
     """Stakeholder-test-1 Q11: classifier put 'G_Test' in target_variable but
     nothing else resolved.
 
-    Detector should return the term so the W87 branch can build a
-    structured clarification response instead of the enriched_query blob
-    being passed to semantic search.
+    W121-broad-2: 'G_Test' is rejected by the priority-1 synthesis check
+    (classifier joined 'G Test' prose into the underscored form, same
+    pattern as 'LVE cap' → 'LVE_CAP'). Extraction falls through to
+    priority 3 which returns the un-joined 'G Test' — the term the user
+    actually typed. End-user-visible W87 decline shape is unchanged.
     """
     state = _make_state(
         query_type="COLUMN_LOGIC",
@@ -58,7 +60,7 @@ def test_fires_on_g_test_query_with_target_variable():
     term = _detect_unrecognized_term_query(
         state, "what is the threshold value for G Test", redis_client=None,
     )
-    assert term == "G_Test"
+    assert term == "G Test"
 
 
 def test_fires_on_g_test_query_no_target_variable():
@@ -280,10 +282,14 @@ def test_no_fire_when_column_check_raises(monkeypatch):
 # Term-extraction edge cases
 # ---------------------------------------------------------------------------
 
-def test_extract_prefers_target_variable_over_heuristic():
+def test_extract_prefers_verbatim_target_variable_over_heuristic():
+    """Priority 1 wins when target_variable appears verbatim (case-
+    insensitively) in the raw query — the user typed the joined form,
+    so the classifier's extraction is not a synthesis. W121-broad-2
+    only rejects target_variables that look invented from prose."""
     assert _extract_unrecognized_term(
-        "what is the threshold value for G Test", "G_Test",
-    ) == "G_Test"
+        "what is the threshold for G_TEST_FN", "G_TEST_FN",
+    ) == "G_TEST_FN"
 
 
 def test_extract_falls_through_to_multiword_when_no_target_variable():
@@ -365,6 +371,91 @@ def test_w127_preserves_cap_code_extraction():
         "How is CAP973 calculated?", "",
     )
     assert result == "CAP973"
+
+
+# ---------------------------------------------------------------------------
+# W121-broad-2 — priority 1 sanity check against LLM-synthesized
+# compound target_variables (test-first pins; REJECT cases fail pre-fix)
+# ---------------------------------------------------------------------------
+# Background: scratch/w121b_empirical_finding.md
+#
+# Rejection rule (all must hold):
+#   (a) target_variable contains underscore
+#   (b) target_variable does NOT appear (case-insensitive) in raw_query
+#   (c) every underscore-split token of target_variable appears as a
+#       standalone word in raw_query (case-insensitive)
+# On rejection, priority 1 returns None and extraction falls through to
+# priorities 2-4.
+
+def test_w121b2_lve_cap_synthesis_rejected():
+    """A4 baseline: LLM classifier joined 'LVE cap' prose → 'LVE_CAP'.
+    Priority 1 should reject and fall through. Priority 4 returns 'LVE'."""
+    result = _extract_unrecognized_term(
+        "What's the LVE cap?", "LVE_CAP",
+    )
+    assert result != "LVE_CAP"
+    # Acceptable fall-through: priority 4 returns 'LVE'.
+    assert result == "LVE" or result is None
+
+
+def test_w121b2_rrp_eligibility_synthesis_rejected():
+    """B1 baseline: LLM classifier joined 'RRP eligibility' prose →
+    'RRP_ELIGIBILITY'. Priority 1 rejects; priority 4 returns 'RRP'."""
+    result = _extract_unrecognized_term(
+        "What enforces RRP eligibility?", "RRP_ELIGIBILITY",
+    )
+    assert result != "RRP_ELIGIBILITY"
+    assert result == "RRP" or result is None
+
+
+def test_w121b2_n_eop_bal_verbatim_accepted():
+    """User typed N_EOP_BAL verbatim — priority 1 must accept and return."""
+    result = _extract_unrecognized_term(
+        "What is the total N_EOP_BAL for V_LV_CODE='ABL' on 2025-12-31?",
+        "N_EOP_BAL",
+    )
+    assert result == "N_EOP_BAL"
+
+
+def test_w121b2_fn_load_ops_risk_data_verbatim_accepted():
+    """User typed function name verbatim — priority 1 accepts."""
+    result = _extract_unrecognized_term(
+        "How does FN_LOAD_OPS_RISK_DATA work?",
+        "FN_LOAD_OPS_RISK_DATA",
+    )
+    assert result == "FN_LOAD_OPS_RISK_DATA"
+
+
+def test_w121b2_ead_amount_verbatim_accepted():
+    """User typed EAD_AMOUNT verbatim — priority 1 accepts."""
+    result = _extract_unrecognized_term(
+        "Where is EAD_AMOUNT computed?",
+        "EAD_AMOUNT",
+    )
+    assert result == "EAD_AMOUNT"
+
+
+def test_w121b2_lowercase_query_uppercase_target_accepted():
+    """EDGE case: user typed n_eop_bal lowercase; classifier returned
+    uppercase N_EOP_BAL. The underscore form appears in the raw query
+    case-insensitively, so (b) is false → accept."""
+    result = _extract_unrecognized_term(
+        "what is the total n_eop_bal for V_LV_CODE='ABL' on 2025-12-31?",
+        "N_EOP_BAL",
+    )
+    assert result == "N_EOP_BAL"
+
+
+def test_w121b2_no_underscore_target_accepted():
+    """Targets without underscore can't trigger synthesis-rejection
+    rule (a). FAKECOL999 / CAP999 / MYSTERY-style single tokens must
+    pass through priority 1 unaffected."""
+    assert _extract_unrecognized_term(
+        "How is FAKECOL999 calculated?", "FAKECOL999",
+    ) == "FAKECOL999"
+    assert _extract_unrecognized_term(
+        "How is CAP999 calculated?", "CAP999",
+    ) == "CAP999"
 
 
 # ---------------------------------------------------------------------------
