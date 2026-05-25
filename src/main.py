@@ -1762,6 +1762,28 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 grounding["badge"] = "UNVERIFIED"
                 grounding["confidence"] = 0.2
 
+            # W108: when stream_semantic's source-concat cap fired, surface
+            # a user-visible W108-TRUNCATED warning and force UNVERIFIED.
+            # The response was built on a subset of retrieved candidates,
+            # so it cannot be VERIFIED — the dropped (lower-ranked)
+            # candidates might have contained the actual answer. Confidence
+            # is intentionally NOT overridden here: the response is
+            # genuinely sourced on real candidates (unlike
+            # PARTIAL_SOURCE_INDEXED, which has no source body), so
+            # grounding's own confidence calculation should stand.
+            w108_truncation = state.get("w108_truncation")
+            if w108_truncation:
+                kept = w108_truncation["kept"]
+                total = w108_truncation["total"]
+                dropped_count = total - kept
+                grounding["warnings"].append(
+                    f"W108-TRUNCATED: response based on {kept} of {total} "
+                    f"retrieved functions; {dropped_count} lower-ranked "
+                    "candidates were dropped to fit the model's context "
+                    "budget. Narrow your query if you need full coverage."
+                )
+                grounding["badge"] = "UNVERIFIED"
+
             # Stream caveat tokens before closing so the user sees them inline.
             # W45/W49: suppress the Caveats block when either structured
             # branch was taken — the body already explains the situation, so

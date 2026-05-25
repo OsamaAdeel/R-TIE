@@ -26,12 +26,30 @@ from src.parsing.schema_discovery import fallback_to_default_schema
 logger = get_logger(__name__, concern="app")
 
 # W108: defensive cap on raw-source concatenation in stream_semantic.
-# Budgeted at ~100K tokens (assuming ~4 chars/token observed in practice
-# for PL/SQL source — gpt-4o-mini's 128K window minus headroom for the
-# system prompt, anchor block, user query, and the model's 4096-token
-# response budget). When the cap fires, lower-ranked functions are
-# dropped while position 0 (the W97 anchor) is always preserved.
-SOURCE_CONCAT_CHAR_BUDGET = 400_000
+#
+# Empirically observed (E1 "What runs only in December?" P1 capture,
+# correlation_id 7a69c4a4..., 2026-05-22): PL/SQL source + the structured
+# section headers we wrap each function in tokenize at ~3.0-3.2 chars/token
+# under gpt-4o-mini, NOT the ~4 chars/token an earlier comment assumed.
+# At that ratio the prior 400_000-char cap pushed a 35-function E1 prompt
+# to 124,651 input tokens + 4,096 reserved completion = 128,747 — 747
+# tokens over gpt-4o-mini's 128,000 window.
+#
+# The budget here is sized to keep multi_source alone well under the
+# model's input window even at worst-case ~3.0 chars/token, leaving
+# headroom for: the SEMANTIC_EXPLANATION_PROMPT system prompt (~1,700
+# chars), the W70 anchor block (up to ~430 chars at high-confidence
+# tier; future growth assumed), the user-prompt wrapper (~260 chars),
+# and the model's 4,096-token completion reservation. The cap covers
+# multi_source ONLY; the rest of the prompt is presumed bounded by
+# upstream design.
+#
+# When the cap fires, lower-ranked functions are dropped while position
+# 0 (the W97 anchor) is always preserved. The user-facing
+# W108-TRUNCATED warning is surfaced post-grounding via main.py
+# consulting state["w108_truncation"] (mirrors the
+# PARTIAL_SOURCE_INDEXED pattern).
+SOURCE_CONCAT_CHAR_BUDGET = 320_000
 
 # Phrases that signal the LLM is flagging missing information. If the model
 # emits one of these AND then continues to generate substantive text, we
@@ -3346,10 +3364,17 @@ class LogicExplainer:
         """Stream semantic explanation tokens as an async generator.
 
         Yields markdown tokens one chunk at a time for SSE streaming.
-        The caller collects the full text. The only state mutation is
-        ``state["w70_anchor"]`` (set by :func:`apply_w70_anchor` for
-        diagnostic visibility) — the streamed tokens themselves are
-        not stored back onto state.
+        The caller collects the full text. Permitted state mutations:
+
+        - ``state["w70_anchor"]`` — set by :func:`apply_w70_anchor` for
+          diagnostic visibility.
+        - ``state["w108_truncation"]`` — set when the W108 source-concat
+          cap fires, so :mod:`src.main` can surface a
+          ``W108-TRUNCATED`` warning post-grounding (mirrors the
+          ``PARTIAL_SOURCE_INDEXED`` pattern). Dict shape:
+          ``{"kept": int, "total": int, "dropped": list[str]}``.
+
+        The streamed tokens themselves are not stored back onto state.
 
         Args:
             state: Pipeline state with raw_query and multi_source.
@@ -3391,6 +3416,15 @@ class LogicExplainer:
                     ", ".join(dropped_names[:5])
                     + (" …" if len(dropped_names) > 5 else ""),
                 )
+                # W108: stash truncation info on state so main.py can append
+                # a user-visible W108-TRUNCATED warning and downgrade the
+                # badge after evaluate_grounding runs. Mirrors the
+                # PARTIAL_SOURCE_INDEXED pattern at main.py:1755-1763.
+                state["w108_truncation"] = {
+                    "kept": kept_count,
+                    "total": len(multi_source),
+                    "dropped": list(dropped_names),
+                }
 
             user_prompt = (
                 f"User Question: {query}\n\n"
