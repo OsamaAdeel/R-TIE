@@ -26,6 +26,8 @@ the streamer don't silently bypass the cap.
 """
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from src.agents.logic_explainer import (
@@ -201,3 +203,97 @@ class TestBudgetBoundary:
         )
         assert kept == 1
         assert dropped == ["FOLLOWER_FN"]
+
+
+class TestStreamSemanticTruncationStash:
+    """W108 plumbing: when ``stream_semantic`` encounters the cap-fire
+    branch, it must stash a ``state["w108_truncation"]`` dict so
+    :mod:`src.main` can surface a ``W108-TRUNCATED`` warning post-grounding
+    (mirrors the ``PARTIAL_SOURCE_INDEXED`` pattern).
+
+    Tests use the documented PUBLIC contract — they don't care whether
+    the stash happens inside or outside the helper, just that after
+    ``stream_semantic`` runs, the right dict is on ``state``.
+    """
+
+    async def _drain(self, agen):
+        """Iterate an async generator to completion, discarding output."""
+        async for _ in agen:
+            pass
+
+    @pytest.fixture
+    def explainer_with_temperature(self, explainer):
+        # stream_semantic reads ``self._temperature`` when building the LLM.
+        explainer._temperature = 0.0
+        return explainer
+
+    async def _patched_run(self, explainer, state):
+        """Run stream_semantic with the LLM + anchor calls mocked out so
+        the test never touches the real OpenAI client and the W70 anchor
+        resolver doesn't try to hit Redis."""
+
+        async def empty_astream(*args, **kwargs):
+            # Drain immediately; no tokens yielded.
+            return
+            yield  # pragma: no cover — async-generator marker
+
+        mock_llm = AsyncMock()
+        mock_llm.astream = empty_astream
+
+        with patch(
+            "src.agents.logic_explainer.create_llm", return_value=mock_llm
+        ), patch(
+            "src.agents.logic_explainer.apply_w70_anchor", return_value=None
+        ), patch(
+            "src.agents.logic_explainer.build_anchor_block", return_value=""
+        ):
+            await self._drain(
+                explainer.stream_semantic(state, provider=None, model=None)
+            )
+
+    async def test_stash_set_when_cap_fires(self, explainer_with_temperature):
+        # 10 large functions, force the cap via a small budget at module
+        # level by monkey-patching SOURCE_CONCAT_CHAR_BUDGET indirectly:
+        # we instead make each function so large that 320K can't hold them
+        # all. Each function ~50K chars × 10 = 500K total, well over 320K.
+        multi_source = {
+            f"FN_{i:02d}": _make_fn(f"FN_{i:02d}", body_lines=600)
+            for i in range(10)
+        }
+        state = {
+            "raw_query": "What runs only in December?",
+            "multi_source": multi_source,
+        }
+
+        await self._patched_run(explainer_with_temperature, state)
+
+        assert "w108_truncation" in state, (
+            "stream_semantic must stash w108_truncation when cap fires"
+        )
+        info = state["w108_truncation"]
+        assert isinstance(info, dict)
+        assert info["total"] == 10
+        assert 0 < info["kept"] < 10
+        assert isinstance(info["dropped"], list)
+        assert len(info["dropped"]) == 10 - info["kept"]
+        # Dropped is the tail of the iteration order.
+        for name in info["dropped"]:
+            assert name.startswith("FN_")
+
+    async def test_stash_not_set_when_cap_does_not_fire(
+        self, explainer_with_temperature
+    ):
+        # 3 small functions, total << 320K — no drop, no stash.
+        multi_source = {
+            f"FN_{i}": _make_fn(f"FN_{i}", body_lines=5) for i in range(3)
+        }
+        state = {
+            "raw_query": "How does FN_0 work?",
+            "multi_source": multi_source,
+        }
+
+        await self._patched_run(explainer_with_temperature, state)
+
+        assert "w108_truncation" not in state, (
+            "stream_semantic must not stash w108_truncation when cap is silent"
+        )
