@@ -1766,11 +1766,18 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # a user-visible W108-TRUNCATED warning and force UNVERIFIED.
             # The response was built on a subset of retrieved candidates,
             # so it cannot be VERIFIED — the dropped (lower-ranked)
-            # candidates might have contained the actual answer. Confidence
-            # is intentionally NOT overridden here: the response is
-            # genuinely sourced on real candidates (unlike
-            # PARTIAL_SOURCE_INDEXED, which has no source body), so
-            # grounding's own confidence calculation should stand.
+            # candidates might have contained the actual answer.
+            #
+            # W134: also cap confidence at 0.4. Pre-W134, the W108 block
+            # left confidence untouched on the rationale "grounding's own
+            # calculation accounts for evidence quality" — but that
+            # calculation is a 5-bucket lookup on (badge, has_citations),
+            # not a quality measure (see scratch/w134_audit_findings.md).
+            # As a result a clean response that got truncated could ship
+            # as UNVERIFIED + 0.95 (B3 in the P1 harness exhibited this).
+            # The cap mirrors the bucket the formula would have produced
+            # had W108-TRUNCATED been present in `warnings` BEFORE the
+            # formula ran (blocking_warnings non-empty + citations → 0.4).
             w108_truncation = state.get("w108_truncation")
             if w108_truncation:
                 kept = w108_truncation["kept"]
@@ -1783,6 +1790,8 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     "budget. Narrow your query if you need full coverage."
                 )
                 grounding["badge"] = "UNVERIFIED"
+                if grounding["confidence"] > 0.4:
+                    grounding["confidence"] = 0.4
 
             # Stream caveat tokens before closing so the user sees them inline.
             # W45/W49: suppress the Caveats block when either structured

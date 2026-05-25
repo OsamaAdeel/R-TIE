@@ -344,7 +344,19 @@ def evaluate_grounding(
         confidence = 0.4 if citations else 0.2
     else:
         badge = "VERIFIED"
-        confidence = 0.95 if citations else 0.8
+        # W134: when VERIFIED + citations, cap at 0.85 if ANY warning is
+        # present (the full array, including GROUNDING-LOW: advisories).
+        # Pre-W134 this branch always emitted 0.95 even when LOW advisories
+        # fired — the formula had detected a citation-padding / range-repeat
+        # issue but still published maximum confidence. The cap makes the
+        # formula respect its own advisories. Badge logic untouched; the
+        # UNVERIFIED branches and the no-citations 0.8 case are unchanged.
+        # Architectural rework to continuous quality scoring is tracked
+        # under W144 (see scratch/w134_audit_findings.md).
+        if citations:
+            confidence = 0.85 if warnings else 0.95
+        else:
+            confidence = 0.8
 
     return {
         "badge": badge,
