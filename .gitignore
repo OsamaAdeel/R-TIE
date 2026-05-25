@@ -1,6 +1,7 @@
 .env*
 !.env.example
 logs/
+ofserminfo_logs/
 __pycache__/
 .pytest_cache/
 *.pyc
