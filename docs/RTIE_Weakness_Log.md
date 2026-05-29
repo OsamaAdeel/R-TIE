@@ -68,7 +68,7 @@ These four items together constitute the full-stack validation needed before thi
 
 ---
 
-## W85. Anchor-vs-asked-function mismatch — FIXED 2026-05-12 (merge SHA pending)
+## W85. Anchor-vs-asked-function mismatch — FIXED 2026-05-12 (merge SHA 8cd8354)
 
 **Status:** Implemented and merged. Live in `_w57_check_anchor_vs_asked_mismatch`
 (W57 Check 8) in [src/agents/logic_explainer.py](src/agents/logic_explainer.py).
@@ -213,7 +213,7 @@ smoke, quarter coverage, year-end regression, source-content gate
 strict semantics, dedup, message format, end-to-end via
 ``w57_enforce_grounding``).
 
-**Merge SHA.** _pending_
+**Merge SHA.** 83cfb0c (2026-05-15)
 
 ---
 
@@ -312,7 +312,7 @@ defer further.
 
 ---
 
-## W88. Named regulatory computation pre-router — FIXED 2026-05-18 (merge SHA pending)
+## W88. Named regulatory computation pre-router — FIXED 2026-05-18 (merge SHA 702fca5)
 
 - **Discovered:** Diagnostic 2026-05-12 ([docs/w88_diagnostic.md](docs/w88_diagnostic.md)). Stakeholder queries naming Basel-defined regulatory computations (BIA op-risk capital, CET1 ratio, total Credit Risk RWA, LCR, NSFR) all classified correctly as `DATA_QUERY` but every one routed to `OFSMDM` staging with the LLM SQL generator fabricating queries against `ABL_OPS_RISK_DATA`. Diagnostic Section 3 measured 15/15 queries routing wrong: zero of fifteen reached the correct `OFSERM.FCT_OPS_RISK_DATA` / `OFSERM.FCT_STANDARD_ACCT_HEAD` tables, every one returned `VERIFIED` with null or wrong results. Pre-existing W86 catches the all-null result shape downstream but never prevents the misrouting.
 - **Root cause:** Two-stage failure. (a) The classifier correctly stamps `query_type=DATA_QUERY` for these queries but stamps no authoritative `target_table` or `required_filters` — those decisions are pushed to the LLM SQL generator. (b) The schema catalog the LLM sees at SQL-generation time is dominated by OFSMDM staging tables (loader-rejected OFSERM detail tables don't appear), so the LLM picks the only thing it sees. The named computation never reaches its canonical fact table even though both `FCT_OPS_RISK_DATA` and `FCT_STANDARD_ACCT_HEAD` exist with the right data in the local Oracle.
@@ -325,11 +325,11 @@ defer further.
 - **Tests:** 60 unit tests in [tests/unit/agents/test_w88_computation_router.py](tests/unit/agents/test_w88_computation_router.py) — registry integrity (6 anchor + 3 decline, no duplicate names, anchor/decline shape complete), positive detection per computation (24 parametrized cases covering long name + acronym + CAP-code variants), negative cases (non-DATA_QUERY types, empty / None / non-string inputs, generic data queries that must not match), edge cases (case-insensitivity, hyphen / underscore variants, embedded in longer queries, registry-order determinism), SKEY resolution (lazy lookup, success / failure / null-row / empty-result caching, cap-code anchors don't probe), plan-building (SQL shape per family, DENSE_RANK presence, params binding, None on SKEY-unresolved), decline-payload (pure decline vs SKEY-unresolved fallback, alternative line surface, shape compatibility with main.py's done-payload contract). 10 integration canaries appended to [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) — one per anchor (6) + one per decline (3) + one regression confirming the W33 CHAR-padding canary still passes with `w88_anchor` absent. Updated 1 pre-existing W86 unit test (`test_stream_fires_w86_on_all_null_aggregate`) to use a non-W88-matching `user_query` ("Get the alpha and beta totals from op risk staging on 2026-12-31" — same scenario, different phrasing) so W86's stream-wiring test still exercises the LLM-SQL → all-null path; the W86 detector itself is unchanged.
 - **Out of scope:** TSA / ASA / AMA (method-SKEY 77/36/16 — table-reachable but 0 rows in current run), CR-IRB-F / CR-IRB-A (need `FCT_NON_SEC_EXPOSURES` which is absent locally), MR-IM (needs `FCT_MR_VAR_DATA` which is empty). All six are documented in the diagnostic as honest-decline-when-empty candidates; left out of v1 to keep the scope tight on items with live data. CAP170 (Operational RWA aggregate) is the natural downstream landing of BIA but wasn't in the diagnostic's v1 list — deferred for a follow-up that handles user phrasings like "Operational Risk RWA" explicitly without conflating with BIA's per-row capital charge. Manifest-driven registry (Pattern B from diagnostic Section 4) deferred — static dict is right for v1 stability.
 - **Backlog (surfaced during canary review):** [W88b](w88b_classifier_dependency_for_named_computations.md) — classifier-dependency for date-less queries: production users asking "What is the CET1 ratio?" (no date) get routed to FUNCTION_LOGIC and intercepted by W87 before W88 fires. Recommended fix is moving W88 detection upstream of the classifier or adding a classifier hint; priority medium-high. [W88c](w88c_bia_sum_scope_single_entity_vs_aggregate.md) — BIA SUM scope: W88 v1 returns the bank-consolidated total (`SUM across entities at latest run`, 20.40 B PKR), the diagnostic's cowork reference was a single-entity sample (20.39 B PKR), 0.06% delta. Worth resolving before stakeholders notice; priority medium.
-- **Merge SHA:** pending.
+- **Merge SHA:** 702fca5 (2026-05-18).
 
 ---
 
-## W86. DATA_QUERY all-null metric columns return VERIFIED — FIXED 2026-05-12 (merge SHA pending)
+## W86. DATA_QUERY all-null metric columns return VERIFIED — FIXED 2026-05-12 (merge SHA 9db4fc7)
 
 **Status:** Implemented in `_detect_all_null_metric_columns` in
 [src/agents/data_query.py](src/agents/data_query.py). Sibling sub-check
@@ -358,32 +358,32 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W89. VARIABLE_TRACE chain ordering — FIXED in this PR
+## W89. VARIABLE_TRACE chain ordering — FIXED 2026-05-14 (merge SHA 334054e)
 
 - **Discovered:** Stakeholder test 2 (2026-05-14). RTIE response walked the retrieved functions in a non-execution order while Cowork's reference walked classification → aggregation → threshold → deduction. Calibration evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
 - **Root cause:** The VARIABLE_TRACE chain assembly didn't consult manifest `task_order`. The order signal exists (W39, stored under each function's `graph:{schema}:{fn}` hierarchy block) but wasn't reaching the narrative-generator. Two surfaces ordered alphabetically pre-W89: `tagged_lines.sort(key=lambda x: (x["function"], x["line"]))` in [src/agents/variable_tracer.py](src/agents/variable_tracer.py) `extract_relevant_lines`, and the outer `sorted(by_function.items())` in `build_transformation_chain`. The response payload's `functions_analyzed` array used semantic-rank order (`list(state["multi_source"].keys())`).
 - **Fix:** New [src/agents/chain_ordering.py](src/agents/chain_ordering.py) helper `order_chain_by_manifest` sorts by `(batch, process, sub_process_path, task_order)` before narrative generation. Unmanifested functions sort to the end in their original input order. Wired into [src/main.py](src/main.py) `event_stream` BEFORE the meta event emit (gated on `query_type == "VARIABLE_TRACE"` so FUNCTION_LOGIC / COLUMN_LOGIC / DATA_QUERY are unaffected) and into `build_transformation_chain`'s new `function_order` parameter. `VARIABLE_TRACE_PROMPT` got one additive sentence instructing the LLM to walk the provided functions in the order they're given.
 - **Tests:** 20 unit tests in [tests/unit/agents/test_w89_chain_ordering.py](tests/unit/agents/test_w89_chain_ordering.py) covering: simple task_order sort, multi-batch / multi-process / multi-sub-process sort, unmanifested-to-end, empty / single / already-sorted no-op, Redis failure fallback, partial manifest entry, cross-schema chain, `build_transformation_chain` order honoured. 3 integration tests in [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) cover the live SSE round-trip (functions_analyzed monotonicity check, FUNCTION_LOGIC shape unchanged, DATA_QUERY shape unchanged).
-- **Merge SHA:** pending.
+- **Merge SHA:** 334054e (2026-05-14).
 
 ---
 
-## W80 v1. Vector retrieval embedding input poisoning — FIXED 2026-05-15 (merge SHA pending)
+## W80 v1. Vector retrieval embedding input poisoning — FIXED 2026-05-15 (merge SHA f2945c5)
 
 - **Discovered:** Retrieval diagnostic following stakeholder test 2 (2026-05-14). The description-quality + RediSearch probe exercise traced the near-100% retrieval miss on the significant-investment trace (`Trace N_SIGNIFICANT_INVST_AMT from classification through deduction`) to a specific code path: the embedding input to vector search was the classifier's enriched_query blob (`f"{query} {result.intent} {' '.join(result.search_terms)}"`), stamped by `Orchestrator.classify_query` at [src/agents/orchestrator.py:669](src/agents/orchestrator.py#L669). For anchorless queries (no W76 prefix, no CAP-code BI routing), this blob was what reached `aembed_query` at [src/main.py:1084](src/main.py#L1084) and [src/pipeline/logic_graph.py:135](src/pipeline/logic_graph.py#L135) — a diffuse, averaged centroid pulled away from actual function semantics by classifier restatement noise.
 - **Root cause:** `state["object_name"]` was being used as a dual-purpose field: the classifier wrote the search-enrichment blob to it, and W76 / BI routing later overwrote with a clean function name when their preconditions fired. The two embedding sites read `state.get("object_name", state["raw_query"])` — picking up whichever shape was present. The bug surface was the anchorless path where neither W76 nor BI fired and the blob reached the embedding unchanged.
 - **Fix:** Stop overwriting `object_name` at orchestrator.py:669 — drop the blob construction entirely (discovery confirmed no consumer reads it). `object_name` is now owned exclusively by [`apply_named_function_anchor`](src/agents/orchestrator.py#L526) (W76) and [`apply_bi_routing`](src/agents/orchestrator.py#L1163) (BI). At both embedding sites the input is resolved via a new helper [`resolve_search_query`](src/agents/anchor_resolution.py) — `state.get("object_name") or state.get("raw_query") or ""`. The explicit `or` form (not `dict.get(key, default)`) is load-bearing: the initial state seeds `object_name = ""`, and an empty string must fall through to `raw_query` rather than be returned as-is.
-- **Related:** [W43](#w43) fixed this for the graph pipeline by re-extracting candidates from `raw_query`. W80 v1 closes the same gap for the vector retrieval path. [W87](#w87-orchestrator-entity-extraction-fallback--fixed-2026-05-15-merge-sha-pending) shares the same surface — it short-circuits unrecognized-term queries before they reach the embedding; W80 cleans up what reaches the embedding when W87 doesn't fire.
+- **Related:** [W43](#w43) fixed this for the graph pipeline by re-extracting candidates from `raw_query`. W80 v1 closes the same gap for the vector retrieval path. [W87](#w87-orchestrator-entity-extraction-fallback--fixed-2026-05-15-merge-sha-d311890) shares the same surface — it short-circuits unrecognized-term queries before they reach the embedding; W80 cleans up what reaches the embedding when W87 doesn't fire.
 - **Tests:** 17 unit tests in [tests/unit/agents/test_w80_embedding_input.py](tests/unit/agents/test_w80_embedding_input.py) covering the resolver precedence (clean object_name wins → raw_query fallback → empty), the classifier regression (never sets object_name to blob, never relocates blob to another state field), and the end-to-end precedence with W76 anchors. 3 integration tests appended to [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py): the stakeholder-test-2 reproduction (recall floor: 2 of 5 Cowork-pipeline functions retrieved), anchored-function regression (FN_LOAD_OPS_RISK_DATA unchanged), BI-routing regression (CAP973 unchanged).
 - **Out of scope (logged as follow-ups):**
   - **W80a** — regenerate stunted vector-store descriptions. Function #1 of the significant-investment pipeline (`CAP_CONSL_NON_REGULATORY_ENTITY_SIGNIFICANT_INVESTMENT_IDENTIFICATION`) has a single-paragraph description while the other 4 carry 2-3 paragraph LLM-generated descriptions naming tables, columns, regulatory context, and Basel-III stage. Threshold: regenerate any description under 500 chars.
   - **W80b** — hybrid BM25 + KNN retrieval with per-query-type adaptive top-K. The TEXT fields (`function_name`, `description`, `tables_read`, `tables_written`, `key_columns`) are indexed in RediSearch but never queried — dead weight at retrieval time. Adding a BM25 pass over those fields and blending into the KNN ranking would surface dense semantic clusters that pure cosine misses. Top-K is fixed at 5 today; cross-table multi-stage chains need more.
   - **Cross-table multi-stage chain traversal** (graph-edge-based retrieval) remains the [W80 umbrella entry below](#w80--cross-table-graph-traversal-original-umbrella-scope) — a separate ticket from this embedding-input slice.
-- **Merge SHA:** pending.
+- **Merge SHA:** f2945c5 (2026-05-18).
 
 ---
 
-## W80b. Per-query-type top-K for vector retrieval — FIXED 2026-05-16 (merge SHA pending)
+## W80b. Per-query-type top-K for vector retrieval — FIXED 2026-05-16 (merge SHA bb87a25)
 
 - **Discovered:** W80 v1 canary measurement (2026-05-16). Post-W80 v1 the embedding input was clean, but the canary still surfaced only 2 of 5 Cowork-correct functions for the significant-investment trace, with 3 closely-related siblings beating one target function out of the top-5. RediSearch probe confirmed the cluster has 15 functions in OFSERM (`FT.SEARCH idx:rtie_vectors "@description:(significant investment)"` returns 15) — top_k=5 at [src/main.py:1098](src/main.py#L1098) and [src/pipeline/logic_graph.py:159](src/pipeline/logic_graph.py#L159) was the structural ceiling, not embedding quality.
 - **Root cause:** Vector search was called with hardcoded `top_k=5` at every site. The KNN cutoff truncated rank-6+ candidates regardless of how well the embedding ranked them. With W79 per-schema fan-out the merged set was ~10, still well short of the 15-function cluster.
@@ -401,7 +401,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W80c. Hybrid graph + vector retrieval rerank — FIXED 2026-05-18 / 2026-05-19 (PR 2 at `211303e`, v2 merge SHA pending)
+## W80c. Hybrid graph + vector retrieval rerank — FIXED 2026-05-18 / 2026-05-19 (PR 2 at `211303e`, v2 merge SHA e9ad402)
 
 - **Discovered:** W80b post-merge measurement (2026-05-16, recorded above). Cluster-density expansion alone (top_k=20) did not lift recall above 2 of 5. The W80b description audit demonstrated the 3 missing targets are downstream consumers in a multi-stage chain whose descriptions correctly do NOT match the canary query's "non-regulated entity workflow" semantic zone — pure cosine cannot find them without dishonest description scaffolding.
 - **Hypothesis:** Cross-function edges (writer → column → table → reader) already persisted at `graph:full:<schema>` carry chain semantics that cosine doesn't. 1-hop expansion from the top-3 vector hits should surface the 3 missing downstream-consumer targets; an RRF fusion of cosine rank and graph-edge rank should rank them inside top_k+10 without displacing the W80 v1 / W80b strong cosine hits.
@@ -424,21 +424,21 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 - **Empirical outcome — 5 of 5 (2026-05-19):** Canary measurement on PID 5100 with `keep_top = top_k + 20` (35 for COLUMN_LOGIC). All five canary targets matched: T1 (RRF rank 9), T2 (rank 4), T3 (**rank 30** — landed inside the new keep_top=35 with 5 slots to spare), T4 (rank 1), T5 (rank 7). `kept_count=35`, `expanded_count=41` (unchanged from PR 2 — cap=20 still applied), elapsed similar to PR 2. Lever B confirmed sufficient; Lever A not needed.
 - **W80c-v2 tests:** Existing `test_main_w80c_wire_in.py::test_variable_trace_invokes_rerank_and_stamps_stats` updated to assert `keep_top=40` (was 30) for VARIABLE_TRACE. Integration canary `w80c_significant_investment_trace_post_rerank` floor lifted ≥4 → ≥5 to lock the achieved value. `debug_log_top_n` kwarg added to `rerank_with_rrf` (default 0 → off; zero runtime cost; available as a future probe surface).
 - **Regression canaries after Lever B:**
-  - **FN_LOAD_OPS_RISK_DATA** — failure mode CHANGED. Previously UNVERIFIED with `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (function absent from `functions_analyzed`). Now UNVERIFIED with `GROUNDING-HIGH` + `GROUNDING-ANCHOR-MISMATCH-HIGH`: the larger keep_top=35 window now includes FN_LOAD_OPS_RISK_DATA in `functions_analyzed` (it lands at rank 30 by vector signal alone), but the LLM's response anchored on `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top-ranked retrieval entry) instead of the W76-anchored target. Same UNVERIFIED badge — not a W80c-v2 regression per se, but a NEW failure surface logged separately as [W97](#w97-w70w76-anchor-block-insufficient-against-top-ranked-retrieval-preference--fixed-2026-05-19-merge-sha-pending) (FIXED 2026-05-19 by anchor-promote-to-front).
+  - **FN_LOAD_OPS_RISK_DATA** — failure mode CHANGED. Previously UNVERIFIED with `NAMED_FUNCTION_NOT_RETRIEVED` + `PARTIAL_SOURCE_INDEXED` (function absent from `functions_analyzed`). Now UNVERIFIED with `GROUNDING-HIGH` + `GROUNDING-ANCHOR-MISMATCH-HIGH`: the larger keep_top=35 window now includes FN_LOAD_OPS_RISK_DATA in `functions_analyzed` (it lands at rank 30 by vector signal alone), but the LLM's response anchored on `PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP` (the top-ranked retrieval entry) instead of the W76-anchored target. Same UNVERIFIED badge — not a W80c-v2 regression per se, but a NEW failure surface logged separately as [W97](#w97-w70w76-anchor-block-insufficient-against-top-ranked-retrieval-preference--fixed-2026-05-19-merge-sha-3e9f29a) (FIXED 2026-05-19 by anchor-promote-to-front).
   - **N_EOP_BAL** — W87 short-circuit, unchanged.
   - **CAP973** — W80c gate closed (FUNCTION_LOGIC), unchanged.
 - **Scope limits:** No changes to anchor_resolution, vector store, SQL Guardian, computation router, classifier, embedding logic, or frontend. `graph_rerank.py` edits scoped to (1) PR 1 surface, (2) per-seed cap (PR 2), (3) `debug_log_top_n` kwarg (W80c-v2) — all authorized as tuning / instrumentation extensions; the algorithm shape is unchanged. Cross-schema reachability (OFSMDM↔OFSERM edges) remains deferred per diagnostic Q1.
-- **Merge SHAs:** `211303e` (PR 2 merge, 2026-05-18); W80c-v2 merge SHA TBD (close-out pending).
+- **Merge SHAs:** `211303e` (PR 2 merge, 2026-05-18); W80c-v2 merge SHA `e9ad402` (2026-05-19).
 
 ---
 
 ## W80 — Cross-table graph-traversal (original umbrella scope)
 
 - **W80 family structure:** This entry is the original umbrella — cross-table multi-stage VARIABLE_TRACE retrieval via graph-edge traversal — still open. Slices that have shipped or are tracked separately:
-  - [W80 v1](#w80-v1-vector-retrieval-embedding-input-poisoning--fixed-2026-05-15-merge-sha-pending) — Vector retrieval embedding input poisoning (FIXED 2026-05-15). Narrow slice: stop poisoning the embedding input with the classifier's enriched blob. Does NOT address graph-traversal retrieval.
+  - [W80 v1](#w80-v1-vector-retrieval-embedding-input-poisoning--fixed-2026-05-15-merge-sha-f2945c5) — Vector retrieval embedding input poisoning (FIXED 2026-05-15). Narrow slice: stop poisoning the embedding input with the classifier's enriched blob. Does NOT address graph-traversal retrieval.
   - W80a — Regenerate stunted vector-store descriptions (<500 chars). Logged inside W80 v1's "Out of scope" block.
   - W80b — Hybrid BM25 + KNN retrieval with per-query-type adaptive top-K. Logged inside W80 v1's "Out of scope" block.
-  - [W80c](#w80c-hybrid-graph--vector-retrieval-rerank--fixed-2026-05-18--2026-05-19-pr-2-at-211303e-v2-merge-sha-pending) — Hybrid graph + vector retrieval rerank. PR 1 helper merged 2026-05-18 (SHA `fe5de15`); PR 2 wire-in merged 2026-05-18 (SHA `211303e`); W80c-v2 T3 chase (Lever B: keep_top top_k+10 → top_k+20) merged 2026-05-19 → **5 of 5 recall on the canary**.
+  - [W80c](#w80c-hybrid-graph--vector-retrieval-rerank--fixed-2026-05-18--2026-05-19-pr-2-at-211303e-v2-merge-sha-e9ad402) — Hybrid graph + vector retrieval rerank. PR 1 helper merged 2026-05-18 (SHA `fe5de15`); PR 2 wire-in merged 2026-05-18 (SHA `211303e`); W80c-v2 T3 chase (Lever B: keep_top top_k+10 → top_k+20) merged 2026-05-19 → **5 of 5 recall on the canary**.
 - **Original scope (Run 8):** ~25% retrieval miss on VARIABLE_TRACE queries. Documented as a known failure surface but framed as a partial coverage gap.
 - **Actual scope (stakeholder test 2, 2026-05-14):** Closer to 100% retrieval miss on cross-table multi-stage VARIABLE_TRACE queries. The `N_SIGNIFICANT_INVST_AMT` trace returned 10 functions, 0 matching Cowork's correct 5-function pipeline. Pure name-similarity matching missed every upstream function operating on different table names. Evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
 - **Implication for the fix:** Semantic search by name-similarity alone is not sufficient. The umbrella fix must consider graph-edge traversal (writer → column → table → reader) as a signal complementary to semantic search, not a replacement. Multi-stage chains span sub-processes named differently from the target variable; the only reliable retrieval signal across those boundaries is the manifest-anchored graph itself. W80 v1 (embedding-input cleanup) is a prerequisite — it removes one source of noise — but does NOT itself address cross-table chains.
@@ -476,20 +476,27 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 ---
 
 > **Priority queue note (2026-05-14):** Stakeholder test 2 surfaced W89 (fixed this PR) + W90 + W91 + W92 + W80 scope expansion. Updated priority queue reflects the new tickets. Calibration evidence preserved at [scratch/stakeholder_test_2_2026-05-14_chain_ordering.md](scratch/stakeholder_test_2_2026-05-14_chain_ordering.md).
+>
+> **[reconciled 2026-05-29: W89/W91/W92 merged; W90 remains]** Status of the items this note listed as "next":
+> - W89 — done (merged `334054e`, 2026-05-14)
+> - W91 — done (merged `ef8b498`, 2026-05-20)
+> - W92 — done (merged `a900cdf`, 2026-05-20)
+> - W80 scope expansion — `W80 v1` / `W80b` / `W80c` slices all merged; the cross-table umbrella (`W80`) remains open
+> - W90 — still open (no merge found) — the only genuinely-next item
 
 ---
 
-## W87. Orchestrator entity-extraction fallback — FIXED 2026-05-15 (merge SHA pending)
+## W87. Orchestrator entity-extraction fallback — FIXED 2026-05-15 (merge SHA d311890)
 
 - **Discovered:** Stakeholder test 1 (2026-05-12) Q11 — "what is the threshold value for G Test". Transcript was paste-only context in the chat, not committed to scratch/. RTIE stamped `object_name` with the concatenated enriched-query blob ("what is the threshold value for G Test Find the threshold value used for the G Test check G Test G_T"), passed that to semantic search, anchored on `CS_THRESHOLD_TREATMENT_AGGREGATE_THRESHOLD_ASSIGNMENT`, and fabricated a December gate that W83a caught as UNVERIFIED. Cowork's reference response was an honest "I don't know — please clarify what 'G Test' maps to."
 - **Root cause:** [src/agents/orchestrator.py:669](src/agents/orchestrator.py#L669) (`classify_query`) sets `state["object_name"] = enriched_query` where `enriched_query = f"{query} {result.intent} {' '.join(result.search_terms)}"`. When no orchestrator-stage resolver — function-name extraction (W58 filter), W76 named-function anchor, or BI literal-index routing — successfully resolves the query, this concatenated blob is what reaches the embedding call at [src/main.py:1084](src/main.py#L1084). Semantic search then returns name-similar but unrelated functions and the narrative LLM anchors on one of them. The trust-violation chain (semantic search → narrative LLM → W83a fabrication catch) is downstream of this initial fallback.
 - **Fix:** New `_detect_unrecognized_term_query` gate at [src/agents/orchestrator.py:1339](src/agents/orchestrator.py#L1339), wired between `apply_bi_routing` and the embedding call at [src/main.py:1018-1064](src/main.py#L1018-L1064). Fires when `query_type ∈ {FUNCTION_LOGIC, COLUMN_LOGIC, VARIABLE_TRACE}` AND `extract_function_candidates(raw_query)` is empty AND `state["bi_routing"]` is absent AND the W76 anchor record has no function AND any classifier-set `target_variable` fails `schemas_for_column` lookup. Builds a deterministic UNVERIFIED clarification body via `build_unrecognized_term_response` ([orchestrator.py:1404](src/agents/orchestrator.py#L1404)) — mirrors W37's `build_function_not_found_response` shape but with `badge="UNVERIFIED"`, `confidence=0.2`, and a `UNRECOGNIZED_TERM: '{term}' not in indexed corpus` warning. Streamed via `_stream_unrecognized_term_response` at [src/main.py:2397](src/main.py#L2397) (stage → meta → tokens → done). W87 is an architectural sibling of W37 (pre-search, deterministic body) — NOT W45/W49 (which are post-retrieval). Term extraction prefers the classifier's `target_variable`, falls back to quoted phrase, then multi-word capitalized run, then longest single capitalized non-stopword token; returns None when no term can be isolated, which falls through to the existing classifier-`partial_flag` clarification path.
 - **Tests:** 35 unit tests in [tests/unit/agents/test_w87_unrecognized_term.py](tests/unit/agents/test_w87_unrecognized_term.py) cover the gate (positive G-Test reproduction, target_variable-vs-heuristic priority, VARIABLE_TRACE query type, quoted phrase, unfindable business concept) and negatives (known function, CAP-code BI routing, W76 anchor, empty W76 anchor, resolved column, DATA_QUERY / UNSUPPORTED / VALUE_TRACE / empty query types, mixed-with-known-function, column-check raises). Term-extraction edge cases and variation-generation are pinned. Response-builder shape pinned (badge, validated, confidence, warnings, type, status, requested_term, message vs explanation.markdown sync, honest naming of indices RTIE actually consults). 3 integration tests appended to [tests/integration/test_live_stream.py](tests/integration/test_live_stream.py) — fires on Q11 reproduction, no-fire on FN_LOAD_OPS_RISK_DATA, no-fire on CAP973. All pass against live backend. Manual canaries captured at [scratch/w87_canary_a.txt](scratch/w87_canary_a.txt) / [b.txt](scratch/w87_canary_b.txt) / [c.txt](scratch/w87_canary_c.txt).
-- **Merge SHA:** pending.
+- **Merge SHA:** d311890 (2026-05-15).
 
 ---
 
-## W95. Anchor-resolved function missing from search results downstream of vector retrieval — FIXED 2026-05-18 (merge SHA pending)
+## W95. Anchor-resolved function missing from search results downstream of vector retrieval — FIXED 2026-05-18 (merge SHA 0244f37)
 
 - **Discovered:** Diagnostic pass on CAP973 routing symptom (2026-05-18) after the W36 Phase 5 work was paused — W35 Phases 5/6/7 had already shipped under different branding, so the symptom ("How is CAP973 calculated?" lands on the loader rather than the computer) had to be re-traced against current main. Probe: `graph:literal:OFSERM:CAP973` contains the correct 2 records — `CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT` (role `case_when_target`) and `REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP` (role `in_list_member`). Live `/v1/stream` trace: meta event reports `object_name=CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT` and `schema=OFSERM` (BI routing fired correctly), but `functions_analyzed` lists 10 sibling functions — the computer is absent. Done event: badge `UNVERIFIED`, warning `GROUNDING-HIGH: cited function 'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT' not in retrieved sources`. The explanation markdown stamps the right title (from the W70 anchor) but the SQL body comes from a sibling `_DATA_POP` loader the vector search ranked above the computer.
 - **Root cause:** Anchor resolution (W76 `apply_named_function_anchor`, BI `apply_bi_routing`) stamps `state["object_name"]` and `state["schema"]` and — via `resolve_search_query` — biases the embedding input toward the anchored function. But the embedding input is only a *bias*, not a guarantee: when the anchored function's vector-store description doesn't rank inside the top-K for that input, the source-fetch pipeline at [src/main.py:1162-1166](src/main.py#L1162-L1166) and [src/pipeline/logic_graph.py:178-191](src/pipeline/logic_graph.py#L178-L191) iterates `state["search_results"]` only and never loads the anchored function's body. The explainer is then handed sibling bodies with an anchor block that names a function it cannot see — produces a hallucinated answer that W57 correctly catches as `GROUNDING-HIGH` / `UNVERIFIED`, but the user still sees a wrong-bodied answer with a downgrade badge instead of the correct content with a `VERIFIED` badge. Architectural sibling of [W43](docs/w43_findings.md) (graph pipeline ignoring the routed schema) and W80 v1 (embedding input being the classifier blob): each was a place where the anchor decision failed to propagate one stage further downstream.
@@ -499,7 +506,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 - **Pre-existing CAP973 failures left untouched:** TEST 11 (W45 structured "Not Found" markdown) and TEST 16 (W49 "W45 branch still wins") assert the W45 ungrounded-identifier response shape for CAP973. They were already failing on current main per the W83C operational observations — CAP973 IS in the literal index, so the W45 branch doesn't fire. W95 does not change that. Resolution belongs to a separate W45/W49 calibration ticket, not this fix.
 - **Out of scope:** Integration canary for the W76 round-trip case. Identifying a real query where W76 anchors on a function AND vector search ranks 5 siblings above it would require empirical search through the corpus; the unit test mocks this scenario directly. If a customer-visible W76-anchor-missing-from-retrieval symptom surfaces, the fix is already wired — it just needs a regression canary.
 - **Follow-up surfaced during validation:** Both CAP973 and CAP943 traces post-W95 show the W57 `GROUNDING-HIGH` warning has shifted from `cited function not in retrieved sources` (the W95-targeted symptom, now resolved) to `cited source does not support template phrase 'only runs when the reporting month is december'`. The anchor function is correctly at position 0 of `functions_analyzed`; W83a is correctly catching a content fabrication. Logged as [W96](#w96) — the LLM defaults to a December reporting-month framing on CAP-code regulatory adjustment functions even when the cited source contains no calendar gate. Likely an explainer-prompt issue (over-generalized template the LLM learned from sibling functions that DO have December-only gates), NOT a detector gap — W83a is doing its job correctly. Backlog only; does not block W95.
-- **Merge SHA:** pending.
+- **Merge SHA:** 0244f37 (2026-05-18).
 
 ---
 
@@ -519,7 +526,7 @@ Metric column classification combines three rules: (a) the SELECT-list entry is 
 
 ---
 
-## W97. W70/W76 anchor block insufficient against top-ranked retrieval preference — FIXED 2026-05-19 (merge SHA pending)
+## W97. W70/W76 anchor block insufficient against top-ranked retrieval preference — FIXED 2026-05-19 (merge SHA 3e9f29a)
 
 **Status:** FIXED 2026-05-19 by promoting the anchored function to `multi_source` position 0 in `src/main.py` after `fetch_multi_logic` (and after W89's `reorder_multi_source`). New helper: `promote_anchor_to_front` in `src/agents/anchor_resolution.py`, sibling to W95's `ensure_anchor_in_search_results`. Surfaced during W80c-v2 canary verification (2026-05-19); not a regression — W80c-v2's wider retrieval window simply exposed an existing prompt-prominence gap.
 
@@ -561,11 +568,11 @@ Pre-W80c-v2 (`keep_top = top_k + 10`), the same query failed differently: `NAMED
 
 **Scope limits:** No changes to detectors (W37/W45/W49/W57/W83a/B/C/W85/W86/W87/W88/W89/W93/W95), vector store, graph_rerank, computation router, classifier, embedding logic, SQL Guardian, or frontend. `apply_w70_anchor` is now called twice per request (once in main.py for W97 promote, once in `stream_semantic` for anchor block) — idempotent because `determine_primary_anchor` is deterministic on a fixed state; the duplicate is the smallest blast radius edit.
 
-**Merge SHA:** pending.
+**Merge SHA:** 3e9f29a (2026-05-19).
 
 ---
 
-## W98. Anchor cascade missing "scan raw_query for known function names" layer — FIXED 2026-05-19 (merge SHA pending)
+## W98. Anchor cascade missing "scan raw_query for known function names" layer — FIXED 2026-05-19 (merge SHA 9553923)
 
 **Status:** Fixed. Surfaced during W97 canary verification (2026-05-19) when the FN_LOAD_OPS_RISK_DATA query exposed that the W70 anchor cascade resolves to the WRONG function for the `"How does <FN> work?"` pattern. Not blocking W97 — W97 closes the prompt-prominence half of the anchor architecture independently of cascade correctness; W98 closes the resolution-input half.
 
@@ -616,14 +623,14 @@ for the query `"How does FN_LOAD_OPS_RISK_DATA work?"`. The `w76_anchor is None`
 
 ---
 
-## W93b. `cli.py index` should default to loader-validated path — FIXED 2026-05-18 (merge SHA pending)
+## W93b. `cli.py index` should default to loader-validated path — FIXED 2026-05-18 (merge SHA 2c8553f)
 
 - **Discovered:** W93 verification run (2026-05-16). Running `python cli.py index --force` to re-attempt the four sentinel docs called `IndexerAgent.index_all_modules` → `index_module("ABL_CAR_CSTM_V4", force=False)`, which walks `db/modules/*` on disk and indexes every `.sql` file regardless of whether the loader accepted it. The OFSERM vector-store corpus jumped 178 → 281 docs mid-run. Cleanup required deleting 116 `rtie:vec:OFSERM:<fn>` docs that had no corresponding `graph:OFSERM:<fn>` backing.
 - **Root cause:** [cli.py:42-68](cli.py#L42-L68) `cmd_index` called `index_all_modules` unconditionally. That's the **disk-walking** path — it embeds the raw file set under `db/modules/`, including functions the loader rejected. The Phase-3 path `index_all_loaded` at [src/agents/indexer.py:302](src/agents/indexer.py#L302) iterates `graph:<schema>:<fn>` keys directly and matches what the rest of RTIE serves answers from. The lifespan was already using it ([src/main.py:562-578](src/main.py#L562-L578)); the CLI was the one stale call site.
 - **Fix:** Default switched to `index_all_loaded`. `cmd_index(from_disk=False, force=...)` builds a sync `redis.Redis` client (same shape the lifespan uses) and passes it through, then prints the per-schema summary line (`Auto-index <schema>: N indexed, N skipped, N errors`) that mirrors the lifespan log. `--from-disk` preserved as an opt-in escape hatch for rebuilds outside the loader's view, with a warning in the help text. Help is the module docstring (no argparse rewrite); `--help` / `-h` short-circuits to print it without running the indexer. When `index_all_loaded` returns zero schemas (loader not yet run), the CLI prints actionable guidance — start the backend once or use `--from-disk` — instead of silently exiting with no work done.
 - **Tests:** 9 unit tests in [tests/unit/test_cli_index_surface.py](tests/unit/test_cli_index_surface.py) cover (a) docstring surface (mentions `--from-disk`, loader prerequisite, default-is-safe framing) and (b) arg parsing routing (`index` → default, `--force` keeps default, `--from-disk` flips, both compose, `--help` short-circuits before constructing clients, bare invocation prints doc). `cmd_index`'s Redis / IndexerAgent body is intentionally not exercised in unit tests — that surface belongs to manual smoke and the boot-time auto-index path the lifespan already covers.
 - **Out of scope:** The `/index-module` / `/index-all` admin slash commands at [src/main.py:2606-2609](src/main.py#L2606-L2609) still call the disk-walk methods. Left alone deliberately — those are explicit-name handlers that callers invoke when they want disk-walk semantics; not the same ergonomic footgun the bare `cli.py index` was. Cold-start ergonomic (user runs `python cli.py index` on fresh Redis, sees "no schemas discovered" message) is documented in the help and prints actionable guidance but is not auto-handled — wiring the loader into the CLI is logged as [W93c](w93c_cli_cold_start_loader_invocation.md), not urgent.
-- **Merge SHA:** pending.
+- **Merge SHA:** 2c8553f (2026-05-18).
 
 ---
 
