@@ -2944,9 +2944,19 @@ RULES:
    - Name the source tables and what data they contribute
    - Show the arithmetic clearly: e.g. "DBS GL balance × deduction ratio"
 
-4. Always include execution conditions prominently:
-   "This entire function ONLY runs when the reporting month is December."
-   Never bury this at the end — state it first for the function.
+4. Report execution conditions ONLY when the source contains an explicit guard
+   predicate for them. Surface a real gate prominently; never invent one.
+   - A calendar/date gate exists ONLY when the source has an explicit month or
+     date predicate — for example EXTRACT(MONTH FROM ...) = 12, a MONTH = 12 or
+     'DECEMBER' comparison, or a hardcoded date literal used as a run guard.
+     When such a predicate IS present, state the condition first for the
+     function (do not bury it at the end) and cite the gating line by function
+     name and line number.
+   - When NO such predicate is present, do NOT state any calendar, month,
+     quarter-end, year-end, or specific-date condition, and do NOT invent a
+     run date. Do not assume the function runs only in December, only at
+     year-end, or only on a fixed date. If the source has no gate, say it has
+     no calendar/date gating rather than guessing one.
 
 5. For steps where a value is copied unchanged between tables:
    State clearly: "The value is passed through without modification."
@@ -2957,7 +2967,9 @@ RULES:
    - Where the value originates
    - What transforms it
    - What the final value represents
-   - Any important conditions (e.g. December-only)
+   - Any execution conditions explicitly present in the source (omit this line
+     entirely if the source has no calendar/date or other gating predicate —
+     do not manufacture one)
 
 FORMAT:
 - Use ## for main heading, ### for each function/step
