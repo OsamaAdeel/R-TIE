@@ -60,32 +60,217 @@ INDEXING_FAILED_SENTINEL_PREFIX = "(indexing failed:"
 DESCRIPTION_MIN_LENGTH = 100
 
 
-DESCRIPTION_SYSTEM_PROMPT = """You are a PL/SQL documentation specialist for Oracle OFSAA regulatory systems.
+# W122b — source-truncation cap.
+#
+# Pre-W122 the cap was 3000 chars, rationalised in a comment as a
+# "corporate TLS payload limit". W108's TLS-rationale verification
+# (scratch/w108_tls_verification.md) confirmed that claim was stale:
+# API probes at 3000 / 8000 / 12000 chars all succeed cleanly. 12000
+# chars covers the body of nearly all OFSAA functions; structurally
+# adversarial single-INSERT functions (MRVAR) still see only ~36% of
+# source but the W122a prompt redesign + manifest ingestion compensate.
+MAX_SOURCE_CHARS = 12000
 
-Given a PL/SQL function's source code, produce a rich description optimized for semantic search.
 
-Respond with ONLY valid JSON — no markdown, no extra text.
+# W122a — description-generation prompt.
+#
+# Pre-W122a the prompt had a Basel-keyword seed list ("operational
+# risk, gross income, capital adequacy, …") and an exhaustive-coverage
+# directive ("Include EVERY table name … EVERY significant column").
+# Together they produced corpus-wide keyword-stuffing: every function
+# description carried near-identical Basel framing, so semantic search
+# could not distinguish similarly-named neighbors and MRVAR over-
+# represented on unrelated Basel queries (B2/B4 in the P1 harness).
+#
+# The new prompt requires business-purpose-first opening, 3-5
+# distinctive concepts that disambiguate from siblings, 3-5 distinctive
+# tables/columns in prose (rest in structured fields), 150-word
+# ceiling. Forbidden patterns are explicitly enumerated. The structured
+# JSON output shape (tables_read / tables_written / key_columns) is
+# preserved — only the description-string content rules changed —
+# because the vector-store schema and the boot-time W93 gate depend on
+# those fields existing.
+DESCRIPTION_SYSTEM_PROMPT = """You generate one concise description of an OFSAA PL/SQL function for
+semantic search retrieval. Read the function source, the manifest
+description (if provided), and produce ONE description following these
+rules.
+
+REQUIRED SHAPE
+- Maximum 150 words total. Often one short paragraph is enough; three
+  at most.
+- First sentence: state the function's SPECIFIC business purpose in
+  domain-specific terms. Good openings:
+    "Enforces RRP eligibility via two threshold gates on customer
+     balance and risk-weight."
+    "Computes operational-risk RWA under the Basic Indicator Approach."
+    "Loads phase-in deductions for CET1 capital across the transition
+     schedule."
+- Bad openings (avoid):
+    "This function populates X for a given batch..."
+    "This PL/SQL function is implemented in schema Y to..."
+    "The function is responsible for..."
+  These waste the most important sentence on generic framing.
+
+REQUIRED CONTENT
+- Name 3-5 DISTINCTIVE concepts that disambiguate THIS function from
+  similarly-named neighbors. Distinctive means: would help a reader
+  pick THIS function over its siblings in the same module. Examples:
+    - Specific parameter names (RTLGRAN, RTLLVE, RTLREO)
+    - Threshold values (300M, 0.002, 15%)
+    - CAP codes (CAP214, CAP973)
+    - Specific asset classes (OTH, OTHMRB, securitization)
+    - Characteristic flags (F_BIA_QUALIFIED_IND, F_LCR_BUCKET)
+- If a manifest description is provided in the user message, weave its
+  content into the first paragraph as ground truth. The manifest was
+  written by an analyst who knows what the function is FOR.
+- Name 3-5 of the MOST DISTINCTIVE tables read/written and key columns
+  in prose. The structured fields (tables_read, tables_written,
+  key_columns) separately hold the full lists. Do NOT repeat all of
+  them in prose.
+
+FORBIDDEN PATTERNS
+- Do NOT add a closing "Keywords and concepts covered:" block. The
+  structured fields exist for retrieval recall on columns/tables.
+- Do NOT use meta-language about retrieval or discovery: "This
+  description is intended to make the function discoverable", "for
+  searches on", "Domain keywords include", "Business and regulatory
+  keywords:".
+- Do NOT include generic Basel keywords (capital adequacy, operational
+  risk, deduction ratio, beta factor, RWA inputs) UNLESS they are
+  genuinely specific to this function. If every Basel function carries
+  the same framing, semantic search cannot distinguish them.
+- Do NOT recite long column lists in prose. The structured fields hold
+  them.
+
+LENGTH RULE — STRICT
+150 words is a hard ceiling. If you cannot describe the function in
+150 words, prioritize in this order and drop the rest:
+  1. The business purpose (first sentence)
+  2. The 3-5 distinctive concepts
+  3. The 3-5 distinctive tables/columns
+
+OUTPUT FORMAT
+Respond with ONLY valid JSON — no markdown fences, no surrounding text.
 
 {
-  "description": "A keyword-enriched natural language description (2-4 paragraphs) covering:
-    - What the function does (purpose and business context)
-    - Which tables it reads from and what data it extracts
-    - Which tables it writes to and what operations (INSERT/UPDATE/DELETE/MERGE)
-    - Key columns and calculations involved
-    - Any regulatory or business domain context (Basel III, capital adequacy, operational risk, etc.)
-    Include specific table names, column names, and business terms as keywords.",
+  "description": "<the description string following ALL the rules above>",
   "tables_read": ["TABLE1", "TABLE2"],
   "tables_written": ["TABLE3"],
   "key_columns": ["COL1", "COL2"]
 }
 
-Rules:
-- Include EVERY table name found in the source (FROM, JOIN, INTO, UPDATE, DELETE FROM, MERGE INTO)
-- Include EVERY significant column name referenced in SELECT, INSERT, UPDATE, WHERE clauses
-- Use business-domain vocabulary: operational risk, gross income, capital adequacy, GL data, product processor, exposure, provision, deduction ratio, beta factor, etc.
-- The description must be findable by someone asking about any column, table, or business concept in the function
-- Do NOT include the raw source code in the description
+The structured fields (tables_read, tables_written, key_columns) hold
+the canonical lists derived from the source — they back retrieval
+recall on column / table names that the 150-word description prose
+deliberately omits. Only the description string is bound by the
+150-word ceiling.
+
+STRUCTURED-FIELD ARRAY CAP — STRICT
+Each of `tables_read`, `tables_written`, `key_columns` MUST contain
+AT MOST 30 entries. When the source has more than 30 of any one
+category, keep the 30 MOST DISTINCTIVE — drop the generic /
+boilerplate names first. Drop in this order:
+  1. Generic surrogate-key columns (N_*_SKEY, N_*_ID) unless the SKEY
+     is the function's specific output.
+  2. Standard audit / batch columns (FIC_MIS_DATE, N_RUN_SKEY,
+     V_BATCH_ID, V_RUN_ID, N_RUN_EXECUTION_ID, V_TASK_ID).
+  3. Standard timestamp / created-by columns (N_CREATED_BY_USER_SKEY,
+     D_CREATED_DATE, V_CREATED_BY, V_LAST_MODIFIED_BY,
+     D_LAST_MODIFIED_DATE).
+  4. Foreign-key columns that just identify a join target without
+     carrying business semantics specific to THIS function.
+Keep: business-meaningful identifiers (asset-class codes, threshold
+columns, characteristic flags, rate / amount columns specific to the
+function's purpose, regulatory metric columns).
+
+This cap is an output-VOLUME constraint only — the field shapes
+(arrays of uppercase string identifiers) are unchanged.
 """
+
+
+# W122a — post-generation validation guards.
+#
+# LLMs are bad at word-counting and prompt instructions are
+# approximate; trust-but-verify with explicit guards. Failures trigger
+# one re-prompt that includes the rejection reason; persistent failure
+# after retries is logged and accepted (don't crash indexing on
+# stylistic deviations — the W93 gate downstream still catches
+# sentinels and too-short strings).
+_W122A_FORBIDDEN_PHRASES: Tuple[str, ...] = (
+    "intended to make",
+    "keywords and concepts",
+    "for searches on",
+    "discoverable by",
+    "make the function discoverable",
+    "domain keywords",
+    "business and regulatory keywords",
+)
+
+_W122A_GENERIC_OPENINGS: Tuple[str, ...] = (
+    "this function populates",
+    "this pl/sql function",
+    "the function is responsible for",
+    "this function is implemented in",
+    "this function handles",
+    "this routine",
+)
+
+# 150 word hard cap. Per the W122a design Part 6 escape hatch: if the
+# 5-function gate-1 surfaces consistent fights (3+ functions trip the
+# length validator), relax to 200 and re-run gate-1. If 200 still
+# fights, escalate before W122d mass re-index.
+_W122A_MAX_WORDS: int = 150
+
+
+def _validate_description(description: str) -> Tuple[bool, Optional[str]]:
+    """W122a post-generation validation. Returns ``(is_valid, reason)``.
+
+    Distinct from :meth:`IndexerAgent._validate_description_result`
+    (the W93 gate). W93 catches indexing-failure sentinels and
+    description strings under :data:`DESCRIPTION_MIN_LENGTH`; W122a
+    catches *quality* deviations the LLM may produce despite the
+    redesigned prompt — over-length output, forbidden meta-language
+    phrases, generic function-stem openings.
+
+    Order is intentional: length-check first (cheapest), then
+    forbidden-phrase scan, then opening-pattern check. Each failure
+    returns a reason string used by
+    :meth:`IndexerAgent._generate_description_with_validation` to
+    re-prompt with a specific rejection note.
+    """
+    if not description:
+        return False, (
+            "DESCRIPTION_EMPTY: description string was empty or missing."
+        )
+
+    word_count = len(description.split())
+    if word_count > _W122A_MAX_WORDS:
+        return False, (
+            f"DESCRIPTION_TOO_LONG: {word_count} words (limit "
+            f"{_W122A_MAX_WORDS}). Prune to: business purpose, 3-5 "
+            f"distinctive concepts, 3-5 distinctive tables/columns. "
+            f"Drop everything else."
+        )
+
+    lower = description.lower()
+    for phrase in _W122A_FORBIDDEN_PHRASES:
+        if phrase in lower:
+            return False, (
+                f"DESCRIPTION_HAS_FORBIDDEN_PATTERN: contains "
+                f"'{phrase}'. Rewrite without meta-language about "
+                f"retrieval, discoverability, or keyword listings."
+            )
+
+    opening = lower[:120]
+    for pattern in _W122A_GENERIC_OPENINGS:
+        if pattern in opening:
+            return False, (
+                f"DESCRIPTION_GENERIC_OPENING: starts with '{pattern}'. "
+                f"Lead with the function's SPECIFIC business purpose, "
+                f"not generic boilerplate."
+            )
+
+    return True, None
 
 
 class IndexerAgent:
@@ -103,7 +288,22 @@ class IndexerAgent:
         llm_provider: str = "openai",
         llm_model: str = "gpt-4o",
         temperature: float = 0,
-        max_tokens: int = 2000,
+        # W122b — raised 2000 -> 4000 after the gate-1 first run showed
+        # 4/5 functions hitting LengthFinishReasonError. The W122b
+        # source-cap lift (3000 -> 12000) made many more tables/columns
+        # visible to the LLM; the redesigned prompt asks for COMPLETE
+        # tables_read / tables_written / key_columns arrays in the JSON
+        # output; for functions like MRVAR (60+ columns visible in the
+        # INSERT) the structured fields alone consume most of the 2000-
+        # token budget, leaving the description string truncated and
+        # the JSON malformed. Raising the output budget addresses the
+        # root cause directly. Same root cause as W122b (output
+        # infrastructure collided with expanded source visibility).
+        # Forward note: if 4000 still hits the ceiling on some
+        # function, the next step is to re-examine the prompt's
+        # "complete structured fields" requirement rather than raising
+        # further.
+        max_tokens: int = 4000,
     ) -> None:
         """Initialize the IndexerAgent.
 
@@ -164,6 +364,11 @@ class IndexerAgent:
 
         await self._vector_store.ensure_index()
 
+        # W122c: load this module's manifest once so per-function lookup
+        # of task.description is O(1) inside the loop. Modules without a
+        # manifest contribute None.
+        module_manifest = self._load_module_manifest(module_name)
+
         indexed, skipped, errors = [], [], []
 
         for fn_info in functions:
@@ -206,16 +411,31 @@ class IndexerAgent:
                 if indexed or errors:
                     await asyncio.sleep(2)
 
-                # Truncate source to keep payload under 2KB (corporate network TLS limit)
-                max_chars = 3000  # ~750 tokens, keeps total request under 2KB
-                truncated_source = source_code[:max_chars]
-                if len(source_code) > max_chars:
-                    truncated_source += f"\n\n-- [TRUNCATED: {len(source_code) - max_chars} more characters]"
+                # W122b: truncate source at MAX_SOURCE_CHARS (12000).
+                # Pre-W122b the cap was 3000, rationalised as a corporate
+                # TLS limit that W108's verification proved stale.
+                truncated_source = source_code[:MAX_SOURCE_CHARS]
+                if len(source_code) > MAX_SOURCE_CHARS:
+                    truncated_source += (
+                        f"\n\n-- [TRUNCATED: "
+                        f"{len(source_code) - MAX_SOURCE_CHARS} "
+                        f"more characters]"
+                    )
+
+                # W122c: thread the analyst-written task.description
+                # when the module's manifest knows about this function.
+                manifest_desc = self._lookup_manifest_description(
+                    module_manifest, fn_name,
+                )
 
                 print(f"    Generating description for {fn_name} ({len(source_code)} chars, sending {len(truncated_source)})...")
 
-                # Generate description via LLM
-                desc_result = await self._generate_description(fn_name, truncated_source)
+                # W122a: retry-on-validation-failure wrapper. Returns the
+                # last attempt regardless of validation outcome — W93's
+                # downstream gate still rejects sentinel / too-short.
+                desc_result = await self._generate_description_with_validation(
+                    fn_name, truncated_source, manifest_desc=manifest_desc,
+                )
 
                 # W93: validate before paying the embedding API call. A
                 # rejected description means the LLM step failed silently
@@ -225,28 +445,29 @@ class IndexerAgent:
                     desc_result
                 )
                 if not is_valid:
-                    logger.error(
-                        "W93 validation rejected %s:%s (%s); marking failed "
-                        "and skipping embedding | correlation_id=%s",
-                        fn_schema or "?", fn_name, reject_reason,
-                        correlation_id,
-                    )
-                    await self._vector_store.upsert_function(
+                    # W122-recovery upsert guard: if this was an LLM-call
+                    # sentinel (not a real content-quality rejection) and
+                    # an existing approved doc is in place, the guard
+                    # preserves the existing description + embedding.
+                    outcome = await self._apply_validation_rejection(
+                        schema=fn_schema or "",
                         module=module_name,
                         function_name=fn_name,
-                        description=desc_result.get("description", ""),
-                        embedding=None,
-                        tables_read=desc_result.get("tables_read", []),
-                        tables_written=desc_result.get("tables_written", []),
-                        key_columns=desc_result.get("key_columns", []),
+                        desc_result=desc_result,
+                        reject_reason=reject_reason,
                         source_hash=source_hash,
-                        status="failed",
-                        schema=fn_schema,
-                        failure_reason=reject_reason,
+                        correlation_id=correlation_id,
+                    )
+                    err_suffix = (
+                        " (existing approved doc preserved)"
+                        if outcome == "preserved" else ""
                     )
                     errors.append({
                         "name": fn_name,
-                        "error": f"description rejected: {reject_reason}",
+                        "error": (
+                            f"description rejected: {reject_reason}"
+                            f"{err_suffix}"
+                        ),
                     })
                     continue
 
@@ -303,6 +524,7 @@ class IndexerAgent:
         self,
         graph_redis_client,
         force: bool = False,
+        only_failed: bool = False,
     ) -> Dict[str, Any]:
         """Index every function the loader populated, across every schema.
 
@@ -339,6 +561,8 @@ class IndexerAgent:
 
         await self._vector_store.ensure_index()
         function_to_module = self._build_function_to_module_map()
+        # W122c: parallel map for manifest task descriptions.
+        function_to_description = self._build_function_to_description_map()
         schemas = discovered_schemas(graph_redis_client)
         per_schema_results: Dict[str, Dict[str, Any]] = {}
 
@@ -378,6 +602,29 @@ class IndexerAgent:
                 "index_all_loaded: %d function(s) to consider for %s",
                 len(function_names), schema,
             )
+
+            # W122-recovery: when only_failed is set, narrow the
+            # candidate set to functions whose existing vector doc is
+            # in status=failed. The 247 already-approved docs are
+            # skipped here BEFORE the source read so no work is wasted
+            # on them. Functions with no existing doc are excluded too
+            # (only_failed is intended for targeted retry of a
+            # known-failed cohort, not bootstrap).
+            if only_failed:
+                pre_filter = len(function_names)
+                filtered: List[str] = []
+                for fn_name in function_names:
+                    existing = await self._vector_store.get_function_doc(
+                        schema, fn_name,
+                    )
+                    if existing and existing.get("status") == "failed":
+                        filtered.append(fn_name)
+                function_names = filtered
+                logger.info(
+                    "index_all_loaded[only_failed]: %s narrowed %d -> "
+                    "%d functions (skipped approved + missing-doc)",
+                    schema, pre_filter, len(function_names),
+                )
 
             for fn_name in function_names:
                 try:
@@ -427,13 +674,21 @@ class IndexerAgent:
                     if indexed or errors:
                         await asyncio.sleep(2)
 
-                    max_chars = 3000
-                    truncated_source = source_code[:max_chars]
-                    if len(source_code) > max_chars:
+                    # W122b: truncation cap raised 3000 -> 12000.
+                    truncated_source = source_code[:MAX_SOURCE_CHARS]
+                    if len(source_code) > MAX_SOURCE_CHARS:
                         truncated_source += (
                             f"\n\n-- [TRUNCATED: "
-                            f"{len(source_code) - max_chars} more characters]"
+                            f"{len(source_code) - MAX_SOURCE_CHARS} "
+                            f"more characters]"
                         )
+
+                    # W122c: per-function manifest description (None
+                    # when absent from the map, which is fine — the
+                    # generator treats it as optional).
+                    manifest_desc = function_to_description.get(
+                        (schema, fn_name.upper())
+                    )
 
                     print(
                         f"    Generating description for {fn_name} "
@@ -441,8 +696,13 @@ class IndexerAgent:
                         f"{len(truncated_source)})..."
                     )
 
-                    desc_result = await self._generate_description(
-                        fn_name, truncated_source
+                    # W122a: retry-on-validation-failure wrapper.
+                    desc_result = (
+                        await self._generate_description_with_validation(
+                            fn_name,
+                            truncated_source,
+                            manifest_desc=manifest_desc,
+                        )
                     )
 
                     # W93: validate before embedding. See index_module
@@ -451,30 +711,30 @@ class IndexerAgent:
                         desc_result
                     )
                     if not is_valid:
-                        logger.error(
-                            "W93 validation rejected %s:%s (%s); marking "
-                            "failed and skipping embedding | "
-                            "correlation_id=%s",
-                            schema, fn_name, reject_reason, correlation_id,
-                        )
-                        await self._vector_store.upsert_function(
+                        # W122-recovery upsert guard: see
+                        # _apply_validation_rejection. LLM-call
+                        # sentinels are treated as transient and never
+                        # destroy an existing approved doc; real
+                        # content rejections still mark failed.
+                        outcome = await self._apply_validation_rejection(
+                            schema=schema,
                             module=module_tag,
                             function_name=fn_name,
-                            description=desc_result.get("description", ""),
-                            embedding=None,
-                            tables_read=desc_result.get("tables_read", []),
-                            tables_written=desc_result.get(
-                                "tables_written", []
-                            ),
-                            key_columns=desc_result.get("key_columns", []),
+                            desc_result=desc_result,
+                            reject_reason=reject_reason,
                             source_hash=source_hash,
-                            status="failed",
-                            schema=schema,
-                            failure_reason=reject_reason,
+                            correlation_id=correlation_id,
+                        )
+                        err_suffix = (
+                            " (existing approved doc preserved)"
+                            if outcome == "preserved" else ""
                         )
                         errors.append({
                             "name": fn_name,
-                            "error": f"description rejected: {reject_reason}",
+                            "error": (
+                                f"description rejected: {reject_reason}"
+                                f"{err_suffix}"
+                            ),
                         })
                         continue
 
@@ -552,6 +812,86 @@ class IndexerAgent:
                     mapping[(schema, fn_upper)] = manifest.batch
         return mapping
 
+    def _load_module_manifest(self, module_name: str):
+        """W122c: load the manifest for a single module directory.
+
+        Returns the :class:`BatchManifest` for the module folder whose
+        basename matches ``module_name`` (case-insensitive), or ``None``
+        when no such folder exists or no manifest.yaml is present.
+        Failures bubble up as ``None`` rather than raising — the
+        indexer must keep running even on a malformed manifest, since
+        a missing description is non-fatal.
+        """
+        for modules_dir in MODULES_DIRS:
+            if not os.path.isdir(modules_dir):
+                continue
+            for entry in os.listdir(modules_dir):
+                module_path = os.path.join(modules_dir, entry)
+                if not os.path.isdir(module_path):
+                    continue
+                if (
+                    entry.upper() == module_name.upper()
+                    or module_name.upper() in entry.upper()
+                ):
+                    try:
+                        return load_manifest(module_path)
+                    except Exception as exc:
+                        logger.debug(
+                            "manifest load failed for %s: %s",
+                            module_path, exc,
+                        )
+                        return None
+        return None
+
+    @staticmethod
+    def _lookup_manifest_description(
+        manifest, function_name: str,
+    ) -> Optional[str]:
+        """W122c: return ``task.description`` for ``function_name`` or None."""
+        if manifest is None:
+            return None
+        task = manifest.get_task(function_name)
+        if task is None:
+            return None
+        desc = (task.description or "").strip()
+        return desc or None
+
+    def _build_function_to_description_map(
+        self,
+    ) -> Dict[Tuple[str, str], str]:
+        """W122c: return ``(schema, FN_UPPER) -> manifest task description``.
+
+        Mirrors :meth:`_build_function_to_module_map` but pulls
+        ``task.description`` rather than ``manifest.batch``. Tasks
+        without a description are absent from the map (the indexer
+        threads the value only when present).
+        """
+        mapping: Dict[Tuple[str, str], str] = {}
+        for modules_dir in MODULES_DIRS:
+            if not os.path.isdir(modules_dir):
+                continue
+            for entry in sorted(os.listdir(modules_dir)):
+                module_path = os.path.join(modules_dir, entry)
+                if not os.path.isdir(module_path):
+                    continue
+                try:
+                    manifest = load_manifest(module_path)
+                except Exception as exc:
+                    logger.debug(
+                        "manifest load failed for %s: %s", module_path, exc
+                    )
+                    continue
+                if manifest is None:
+                    continue
+                schema = (manifest.schema or "").upper()
+                for task in manifest.iter_all_tasks():
+                    desc = (task.description or "").strip()
+                    if not desc:
+                        continue
+                    fn_upper = task.name.strip().upper()
+                    mapping[(schema, fn_upper)] = desc
+        return mapping
+
     async def index_all_modules(self, force: bool = False) -> Dict[str, Any]:
         """Index all discovered modules.
 
@@ -572,13 +912,27 @@ class IndexerAgent:
         }
 
     async def _generate_description(
-        self, function_name: str, source_code: str
+        self,
+        function_name: str,
+        source_code: str,
+        manifest_desc: Optional[str] = None,
+        retry_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate a rich description of a PL/SQL function via LLM.
 
         Args:
             function_name: Name of the function.
-            source_code: Full PL/SQL source code.
+            source_code: Full PL/SQL source code (already truncated to
+                :data:`MAX_SOURCE_CHARS` upstream).
+            manifest_desc: Analyst-written description from the module's
+                manifest.yaml (W122c). When present it's woven into the
+                user message as ground truth — the analyst knows what
+                the function is FOR, which the LLM cannot always
+                derive from severely-truncated source alone.
+            retry_reason: When the previous attempt failed W122a
+                post-gen validation, the rejection reason is fed back
+                in so the next attempt has specific guidance. None on
+                the first attempt.
 
         Returns:
             Dict with description, tables_read, tables_written, key_columns.
@@ -596,15 +950,31 @@ class IndexerAgent:
             json_mode=True,
         )
 
+        # W122c: thread the manifest description in when available.
+        # The structured user-message pieces are concatenated rather
+        # than embedded inline so the LLM can attend to each block
+        # separately.
+        user_parts: List[str] = [
+            "Generate a semantic search description for this PL/SQL function.",
+            f"FUNCTION NAME: {function_name}",
+        ]
+        if manifest_desc:
+            user_parts.append(
+                f"MANIFEST DESCRIPTION (analyst-written, treat as "
+                f"ground truth for what the function is FOR): "
+                f"{manifest_desc}"
+            )
+        user_parts.append(
+            f"FUNCTION SOURCE (may be truncated):\n{source_code}"
+        )
+        if retry_reason:
+            user_parts.append(
+                f"PREVIOUS ATTEMPT WAS REJECTED FOR: {retry_reason}\n"
+                f"Rewrite respecting the rules."
+            )
         messages = [
             SystemMessage(content=DESCRIPTION_SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Generate a semantic search description for this PL/SQL function.\n\n"
-                    f"Function Name: {function_name}\n\n"
-                    f"Source Code:\n{source_code}"
-                )
-            ),
+            HumanMessage(content="\n\n".join(user_parts)),
         ]
 
         # Indexer is an offline batch job, not user-facing — categorize +
@@ -643,6 +1013,68 @@ class IndexerAgent:
                 "key_columns": [],
             }
 
+    async def _generate_description_with_validation(
+        self,
+        function_name: str,
+        source_code: str,
+        manifest_desc: Optional[str] = None,
+        max_retries: int = 2,
+    ) -> Dict[str, Any]:
+        """W122a: generate a description with post-gen quality guards.
+
+        Calls :meth:`_generate_description` and validates the returned
+        dict's ``description`` field against the W122a rules (length,
+        forbidden phrases, generic opening). On failure, re-prompts up
+        to ``max_retries`` times with the rejection reason fed back in.
+
+        After retries are exhausted, the latest attempt is returned
+        anyway with an error-level log line — indexing should not crash
+        on stylistic deviations, and the W93 gate downstream still
+        catches sentinel / too-short failures.
+
+        Indexing-failure sentinels (``"(indexing failed: …)"``) are
+        passed through without retry because they signal an LLM-call
+        exception, not a quality issue; re-prompting under the same
+        conditions would just burn API budget. W93's
+        :meth:`_validate_description_result` catches them downstream.
+        """
+        desc_result = await self._generate_description(
+            function_name, source_code, manifest_desc=manifest_desc,
+        )
+
+        for attempt in range(max_retries):
+            description = (desc_result.get("description") or "").strip()
+            if description.startswith(INDEXING_FAILED_SENTINEL_PREFIX):
+                return desc_result
+
+            is_valid, reason = _validate_description(description)
+            if is_valid:
+                return desc_result
+
+            logger.warning(
+                "W122a validation failed for %s (attempt %d/%d): %s. "
+                "Retrying.",
+                function_name, attempt + 1, max_retries, reason,
+            )
+            desc_result = await self._generate_description(
+                function_name,
+                source_code,
+                manifest_desc=manifest_desc,
+                retry_reason=reason,
+            )
+
+        final_description = (desc_result.get("description") or "").strip()
+        if not final_description.startswith(INDEXING_FAILED_SENTINEL_PREFIX):
+            is_valid, reason = _validate_description(final_description)
+            if not is_valid:
+                logger.error(
+                    "W122a validation persistently failed for %s after "
+                    "%d retries: %s. Accepting output anyway (W93 still "
+                    "gates sentinel / too-short).",
+                    function_name, max_retries, reason,
+                )
+        return desc_result
+
     @staticmethod
     def _validate_description_result(
         desc_result: Dict[str, Any],
@@ -675,6 +1107,92 @@ class IndexerAgent:
         if len(description) < DESCRIPTION_MIN_LENGTH:
             return False, "too_short"
         return True, ""
+
+    async def _apply_validation_rejection(
+        self,
+        *,
+        schema: str,
+        module: str,
+        function_name: str,
+        desc_result: Dict[str, Any],
+        reject_reason: str,
+        source_hash: str,
+        correlation_id: Optional[str],
+    ) -> str:
+        """W122-recovery upsert guard. Returns ``"preserved"`` or ``"failed_written"``.
+
+        Pre-guard behavior: when W93 rejected a description, the
+        indexer ALWAYS upserted with ``status="failed"``,
+        ``embedding=None``, and the sentinel description text —
+        destroying any existing approved doc's description + embedding
+        in the process. A transient OpenAI failure (RateLimitError,
+        LengthFinishReasonError) thus converted working KNN-retrievable
+        docs into KNN-dark docs, as the prior W122d attempt did at
+        full corpus scale.
+
+        With the guard: an LLM-call sentinel (``reject_reason ==
+        "sentinel_prefix"``) is treated as transient. If the existing
+        doc is healthy (``status == "approved"`` and its description
+        is itself not a sentinel), the upsert is SKIPPED entirely —
+        the existing description + embedding are preserved verbatim.
+        The errors counter still increments so the run summary
+        accurately reflects the LLM failure; only the doc state is
+        protected.
+
+        Real content rejections (``reject_reason == "too_short"`` or
+        any future class) are NOT guarded — those represent the
+        generator returning a genuinely-bad description for which
+        marking the doc failed is the correct response.
+
+        The ``status == "approved"`` proxy for "has a valid embedding"
+        relies on the indexer's invariant: only the success-path
+        upsert at the bottom of each indexing loop ever writes
+        ``status="approved"``, and that path always passes a real
+        embedding. The W93-rejection upsert (this code path)
+        unconditionally writes ``status="failed"`` with
+        ``embedding=None``. So the two states are bijective with
+        embedding presence.
+        """
+        existing = None
+        if reject_reason == "sentinel_prefix":
+            existing = await self._vector_store.get_function_doc(
+                schema, function_name,
+            )
+            if (
+                existing
+                and existing.get("status") == "approved"
+                and not (existing.get("description") or "").startswith(
+                    INDEXING_FAILED_SENTINEL_PREFIX
+                )
+            ):
+                logger.warning(
+                    "W122 upsert guard: LLM-call failure (sentinel) for "
+                    "%s:%s would have overwritten an existing approved "
+                    "doc; preserving prior description + embedding. "
+                    "correlation_id=%s",
+                    schema, function_name, correlation_id,
+                )
+                return "preserved"
+
+        logger.error(
+            "W93 validation rejected %s:%s (%s); marking failed and "
+            "skipping embedding | correlation_id=%s",
+            schema, function_name, reject_reason, correlation_id,
+        )
+        await self._vector_store.upsert_function(
+            module=module,
+            function_name=function_name,
+            description=desc_result.get("description", ""),
+            embedding=None,
+            tables_read=desc_result.get("tables_read", []),
+            tables_written=desc_result.get("tables_written", []),
+            key_columns=desc_result.get("key_columns", []),
+            source_hash=source_hash,
+            status="failed",
+            schema=schema,
+            failure_reason=reject_reason,
+        )
+        return "failed_written"
 
     async def _get_embedding(self, text: str) -> List[float]:
         """Generate an embedding vector for the given text.
