@@ -316,6 +316,28 @@ def _eval_assertion(spec: dict[str, Any], cap: StreamCapture) -> AssertionResult
             f"markdown contains any of {values!r}",
             "" if passed else "none of the substrings present",
         )
+    if kind == "forbid_markdown_when_field":
+        # W148 safety invariant: fail ONLY when the markdown contains
+        # ``markdown_value`` AND ``done.<path> == value`` hold simultaneously.
+        # Used by C09 to assert a fabricated calendar gate is never silently
+        # rubber-stamped — i.e. never (gate-text present AND badge ==
+        # VERIFIED). The rare residual fabrication is tolerated as long as
+        # W57 downgrades the badge (gate-text present AND badge ==
+        # UNVERIFIED passes). Substring match is case-insensitive so casing
+        # drift in the generated phrase ("December" vs "december") still
+        # trips the guard. Does NOT weaken W57 — it asserts the backstop held.
+        md_value = spec["markdown_value"]
+        path = spec["path"]
+        field_value = spec["value"]
+        text = _markdown_text(cap)
+        actual = _resolve_path(cap.done, path)
+        both = (md_value.lower() in text.lower()) and (actual == field_value)
+        passed = not both
+        return AssertionResult(
+            passed,
+            f"NOT (markdown contains {md_value!r} AND done.{path} == {field_value!r})",
+            "" if passed else f"silent fabrication: markdown has {md_value!r} AND done.{path}={actual!r}",
+        )
     if kind == "summary_contains_any":
         values = list(spec["values"])
         summary = ""
