@@ -46,29 +46,32 @@ canaries:
     expected:
       query_type: COLUMN_LOGIC
       schema: OFSMDM
-      # W57 retroactive catch (was VERIFIED pre-W57): the LLM emits an
-      # 18× repeat of "Lines 198-369" plus an unsupported "PASS-THROUGH"
-      # template phrase for FN_LOAD_OPS_RISK_DATA. Pre-W57 this rubber-
-      # stamped as VERIFIED; the new grounding-enforcement layer flags
-      # it as line-by-line padding + unsupported template claim. Until
-      # the LLM stops emitting that pattern (or we plumb the source body
-      # past the size threshold), UNVERIFIED is the correct verdict.
+      # W148: badge is UNVERIFIED because the 35-function retrieval for this
+      # query trips W108-TRUNCATED (the source-concat cap drops lower-ranked
+      # candidates), NOT because of a fabrication catch. Pre-W148 the answer
+      # padded/fabricated a gate that W57 flagged GROUNDING-HIGH; the prompt
+      # fix removed the fabrication, so FN_LOAD_OPS_RISK_DATA's REAL December
+      # gate (EXTRACT(MONTH ...) = 12) is now surfaced and grounded. The
+      # W108-TRUNCATED downgrade is a separate, pre-existing retrieval
+      # characteristic, not W148.
       badge: UNVERIFIED
     assertions:
       - kind: done_field_neq
         path: type
         value: function_not_found
-      - kind: markdown_contains
-        value: "This function runs in"
+      # W148 wording-drift update: the real December gate is still surfaced,
+      # just no longer via the stale literal "This function runs in" phrase.
+      # FN_LOAD_OPS_RISK_DATA genuinely runs only in month 12, so a correct
+      # grounded answer must reference that gate.
+      - kind: markdown_contains_any
+        values: ["December", "month=12", "month = 12", "MONTH FROM"]
       - kind: warnings_not_contain
         value: UNGROUNDED_IDENTIFIERS
       - kind: warnings_not_contain
         value: PARTIAL_SOURCE
       - kind: min_citations
         value: 1
-      - kind: warnings_contain
-        value: "GROUNDING-HIGH:"
-    protects: "Canonical COLUMN_LOGIC happy path — graph payload, hierarchy header, citations all intact, AND W57 grounding enforcement actively catches the line-198-369 padding fabrication PLUS the unsupported pass-through template phrase. Regression to badge=VERIFIED with no GROUNDING-HIGH: warning would mean content-trust fabrications are silently rubber-stamping again. (Note: some runs may emit only GROUNDING-LOW: padding signals without the HIGH template-phrase catch — see severity-tiers PR report for empirical variability.)"
+    protects: "Canonical COLUMN_LOGIC happy path for a function with a REAL calendar gate — graph payload, hierarchy header, citations intact, and FN_LOAD_OPS_RISK_DATA's genuine December (month=12) gate surfaced and grounded post-W148. Badge is UNVERIFIED via W108-TRUNCATED on the 35-function retrieval, not via a fabrication catch. (W57's fabrication-catch path is exercised by C09's safety invariant and C12.)"
 
   - id: C02
     tier: 1
@@ -145,14 +148,27 @@ canaries:
       # vector search retrieves the OFSERM function from the OFSMDM-default
       # context. Schema pivot mechanism (Phase 4) is per-column / per-table.
       schema: OFSMDM
-      badge: VERIFIED
+      # W148: badge intentionally NOT pinned. CS_Deferred_Tax has no real
+      # calendar gate, so the dominant correct outcome is VERIFIED with no
+      # December claim; on the rare residual run where the LLM still emits a
+      # December gate, W57 correctly downgrades to UNVERIFIED. Both outcomes
+      # are acceptable — what must NEVER happen is a fabricated gate badged
+      # VERIFIED (asserted by forbid_markdown_when_field below).
     assertions:
       - kind: done_field_neq
         path: type
         value: function_not_found
-      - kind: markdown_contains
-        value: "This function runs in"
-    protects: "OFSERM function retrieval through graph + multi-schema semantic search (Phase 3 exit criterion). Schema stays OFSMDM-default; cross-schema vector search finds the function."
+      # W148 — replaces the stale `markdown_contains "This function runs in"`
+      # assertion, which codified the pre-W148 fabrication (this function has
+      # NO calendar gate, so any December claim is fabricated). The fix made
+      # the generator stop emitting the gate in the common case; the residual
+      # is rare and W57-caught. Invariant: a fabricated December gate must
+      # never be silently rubber-stamped as VERIFIED.
+      - kind: forbid_markdown_when_field
+        markdown_value: "december"
+        path: badge
+        value: VERIFIED
+    protects: "W148 — CS_Deferred_Tax_Asset_Net_of_DTL_Calculation has no real calendar gate; the generator must not fabricate a December execution condition and pass it VERIFIED. Rare residual fabrication is tolerated only because W57 downgrades it to UNVERIFIED. Also exercises OFSERM function retrieval via cross-schema vector search (Phase 3 exit criterion); schema stays OFSMDM-default."
 
   - id: C10
     # Moved to Tier 3 after the initial pinning run found the function not
