@@ -899,6 +899,124 @@ The resolver cannot match the question prose against a column or alias, returns 
 
 ---
 
+## W122. Indexer description quality — Basel-keyword stuffing + structural caps — FIXED 2026-06-01
+
+**Status:** Shipped on `fix/w122-description-quality-cluster`. Live in `IndexerAgent._generate_description` / `_generate_description_with_validation` and the module-level `DESCRIPTION_SYSTEM_PROMPT`, `_validate_description`, `MAX_SOURCE_CHARS`, `_W122A_*` constants in [src/agents/indexer.py](src/agents/indexer.py). Corpus regenerated to 333/333 approved (321 OFSERM + 12 OFSMDM).
+
+**Failure surface.** Pre-W122 the indexer's `DESCRIPTION_SYSTEM_PROMPT` had a Basel-keyword seed list ("operational risk, gross income, capital adequacy, GL data, product processor, exposure, provision, deduction ratio, beta factor…") and an exhaustive-coverage directive ("Include EVERY table name… Include EVERY significant column"). Together they produced corpus-wide description sameness: every function's description carried near-identical Basel framing. Semantic search could not distinguish similarly-named neighbors, and a handful of high-vocabulary functions (notably `ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR`) over-represented on unrelated Basel queries — the P1 quality harness (`scratch/quality_harness_report_baseline.md`, 2026-05-21) caught this with **2 HOLLOW VERIFIED responses** (B2, E3) and 17 BROKEN-of-22 in total.
+
+Two infrastructure ceilings amplified the prompt failure:
+
+- **Source-truncation cap of 3000 chars** in `index_module` / `index_all_loaded`, rationalised in-code as a "corporate network TLS limit". W108's TLS verification (`scratch/w108_tls_verification.md`) confirmed the rationale was stale: 3000 / 8000 / 12000-char API probes all succeed. Functions with their business-meaningful content past line ~80 (parameter loads, threshold gates, MERGE branches — e.g. `FN_G_TEST_CSTM`'s `RTLGRAN`/`RTLLVE` parameter loads at lines 156-197) were never visible to the description generator.
+- **Indexer `max_tokens=2000`** in `IndexerAgent.__init__`. After W122b lifted the source cap, large-INSERT functions returned `tables_read` / `tables_written` / `key_columns` arrays that alone consumed most of the 2000-token output budget, leaving the description string truncated and the JSON malformed — `LengthFinishReasonError` failures on 4/5 functions in the gate-1 validation run.
+
+**Fix — the W122a/b/c/d cluster** (single branch, four lettered sub-tickets):
+
+- **W122a — description prompt redesign.** Replaced `DESCRIPTION_SYSTEM_PROMPT` with a business-purpose-first format: required opening sentence states the function's SPECIFIC business purpose (not generic boilerplate), 3-5 distinctive concepts that disambiguate from siblings (parameter names, threshold values, CAP codes, characteristic flags), 3-5 distinctive tables/columns in prose, 150-word ceiling. Forbidden patterns explicitly enumerated (`"intended to make"`, `"keywords and concepts"`, `"discoverable by"`, etc.) and generic openings flagged (`"this function populates"`, `"this PL/SQL function"`). Output JSON schema (`description`, `tables_read`, `tables_written`, `key_columns`) preserved because the vector-store schema and W93 boot-time validation gate depend on it.
+
+  Post-generation validation: module-level `_validate_description` checks word-count (≤150), forbidden phrases, generic openings. A new retry wrapper `_generate_description_with_validation` re-prompts up to 2 times with the rejection reason fed back in; persistent failures are logged and accepted (W93 still gates downstream sentinel / too-short). LLM-call sentinels (`INDEXING_FAILED_SENTINEL_PREFIX`) pass through without retry — re-prompting under the same conditions would burn API budget.
+
+- **W122b — infrastructure lifts.** `MAX_SOURCE_CHARS` raised 3000 → 12000 (covers nearly all OFSAA function bodies); `IndexerAgent.max_tokens` raised 2000 → 4000 (fits the larger structured-field arrays). Forward note in the source comment: if 4000 still hits the ceiling, the next step is to re-examine the prompt's "complete structured fields" requirement rather than raising further. The W122-recovery commit later added an explicit volume cap (see below) to do exactly that.
+
+- **W122c — manifest.description ingestion.** New helpers `_load_module_manifest`, `_lookup_manifest_description`, `_build_function_to_description_map` thread the analyst-written `task.description` from each module's `manifest.yaml` into the indexer's user message as ground truth. The analyst knows what the function is FOR; the LLM cannot always derive purpose from severely-truncated source alone. The `_generate_description` signature was extended with `manifest_desc` and `retry_reason` parameters; user-message construction was switched from a single concatenated string to a structured `user_parts` list so the LLM attends to each block (FUNCTION NAME / MANIFEST DESCRIPTION / FUNCTION SOURCE / RETRY REASON) separately.
+
+- **W122d — force-regenerate mass re-index.** The cluster shipped with `--force` re-indexing as the deployment vehicle: 333 functions re-embedded against the new prompt, 86 hit `LengthFinishReasonError` on the first attempt (large-INSERT functions whose structured arrays consumed the new 4000-token output budget). That destruction cohort exposed the need for the recovery layer below.
+
+**Fix — W122-recovery (layered on top of the cluster).** Three measures, all interlocking:
+
+- **Non-destructive upsert guard** — `IndexerAgent._apply_validation_rejection`. Pre-recovery, every W93-rejection unconditionally upserted with `status="failed"`, `embedding=None`, sentinel description text — destroying any existing approved doc's description + embedding. A transient LLM-call failure converted KNN-retrievable docs into KNN-dark docs. Post-recovery, the guard distinguishes:
+  - `reject_reason == "sentinel_prefix"` → LLM call failed (transient). If existing doc has `status == "approved"` AND its description is not itself a sentinel, the upsert is SKIPPED entirely; the existing description + embedding are preserved. Error counter still increments so the run summary reflects the LLM failure; only the doc state is protected.
+  - `reject_reason == "too_short"` or any future content-quality class → real bad output. Mark failed (pre-recovery behavior). This is the correct response for a generator that produced a bad description.
+
+  **Load-bearing invariant the guard relies on:** `status == "approved"` ⇔ valid embedding present. The indexer maintains this invariant because only the success-path upsert at the bottom of each indexing loop writes `status="approved"`, and that path always passes a real embedding. The W93-rejection upsert unconditionally writes `status="failed"` with `embedding=None`. The two states are bijective with embedding presence. Future code that writes status fields must respect this invariant or the guard's "is the existing doc healthy?" proxy breaks.
+
+- **Structured-field array cap (volume-only)** — new `STRUCTURED-FIELD ARRAY CAP — STRICT` block in `DESCRIPTION_SYSTEM_PROMPT`. Each of `tables_read`, `tables_written`, `key_columns` MUST contain ≤30 entries; when the source has more, keep the 30 MOST DISTINCTIVE and drop the generic / audit / standard-FK boilerplate first (explicit drop order: surrogate-key columns, audit/batch columns, timestamp/created-by columns, generic-FK columns). The cap is an output-VOLUME constraint only — field shapes (arrays of uppercase string identifiers) unchanged. This is the "examine the structured-fields requirement" follow-up that W122b's max_tokens lift deferred.
+
+- **`--only-failed` selective re-index** — new `only_failed` parameter on `IndexerAgent.index_all_loaded` and matching `--only-failed` CLI flag on `python cli.py index`. Narrows the candidate set to functions whose existing vector doc is `status="failed"` BEFORE the source read, so no work is wasted on approved or missing-doc candidates. Intended for targeted retry of a known-failed cohort (e.g., the 86 LengthFinishReasonError failures from W122d's first attempt). Ignored when `--from-disk` is set.
+
+**Validation — quality harness, 2026-06-01 (`scratch/quality_harness_report_post_w122_w146.md` / `scratch/quality_harness_results_post_w122_w146.json`):**
+
+| Metric | Pre-W122 baseline (2026-05-21) | Post-W122 + W146 (2026-06-01) | Δ |
+|---|---|---|---|
+| Total | 22/22 captured | 22/22 captured | — |
+| Wall clock | 469s | 515s | +10% (W146 broader retrieval = more candidates to explain) |
+| GOOD / EXCELLENT | 0 | 4 (D3, F1, F2, F3) | **+4** |
+| ACCEPTABLE | 0 | 1 (A2) | +1 |
+| POOR (trust-contract preserved, wrong anchor) | 3 | 7 | +4 |
+| HOLLOW VERIFIED (trust contract violated) | 2 (B2, E3) | **0** | **−2** |
+| BROKEN | 17 | 10 | −7 |
+| Improved vs baseline | — | 9 queries | — |
+| Regressed vs baseline | — | 1 query (E3, see W147) | — |
+
+The 9 improvements: A2 POOR→ACCEPTABLE (`FN_G_TEST_CSTM` now correctly anchored on the RRP query), B2 HOLLOW VERIFIED→POOR (W57 calendar grounding now catches the W96 fabrication that the old prompt's keyword stuffing masked), B4 POOR partial (the W122a description "Applies deduction-from-EAD…" pushed `ABL_DED_FRM_EAD` from missing→rank #3 in retrieval), C3 BROKEN→POOR (W122a descriptions surface December-gate functions; W57 calendar overlay catches the fabricated anchor), D3 BROKEN→GOOD (cross-comparative retrieval now lands the SIGNIFICANT/INSIGNFCNT pair), E1 BROKEN→POOR (structural-query routing now reaches the explainer instead of the DATA_QUERY clarification), F1/F2/F3 BROKEN→GOOD (W88 honest-decline registry now reachable for LCR / NSFR / Leverage Ratio with the registry's richer reason text — CAP843 placeholder + CAP214 alternative for F3).
+
+**31 over-cap pre-existing approved docs** were left as-is during the recovery pass: a known content-density asymmetry (their structured-field arrays exceed the new 30-entry cap because they pre-date it). Not blocking; recoverable later via a second targeted re-index pass when the asymmetry materially affects retrieval (currently it doesn't — they were `status="approved"` before the cap and the guard preserves their embeddings).
+
+**Finding (b) — W122a name-redundancy removal weakens function-name-as-anchor (measured cost side of the trade-off).** The W122a prompt deliberately does NOT instruct the LLM to repeat the function name in the description. The intent: name-tokens were leaking into KNN as redundant ranking signal, depressing the semantic distinctiveness of descriptions; removing them makes vector search rank on actual content. The cost: name-bearing queries ("how does X work?", "where does X come from?") no longer self-anchor via KNN — the target can rank ~#45 in pure KNN where it previously ranked top-5. W76 anchor-injection is supposed to compensate, and for content-level grounding it does. For the source-body fetch path the C1 deep-dive (`scratch/w122_stage_d_c1_knn_probe.log`) measured the rank shift, and W147 below tracks the source-body resolver failure exposed downstream. Not a regression of the W122a design — the cost was anticipated and accepted — but the cascade-weighting / anchor-strength compensation needs a follow-up to fully recover anchor-bearing query performance.
+
+**W146 cross-reference.** A separate KNN-paging cap bug (`vector_store.search()` silently capped at 10 results despite callers requesting `top_k=15` or `20`) shipped alongside W122 on the same branch. W146 was discovered during W122 Stage D canary validation when a direct KNN probe returned 10 results to a `top_k=35` request. See the W146 entry below for details. Both are required together: W146 lets the new W122a descriptions actually reach the cascade at the requested breadth.
+
+**Files.** [src/agents/indexer.py](src/agents/indexer.py) (prompt, validator, retry wrapper, manifest helpers, source-cap lift, max_tokens default, upsert guard, --only-failed plumbing); [cli.py](cli.py) (--only-failed flag); [tests/unit/agents/test_w122_description_quality.py](tests/unit/agents/test_w122_description_quality.py) (37 tests across 8 classes: constants / validator / manifest / retry / caching / force-regenerate / upsert-guard / only-failed-selection).
+
+**Open follow-ups (not blocking merge).**
+
+- **W147** (below) — W76 source-body resolver false-negative when anchor-injection fires for a function outside natural KNN top-K. Exposed by, but not caused by, W122a's name-redundancy removal.
+- Cascade-weighting follow-up for the finding-(b) anchor-strength cost; track separately when a name-bearing query class starts degrading materially.
+- The 31 over-cap docs above — recoverable in a second `--only-failed` pass when their content-density asymmetry begins to matter for retrieval.
+
+---
+
+## W146. VectorStore.search() silently capped at 10 results despite top_k — FIXED 2026-06-01
+
+**Status:** Shipped on `fix/w122-description-quality-cluster` (separate commit from the W122 cluster). Live in `VectorStore.search` in [src/tools/vector_store.py](src/tools/vector_store.py).
+
+**Failure surface.** `VectorStore.search(query_embedding=..., top_k=N)` builds a RediSearch `Query()` that interpolates `top_k` into the KNN clause (`KNN N @vector ...`). Pre-W146 the `Query()` was built without `.paging(offset, num)`, so RediSearch's default `LIMIT 0 10` silently applied — callers requesting `top_k=35` received exactly 10 results regardless. Invisible pre-W122a because function-name token-repetition put the named target at KNN rank ≤10 reliably, so the silent cap never dropped relevant results in practice. W122a's name-redundancy removal exposed it: the C1 canary ("How does FN_LOAD_OPS_RISK_DATA work?") direct KNN probe (`scratch/w122_stage_d_c1_knn_probe.log`) placed the target function at KNN rank #45 and the silent 10-cap was hiding it from the explainer entirely — W76 anchor injection was compensating downstream.
+
+The bug was load-bearing for COLUMN_LOGIC (top_k=15) and VARIABLE_TRACE (top_k=20). FUNCTION_LOGIC (top_k=5) was unaffected by design — 5 < 10 means the silent cap never fired for the smallest query class. The harness measured the impact: B4's reference target `ABL_DED_FRM_EAD` reached rank #3 in `functions_analyzed` post-W146 (where pre-W146 it would have been dropped past the 10-cap regardless of the W122a description quality).
+
+**Fix.** One line: add `.paging(0, top_k)` to the RediSearch `Query()` build in `search()`. Module-level comment block records the discovery context (W122a name-redundancy exposure, C1 canary, W76 cascade compensation that had been masking the bug).
+
+**Tests.** Two new tests in [tests/unit/tools/test_phase3_vector_store.py](tests/unit/tools/test_phase3_vector_store.py): `test_search_returns_more_than_10_results_when_top_k_above_10` (35 fake docs, mock RediSearch reply, asserts result length == 35 AND inspects the Query object's `_offset == 0` and `_num == 35`) and `test_search_top_k_below_10_unchanged_behavior` (regression pin for the common small-top_k case). 8 / 8 tests in the file pass; 1010 adjacent tests in tools + agents suites pass unchanged.
+
+**Post-fix canary triple** (`scratch/w146_postfix_canaries.log`):
+
+- **C1** ("How does FN_LOAD_OPS_RISK_DATA work?") — UNVERIFIED with `W108-TRUNCATED: 29 of 35` (pre-W146: `28 of 35`). Unchanged as predicted: FUNCTION_LOGIC uses top_k=5 which was always under the cap.
+- **C2** (DATA_QUERY arm) — VERIFIED, SUM = −24,179,237,139.63 (identical to pre-W146). Regression-free.
+- **C3** (W57 grounding arm) — UNVERIFIED, identical `GROUNDING-HIGH: response contains template phrase 'only runs when the reporting month is december' but cited source for 'CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT' does not support it`. W57 grounding path intact.
+
+**Out of scope (deliberately).** W146 is a minimal paging fix; the broader cascade behavior (W80c graph rerank, W76 anchor injection, W108 explainer context budget) is unchanged. Those layers were already correctly receiving the cascade output; they just couldn't compensate for the missing rank-11-15 KNN results. With W146 in place they get the full top_k and can reason on the broader set.
+
+---
+
+## W147. W76 source-body resolver returns false-negative when anchor-injection fires for a function outside natural KNN top-K — PLANNED
+
+**Status:** Logged 2026-06-01 during W122 close-out. Separable from W122 / W146; address in a follow-up branch.
+
+**Failure surface.** E3 ("What feeds data into FN_G_TEST_CSTM?") in the 2026-06-01 post-W122 quality harness returned an `UNVERIFIED` body that read **"FN_G_TEST_CSTM — Source Not Currently Indexed"**, with four warnings: `NAMED_FUNCTION_NOT_RETRIEVED`, `GROUNDING-HIGH`, `GROUNDING-ANCHOR-MISMATCH-HIGH`, `PARTIAL_SOURCE_INDEXED`. The `PARTIAL_SOURCE_INDEXED` warning is a **false negative** — direct Redis probe confirms the function IS fully indexed:
+
+```
+rtie:vec:OFSERM:FN_G_TEST_CSTM    HASH    18208 B   status="approved"  desc_len=767
+graph:source:OFSERM:FN_G_TEST_CSTM  STRING  49232 B   (source body present)
+graph:OFSERM:FN_G_TEST_CSTM         STRING  57416 B   (graph payload present)
+```
+
+Description text begins *"Runs a customer-granularity test by loading customer limit totals and aggregating advances, then applying parameter-driven retail granularity and RRP threshold checks for cstm granularity validation."* — a quality W122a description.
+
+**Root cause.** The W76 anchor-injection path's source-body lookup uses a different code path than natural retrieval. When the query NAMES a function (e.g. "what feeds data into FN_G_TEST_CSTM?") and that function is not in the natural KNN top-K, W76 injects it by name; the source-body fetch on the W76 path then returns empty / false-negative even though Redis has the body. The same warning fired at baseline for `FN_LOAD_OPS_RISK_DATA` in OFSMDM (E4 query), so this code path has been defective pre-W122 — but it surfaced for far fewer queries because the old keyword-stuffed descriptions ranked anchor-bearing functions high enough in natural KNN that the W76 fallback rarely fired.
+
+**Important — not new rot, an exposure shift.** W122a's name-redundancy removal moved more functions out of natural KNN top-K (the cost side of finding (b) on the W122 entry above), so the W76 fallback now fires more often. That exposed the latent defective path. The W122/W146 cluster did not introduce this bug; it made an existing bug observable on a wider query surface.
+
+**In trust-contract terms, E3 IMPROVED.** Baseline: `VERIFIED` badge on a body that fabricated December gating on `FN_G_TEST_CSTM` (HOLLOW VERIFIED, the canonical failure mode the harness was built to catch). Post-W122: `UNVERIFIED` badge on an honest "source not indexed" decline. The user gets less useful content but the badge is now accurate. This is why W147 does not block the W122/W146 merge.
+
+**Fix direction (not implemented).** Either (a) unify the W76 source-body lookup with the natural-retrieval source-body lookup so both paths hit the same `graph:source:<schema>:<fn>` cache, or (b) add an explicit Redis-presence check at the W76 anchor-injection entry point and fall back to natural-retrieval fetch when the body is present but the W76 path missed it. Option (b) is the smaller blast radius.
+
+**Backlog gate.** Re-prioritise W147 if:
+
+- A second function class (beyond E3's `FN_G_TEST_CSTM` and the pre-existing E4 `FN_LOAD_OPS_RISK_DATA`) starts surfacing PARTIAL_SOURCE_INDEXED on a function that Redis demonstrably indexes, or
+- An end-user reports the "source not currently indexed" decline on a query they expected to work.
+
+---
+
 ## Backlog — informal observation (not ticketed yet)
 
 **Trace N_EOP_BAL retrieves wrong functions despite N_EOP_BAL being indexed.** Surfaced during the 2026-05-20 W107 post-restart validation pass.
