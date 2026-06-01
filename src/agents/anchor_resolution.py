@@ -33,7 +33,10 @@ the LLM honestly decline rather than anchor on a sibling.
 
 from typing import Any, Dict, Optional
 
-from src.agents.orchestrator import extract_function_candidates
+from src.agents.orchestrator import (
+    extract_function_candidates,
+    function_exists_in_graph,
+)
 from src.logger import get_logger
 from src.pipeline.state import LogicState
 
@@ -371,6 +374,114 @@ def ensure_anchor_in_search_results(state: LogicState) -> LogicState:
         "w76" if w76_fn else "bi_routing",
         anchor_schema,
         len(search_results),
+    )
+    return state
+
+
+def ensure_named_functions_in_search_results(
+    state: LogicState,
+    redis_client: Any = None,
+) -> LogicState:
+    """W147 — force plain-text-named functions into ``search_results``.
+
+    Companion to :func:`ensure_anchor_in_search_results` (W95). W95 only
+    injects when an *explicit* anchor fired — a W76 ``"In <Fn>, ..."``
+    prefix / alias-literal recovery, or BI routing. A query that names a
+    function in plain prose ("What feeds data into FN_G_TEST_CSTM?") sets
+    neither ``w76_anchor`` nor ``bi_routing``, so when the named function
+    lands outside the vector-search top-K its body is never loaded into
+    ``multi_source``. The W49 partial-source detector then judges
+    body-absence from the (retrieval-derived) ``multi_source`` while
+    confirming metadata-presence directly against Redis — an asymmetry
+    that falsely reports ``PARTIAL_SOURCE_INDEXED`` even though
+    ``graph:source:<schema>:<fn>`` holds the full body (the W147 false
+    positive; see ``docs/RTIE_Weakness_Log.md``).
+
+    This helper is the *real* fix: it scans ``raw_query`` for callable
+    PL/SQL function names using the SAME W58-gated candidate extractor the
+    rest of the pipeline relies on (:func:`extract_function_candidates`),
+    and injects any candidate that
+
+      * is verified to exist in graph metadata in some discovered schema
+        (:func:`function_exists_in_graph`), AND
+      * is not already present in ``search_results``
+        (case-insensitive on ``function_name``),
+
+    using the same W95 sentinel shape so
+    :meth:`MetadataInterpreter.fetch_multi_logic` resolves the owning
+    schema and loads the body. With the body in ``multi_source``, W98's
+    raw-query scan (:func:`determine_primary_anchor` layer 4) anchors on
+    it and :func:`promote_anchor_to_front` (W97) lifts it to position 0 —
+    so the explainer answers the question AND the W49 false positive
+    disappears at the source.
+
+    GUARD (non-negotiable): only graph-verified names are injected. A
+    candidate that fails the W58 exclusion gates (table / alias / column
+    prefix, manifest process name, stopword) is never produced by
+    :func:`extract_function_candidates`; a surviving candidate with no
+    graph metadata in any schema is skipped. Phantom / unverified names
+    are never injected.
+
+    Appends injected records to the END of ``search_results`` rather than
+    position 0 so W95's anchor (when it also fired) keeps its primacy;
+    W97 owns final ``multi_source`` prominence regardless of search-result
+    position. No-op when ``redis_client`` is ``None`` (can't verify graph
+    membership → fail closed, never inject unverified) or when the query
+    yields no graph-verified candidates.
+
+    Idempotent. Mutates and returns *state* for chainable callers.
+    """
+    if redis_client is None:
+        return state
+
+    raw_query = state.get("raw_query") or ""
+    if not raw_query:
+        return state
+
+    candidates = extract_function_candidates(raw_query)
+    if not candidates:
+        return state
+
+    search_results = list(state.get("search_results") or [])
+    present_upper = {
+        (r.get("function_name") or "").upper()
+        for r in search_results
+        if isinstance(r, dict)
+    }
+
+    injected_names: list = []
+    seen_upper = set()
+    for candidate in candidates:
+        cand_upper = candidate.upper()
+        if cand_upper in present_upper or cand_upper in seen_upper:
+            continue
+        # GUARD: only inject names that genuinely exist in the graph.
+        if not function_exists_in_graph(candidate, redis_client):
+            continue
+        seen_upper.add(cand_upper)
+        injected = {
+            "function_name": candidate,
+            "schema": state.get("schema", "") or "",
+            "module": "",
+            "description": "",
+            "tables_read": "",
+            "tables_written": "",
+            "key_columns": "",
+            "score": 0.0,
+            "anchor_injected": True,
+        }
+        search_results.append(injected)
+        injected_names.append(candidate)
+
+    if not injected_names:
+        return state
+
+    state["search_results"] = search_results
+    logger.info(
+        "ensure_named_functions_in_search_results: injected %s — "
+        "graph-verified named function(s) were missing from search_results "
+        "(W147 retrieval-coverage gap)",
+        injected_names,
     )
     return state
 

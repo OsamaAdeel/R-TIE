@@ -517,3 +517,85 @@ def test_partial_source_false_when_redis_client_is_none():
         retrieved_source=None,
         redis_client=None,
     ) is False
+
+
+# ---------------------------------------------------------------------------
+# W147 — detector backstop (Fix A): body-presence must be confirmed against
+# the loader source cache (graph:source:), not inferred from retrieval alone.
+# ---------------------------------------------------------------------------
+
+def _stub_redis_with_metadata_and_source(
+    metadata_keys: set[tuple[str, str]],
+    source_bodies: dict[tuple[str, str], list[str]],
+):
+    """Stub Redis serving msgpacked parse-metadata for *metadata_keys* AND
+    msgpacked raw-source line-lists for *source_bodies* (keyed (schema, fn)).
+    """
+    from src.parsing.serializer import to_msgpack
+    stored: dict[str, bytes] = {}
+    for schema, fn in metadata_keys:
+        stored[f"graph:meta:{schema}:{fn}"] = to_msgpack(
+            {"parsed_at": "2026-04-25T00:00:00+00:00",
+             "schema": schema, "function_name": fn,
+             "node_count": 1, "edge_count": 0}
+        )
+    for (schema, fn), lines in source_bodies.items():
+        stored[f"graph:source:{schema}:{fn}"] = to_msgpack(lines)
+    client = MagicMock()
+    client.get.side_effect = lambda k: stored.get(
+        k if isinstance(k, str) else k.decode()
+    )
+    return client
+
+
+def test_partial_source_false_when_body_indexed_but_not_retrieved():
+    # W147 false-positive case: retrieval surfaced no body for the function
+    # (it fell outside the top-K and no anchor injected it), but the loader
+    # source cache graph:source:<schema>:<fn> DOES hold the full body. This
+    # is "indexed but not retrieved" — NOT partial-source. Must return False.
+    body = [
+        "CREATE OR REPLACE FUNCTION FN_G_TEST_CSTM RETURN NUMBER AS",
+        "BEGIN RETURN 1; END;",
+    ]
+    redis = _stub_redis_with_metadata_and_source(
+        metadata_keys={("OFSERM", "FN_G_TEST_CSTM")},
+        source_bodies={("OFSERM", "FN_G_TEST_CSTM"): body},
+    )
+    assert detect_partial_source_function(
+        function_name="FN_G_Test_Cstm",   # mixed case → upper-cased internally
+        schema="OFSERM",
+        retrieved_source=None,             # retrieval came back empty
+        redis_client=redis,
+    ) is False
+
+
+def test_partial_source_true_when_body_genuinely_missing():
+    # W49 genuine decline — the non-negotiable regression guard. Metadata
+    # exists, retrieval empty, AND the loader source cache has NO body
+    # (graph:source: absent). This is a real partial-index state and MUST
+    # still fire so the explainer declines instead of speculating.
+    redis = _stub_redis_with_metadata_and_source(
+        metadata_keys={("OFSERM", "FN_TRULY_PARTIAL_CSTM")},
+        source_bodies={},                  # no stored body anywhere
+    )
+    assert detect_partial_source_function(
+        function_name="FN_TRULY_PARTIAL_CSTM",
+        schema="OFSERM",
+        retrieved_source=None,
+        redis_client=redis,
+    ) is True
+
+
+def test_partial_source_true_when_stored_body_below_threshold():
+    # A stored-but-trivial body (below _PARTIAL_SOURCE_MIN_CHARS) is treated
+    # the same as missing — still a genuine decline.
+    redis = _stub_redis_with_metadata_and_source(
+        metadata_keys={("OFSERM", "FN_STUB_CSTM")},
+        source_bodies={("OFSERM", "FN_STUB_CSTM"): ["   "]},
+    )
+    assert detect_partial_source_function(
+        function_name="FN_STUB_CSTM",
+        schema="OFSERM",
+        retrieved_source=None,
+        redis_client=redis,
+    ) is True
