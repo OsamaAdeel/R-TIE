@@ -465,12 +465,25 @@ def detect_partial_source_function(
             false positive on a misconfigured environment.
 
     Returns:
-        True only when both conditions hold:
+        True only when ALL conditions hold:
           - graph metadata exists for (schema, function_name)
           - retrieved_source is missing/empty/below threshold
+          - the loader-managed source body
+            (``graph:source:<schema>:<function_name>``) is ALSO
+            missing/empty/below threshold
 
-    Pure-ish function: no LLM calls, only a single Redis GET on the
-    parse_metadata key. Reuses the existing client connection.
+    The third condition (W147) is the load-bearing distinction between
+    "source genuinely not indexed" (the real W49 decline) and "source
+    IS indexed but this turn's retrieval didn't surface it into
+    multi_source". The latter is a retrieval-coverage gap, not a
+    partial-index state — flagging it as PARTIAL_SOURCE_INDEXED is a
+    false positive (W147). Body-presence is therefore keyed on the SAME
+    artifact whose genuine absence defines the W49 condition
+    (``graph:source:``), not on the retrieval-derived ``retrieved_source``.
+
+    Pure-ish function: no LLM calls, at most two Redis GETs (parse
+    metadata, then loader source only when retrieval came back thin).
+    Reuses the existing client connection.
     """
     if not function_name:
         return False
@@ -492,7 +505,42 @@ def detect_partial_source_function(
             schema, function_name, exc,
         )
         return False
-    return metadata is not None
+    if metadata is None:
+        return False
+
+    # W147 backstop: retrieval handed us no usable body, but that does
+    # NOT mean the source is unindexed — the function may simply have
+    # fallen outside this turn's retrieval set (e.g. outside the KNN
+    # top-K with no anchor-injection to pull it in). Confirm against the
+    # loader-managed source cache before declaring partial-source. If a
+    # real body is stored, this is "indexed but not retrieved" — Fix B
+    # loads it upstream so the explainer answers — and W49 must NOT
+    # fire. Only when the stored body is also missing/short is this a
+    # genuine partial-index decline.
+    try:
+        from src.parsing.store import get_raw_source
+        stored_source = get_raw_source(
+            redis_client, schema, function_name.upper()
+        )
+    except Exception as exc:
+        logger.debug(
+            "partial-source body lookup failed for %s.%s: %s",
+            schema, function_name, exc,
+        )
+        # Fall open to the metadata-only decision: if we can't read the
+        # body cache we keep the pre-W147 behaviour rather than risk
+        # suppressing a genuine decline.
+        return True
+    if _retrieved_source_length(stored_source) >= _PARTIAL_SOURCE_MIN_CHARS:
+        logger.info(
+            "W147: %s.%s has a stored source body (%d-len) but retrieval "
+            "surfaced none; treating as indexed-but-not-retrieved, NOT "
+            "partial-source",
+            schema, function_name,
+            _retrieved_source_length(stored_source),
+        )
+        return False
+    return True
 
 
 def _retrieved_source_length(retrieved_source: Any) -> int:
