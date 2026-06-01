@@ -52,7 +52,11 @@ async def get_clients():
     return vs, cache
 
 
-async def cmd_index(force: bool = False, from_disk: bool = False):
+async def cmd_index(
+    force: bool = False,
+    from_disk: bool = False,
+    only_failed: bool = False,
+):
     """Index functions for semantic search.
 
     Default (`from_disk=False`) — calls :meth:`IndexerAgent.index_all_loaded`,
@@ -65,6 +69,13 @@ async def cmd_index(force: bool = False, from_disk: bool = False):
     the pre-W93b path that walks ``db/modules/*`` and embeds every .sql file,
     including functions the loader rejected. Kept as an escape hatch for
     rebuilds outside the loader's view; not the recommended default.
+
+    ``only_failed=True`` (W122-recovery) — narrows the candidate set to
+    functions whose existing vector doc is ``status="failed"``. Skips
+    approved docs and functions without any existing doc. Use for
+    targeted retry of a known-failed cohort (e.g., 86 LengthFinishReason-
+    Error failures from W122d's first attempt) without re-touching the
+    approved corpus. Ignored when ``from_disk=True``.
     """
     from src.agents.indexer import IndexerAgent
 
@@ -107,10 +118,17 @@ async def cmd_index(force: bool = False, from_disk: bool = False):
         port=int(os.getenv("REDIS_PORT", "6379")),
     )
 
-    print("Indexing loader-validated functions (graph:<schema>:<fn>)...")
+    if only_failed:
+        print(
+            "Indexing loader-validated functions, only_failed=True "
+            "(W122-recovery — targets status=failed docs only)..."
+        )
+    else:
+        print("Indexing loader-validated functions (graph:<schema>:<fn>)...")
     result = await indexer.index_all_loaded(
         graph_redis_client=graph_redis,
         force=force,
+        only_failed=only_failed,
     )
 
     per_schema = result.get("results") or {}
@@ -296,7 +314,8 @@ async def main():
             return
         force = "--force" in args
         from_disk = "--from-disk" in args
-        await cmd_index(force=force, from_disk=from_disk)
+        only_failed = "--only-failed" in args
+        await cmd_index(force=force, from_disk=from_disk, only_failed=only_failed)
     elif cmd == "status":
         await cmd_status()
     elif cmd == "ask" and len(args) > 1:

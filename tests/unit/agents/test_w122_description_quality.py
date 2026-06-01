@@ -104,6 +104,29 @@ class TestModuleConstants:
         assert "this pl/sql function" in joined
         assert "the function is responsible for" in joined
 
+    def test_structured_field_array_cap_present(self):
+        """W122-recovery: after the corpus-scale LengthFinishReasonError
+        failures (86/333 functions), the prompt must explicitly cap
+        each structured-field array length so the JSON output fits
+        within max_tokens. The cap is a VOLUME constraint only — the
+        field shapes / types are unchanged.
+        """
+        # The cap directive must be present.
+        assert "STRUCTURED-FIELD ARRAY CAP" in DESCRIPTION_SYSTEM_PROMPT
+        assert "AT MOST 30 entries" in DESCRIPTION_SYSTEM_PROMPT
+        # The pre-cap "COMPLETE lists" phrasing — which the LLM took
+        # too literally on large-INSERT functions — must be gone.
+        assert "hold the COMPLETE lists" not in DESCRIPTION_SYSTEM_PROMPT
+        # The drop-order guidance must be present so the LLM knows
+        # WHICH entries to drop when source has >30 (drop generic
+        # keys first, keep business-meaningful identifiers).
+        assert "Drop in this order" in DESCRIPTION_SYSTEM_PROMPT
+        assert "Generic surrogate-key columns" in DESCRIPTION_SYSTEM_PROMPT
+        # Sanity check: the three fields the cap applies to.
+        assert "tables_read" in DESCRIPTION_SYSTEM_PROMPT
+        assert "tables_written" in DESCRIPTION_SYSTEM_PROMPT
+        assert "key_columns" in DESCRIPTION_SYSTEM_PROMPT
+
     def test_system_prompt_replaced(self):
         """Pre-W122a markers should be gone; W122a markers should be present."""
         # Old keyword seed list — must NOT be present in the redesigned prompt.
@@ -683,3 +706,453 @@ class TestForceRegeneratePath:
         assert per_schema["skipped"] == 1
         assert per_schema["indexed"] == 0
 
+
+# ---------------------------------------------------------------------------
+# W122-recovery upsert guard
+#
+# The W122d mass re-index hit RateLimitError on every function and
+# the W93-rejection upsert overwrote 333 status=approved docs with
+# sentinel descriptions + empty embeddings — destroying a working
+# KNN-retrievable corpus in the process.
+#
+# The guard now treats LLM-call sentinels ("(indexing failed: ...)")
+# as TRANSIENT failures that must not destroy an existing approved
+# doc's description + embedding. Real content rejections (too_short)
+# are unaffected — those represent the generator returning a
+# genuinely-bad description for which marking the doc failed is the
+# correct response.
+# ---------------------------------------------------------------------------
+
+class TestW122UpsertGuard:
+    @pytest.mark.asyncio
+    async def test_sentinel_rejection_preserves_existing_approved_doc(self):
+        """When the LLM call fails (sentinel) and the existing doc is
+        approved with a real description, the upsert MUST be skipped
+        entirely so the description + embedding survive the failure.
+        """
+        indexer = _make_indexer()
+        # Existing approved doc with a real (non-sentinel) description.
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "Existing real description with strong content.",
+            "source_hash": "deadbeef",
+        })
+
+        sentinel = {
+            "description": "(indexing failed: LengthFinishReasonError)",
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+        outcome = await indexer._apply_validation_rejection(
+            schema="OFSERM",
+            module="ABL_CAR",
+            function_name="FN_TARGET",
+            desc_result=sentinel,
+            reject_reason="sentinel_prefix",
+            source_hash="newsh1",
+            correlation_id=None,
+        )
+        assert outcome == "preserved"
+        # The crucial assertion: no upsert was issued — the existing
+        # doc's description + embedding remain untouched.
+        indexer._vector_store.upsert_function.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sentinel_rejection_writes_failed_when_no_existing_doc(self):
+        """If no prior doc exists, the sentinel rejection still has to
+        record SOMETHING so the indexer's status tracking stays
+        coherent. Falls through to the standard failed-write path.
+        """
+        indexer = _make_indexer()
+        indexer._vector_store.get_function_doc = AsyncMock(return_value=None)
+
+        sentinel = {
+            "description": "(indexing failed: LengthFinishReasonError)",
+            "tables_read": ["T1"],
+            "tables_written": ["T2"],
+            "key_columns": ["C1"],
+        }
+        outcome = await indexer._apply_validation_rejection(
+            schema="OFSERM",
+            module="ABL_CAR",
+            function_name="FN_NEW",
+            desc_result=sentinel,
+            reject_reason="sentinel_prefix",
+            source_hash="sh1",
+            correlation_id=None,
+        )
+        assert outcome == "failed_written"
+        indexer._vector_store.upsert_function.assert_called_once()
+        kwargs = indexer._vector_store.upsert_function.call_args.kwargs
+        assert kwargs["status"] == "failed"
+        assert kwargs["embedding"] is None
+        assert kwargs["failure_reason"] == "sentinel_prefix"
+
+    @pytest.mark.asyncio
+    async def test_sentinel_rejection_overwrites_existing_failed_doc(self):
+        """A previously-failed doc is NOT a "good state" worth preserving.
+        Overwrite with the fresh failed record (refreshes failure_reason
+        and source_hash).
+        """
+        indexer = _make_indexer()
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "failed",
+            "description": "(indexing failed: some-previous-class)",
+            "source_hash": "oldhash",
+        })
+
+        sentinel = {
+            "description": "(indexing failed: LengthFinishReasonError)",
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+        outcome = await indexer._apply_validation_rejection(
+            schema="OFSERM",
+            module="ABL_CAR",
+            function_name="FN_PREV_FAILED",
+            desc_result=sentinel,
+            reject_reason="sentinel_prefix",
+            source_hash="newhash",
+            correlation_id=None,
+        )
+        assert outcome == "failed_written"
+        indexer._vector_store.upsert_function.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sentinel_rejection_overwrites_approved_doc_with_sentinel_description(self):
+        """Defense-in-depth: if an approved doc somehow already carries
+        a sentinel description (e.g., a previous guard bypass left it
+        in a malformed state), don't preserve it — that's not a good
+        state.
+        """
+        indexer = _make_indexer()
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "(indexing failed: SomeOldClass)",
+            "source_hash": "oldhash",
+        })
+
+        sentinel = {
+            "description": "(indexing failed: LengthFinishReasonError)",
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+        outcome = await indexer._apply_validation_rejection(
+            schema="OFSERM",
+            module="ABL_CAR",
+            function_name="FN_BAD_APPROVED",
+            desc_result=sentinel,
+            reject_reason="sentinel_prefix",
+            source_hash="newhash",
+            correlation_id=None,
+        )
+        assert outcome == "failed_written"
+
+    @pytest.mark.asyncio
+    async def test_too_short_rejection_writes_failed_regardless_of_existing(self):
+        """too_short is a real content-quality rejection, not a
+        transient API failure. Mark failed as before — even when an
+        existing approved doc exists, because the generator now
+        produces a worse description than what's stored, but the
+        validator says we can't trust the new one either. Recording
+        failed gives operators visibility into the regression.
+        """
+        indexer = _make_indexer()
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "Existing real description.",
+            "source_hash": "oldhash",
+        })
+
+        too_short = {
+            "description": "x",  # under DESCRIPTION_MIN_LENGTH
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+        outcome = await indexer._apply_validation_rejection(
+            schema="OFSERM",
+            module="ABL_CAR",
+            function_name="FN_THIN",
+            desc_result=too_short,
+            reject_reason="too_short",
+            source_hash="newhash",
+            correlation_id=None,
+        )
+        assert outcome == "failed_written"
+        indexer._vector_store.upsert_function.assert_called_once()
+        kwargs = indexer._vector_store.upsert_function.call_args.kwargs
+        assert kwargs["status"] == "failed"
+        assert kwargs["failure_reason"] == "too_short"
+
+    @pytest.mark.asyncio
+    async def test_index_all_loaded_guards_existing_approved_on_sentinel(self):
+        """End-to-end through index_all_loaded: an LLM-call failure
+        mid-run must not destroy the 247 approved docs. Simulates the
+        exact W122-recovery concern.
+        """
+        from src.parsing.keyspace import SchemaAwareKeyspace
+
+        indexer = _make_indexer()
+        schema = "OFSERM"
+        fn_name = "FN_PRECIOUS"
+        src = (
+            f"CREATE OR REPLACE FUNCTION {schema}.{fn_name} AS "
+            f"BEGIN NULL; END;"
+        )
+
+        # Existing approved doc — a previously-good description we MUST
+        # not destroy.
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "Existing real W122a description.",
+            "source_hash": "differenthash",  # so we don't skip via cache
+        })
+
+        graph_key = SchemaAwareKeyspace.graph_key(schema, fn_name)
+        graph_redis = MagicMock()
+        graph_redis.keys = MagicMock(return_value=[graph_key.encode()])
+
+        sentinel = {
+            "description": "(indexing failed: LengthFinishReasonError)",
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+
+        with patch(
+            "src.agents.indexer.discovered_schemas", return_value=[schema],
+        ), patch(
+            "src.agents.indexer.get_raw_source", return_value=[src],
+        ), patch.object(
+            indexer, "_generate_description_with_validation",
+            new=AsyncMock(return_value=sentinel),
+        ), patch.object(
+            indexer, "_get_embedding", new=AsyncMock(),
+        ) as get_emb, patch.object(
+            indexer, "_build_function_to_module_map", return_value={},
+        ), patch.object(
+            indexer, "_build_function_to_description_map", return_value={},
+        ):
+            result = await indexer.index_all_loaded(
+                graph_redis_client=graph_redis, force=True,
+            )
+
+        # No embedding call (sentinel → guard short-circuit).
+        get_emb.assert_not_called()
+        # No upsert_function call either — the guard preserved the
+        # existing approved doc by NOT writing anything.
+        indexer._vector_store.upsert_function.assert_not_called()
+        # The function counts as an error (the run summary still
+        # reflects the LLM failure honestly) but the doc state is
+        # preserved.
+        per_schema = result["results"][schema]
+        assert per_schema["errors"] == 1
+        assert per_schema["indexed"] == 0
+        # The error_details message should flag preservation.
+        err = per_schema["error_details"][0]
+        assert "preserved" in err["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Targeted-retry path: index_all_loaded(only_failed=True) filters to
+# status=failed docs only.
+#
+# W122-recovery's retry of the 86 LengthFinishReasonError failures must
+# NOT touch the 247 already-approved docs. The filter narrows the
+# candidate set at the schema-scan stage so no source-read / LLM call
+# is ever made against an approved doc during the retry.
+# ---------------------------------------------------------------------------
+
+class TestOnlyFailedSelection:
+    @pytest.mark.asyncio
+    async def test_only_failed_narrows_to_failed_docs(self):
+        """only_failed=True must filter the candidate set to functions
+        whose existing vector doc has status=failed. Approved docs and
+        functions without an existing doc are excluded.
+        """
+        from src.parsing.keyspace import SchemaAwareKeyspace
+
+        indexer = _make_indexer()
+        schema = "OFSERM"
+
+        # Three functions: one failed, one approved, one with no doc.
+        # only_failed must reduce this to the single failed one.
+        fn_failed = "FN_TARGET_FAILED"
+        fn_approved = "FN_LEAVE_ALONE_APPROVED"
+        fn_missing = "FN_NEVER_SEEN"
+        src_template = (
+            "CREATE OR REPLACE FUNCTION OFSERM.{} AS BEGIN NULL; END;"
+        )
+
+        graph_keys = [
+            SchemaAwareKeyspace.graph_key(schema, fn).encode()
+            for fn in (fn_failed, fn_approved, fn_missing)
+        ]
+        graph_redis = MagicMock()
+        graph_redis.keys = MagicMock(return_value=graph_keys)
+
+        # Per-function existing-doc state.
+        doc_state = {
+            fn_failed: {"status": "failed",
+                        "description": "(indexing failed: LengthFinishReasonError)",
+                        "source_hash": "sh1"},
+            fn_approved: {"status": "approved",
+                          "description": "A real W122a description.",
+                          "source_hash": "sh2"},
+            fn_missing: None,
+        }
+
+        async def fake_get_doc(s, fn):
+            return doc_state.get(fn)
+
+        indexer._vector_store.get_function_doc = AsyncMock(
+            side_effect=fake_get_doc,
+        )
+
+        good = {
+            "description": _CLEAN_DESCRIPTION,
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+
+        # Per-fn source loader returns a stub source per fn_name.
+        def fake_raw_source(_client, _schema, fn_name):
+            return [src_template.format(fn_name)]
+
+        with patch(
+            "src.agents.indexer.discovered_schemas", return_value=[schema],
+        ), patch(
+            "src.agents.indexer.get_raw_source", side_effect=fake_raw_source,
+        ), patch.object(
+            indexer, "_generate_description_with_validation",
+            new=AsyncMock(return_value=good),
+        ) as gen, patch.object(
+            indexer, "_get_embedding",
+            new=AsyncMock(return_value=[0.1] * 1536),
+        ), patch.object(
+            indexer, "_build_function_to_module_map", return_value={},
+        ), patch.object(
+            indexer, "_build_function_to_description_map", return_value={},
+        ):
+            result = await indexer.index_all_loaded(
+                graph_redis_client=graph_redis, only_failed=True,
+            )
+
+        # Exactly ONE function was generated — the failed one. The
+        # approved doc and missing-doc function were filtered out
+        # BEFORE the LLM call.
+        assert gen.call_count == 1
+        call = gen.call_args_list[0]
+        # Generated for fn_failed (first positional arg is the function
+        # name).
+        assert call.args[0] == fn_failed
+        per_schema = result["results"][schema]
+        assert per_schema["indexed"] == 1
+        # No "skipped" path needed — the 2 non-targets were dropped at
+        # the filter stage, not counted as skipped.
+        assert per_schema["skipped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_only_failed_with_empty_failed_cohort_is_a_no_op(self):
+        """only_failed=True against a corpus with zero failed docs must
+        not touch anything — defensive against re-running the recovery
+        command after recovery is already complete.
+        """
+        from src.parsing.keyspace import SchemaAwareKeyspace
+
+        indexer = _make_indexer()
+        schema = "OFSERM"
+        fn = "FN_ALL_GOOD"
+        graph_redis = MagicMock()
+        graph_redis.keys = MagicMock(
+            return_value=[SchemaAwareKeyspace.graph_key(schema, fn).encode()],
+        )
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "A good description.",
+            "source_hash": "ok",
+        })
+
+        with patch(
+            "src.agents.indexer.discovered_schemas", return_value=[schema],
+        ), patch(
+            "src.agents.indexer.get_raw_source",
+            return_value=["CREATE OR REPLACE FUNCTION OFSERM.FN_ALL_GOOD AS BEGIN NULL; END;"],
+        ), patch.object(
+            indexer, "_generate_description_with_validation",
+            new=AsyncMock(),
+        ) as gen, patch.object(
+            indexer, "_get_embedding", new=AsyncMock(),
+        ) as get_emb, patch.object(
+            indexer, "_build_function_to_module_map", return_value={},
+        ), patch.object(
+            indexer, "_build_function_to_description_map", return_value={},
+        ):
+            result = await indexer.index_all_loaded(
+                graph_redis_client=graph_redis, only_failed=True,
+            )
+
+        gen.assert_not_called()
+        get_emb.assert_not_called()
+        per_schema = result["results"][schema]
+        assert per_schema["indexed"] == 0
+        assert per_schema["errors"] == 0
+        assert per_schema["skipped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_only_failed_false_is_unchanged_baseline(self):
+        """When only_failed=False (default), no filtering. Confirms
+        the new code path doesn't accidentally fire when not requested.
+        """
+        from src.parsing.keyspace import SchemaAwareKeyspace
+
+        indexer = _make_indexer()
+        schema = "OFSERM"
+        fn = "FN_APPROVED"
+        # An approved doc with a DIFFERENT source_hash so the cache
+        # skip doesn't fire — we want to see the regeneration happen.
+        indexer._vector_store.get_function_doc = AsyncMock(return_value={
+            "status": "approved",
+            "description": "Old description.",
+            "source_hash": "different-from-current",
+        })
+        graph_redis = MagicMock()
+        graph_redis.keys = MagicMock(
+            return_value=[SchemaAwareKeyspace.graph_key(schema, fn).encode()],
+        )
+
+        good = {
+            "description": _CLEAN_DESCRIPTION,
+            "tables_read": [],
+            "tables_written": [],
+            "key_columns": [],
+        }
+        with patch(
+            "src.agents.indexer.discovered_schemas", return_value=[schema],
+        ), patch(
+            "src.agents.indexer.get_raw_source",
+            return_value=["CREATE OR REPLACE FUNCTION OFSERM.FN_APPROVED AS BEGIN NULL; END;"],
+        ), patch.object(
+            indexer, "_generate_description_with_validation",
+            new=AsyncMock(return_value=good),
+        ) as gen, patch.object(
+            indexer, "_get_embedding",
+            new=AsyncMock(return_value=[0.1] * 1536),
+        ), patch.object(
+            indexer, "_build_function_to_module_map", return_value={},
+        ), patch.object(
+            indexer, "_build_function_to_description_map", return_value={},
+        ):
+            # only_failed defaults to False; do NOT set it.
+            result = await indexer.index_all_loaded(
+                graph_redis_client=graph_redis, force=True,
+            )
+
+        # Without only_failed, the approved doc IS re-indexed (force=True).
+        gen.assert_called_once()
+        assert result["results"][schema]["indexed"] == 1

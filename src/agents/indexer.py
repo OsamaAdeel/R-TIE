@@ -160,10 +160,31 @@ Respond with ONLY valid JSON — no markdown fences, no surrounding text.
 }
 
 The structured fields (tables_read, tables_written, key_columns) hold
-the COMPLETE lists derived from the source — they back retrieval
+the canonical lists derived from the source — they back retrieval
 recall on column / table names that the 150-word description prose
 deliberately omits. Only the description string is bound by the
 150-word ceiling.
+
+STRUCTURED-FIELD ARRAY CAP — STRICT
+Each of `tables_read`, `tables_written`, `key_columns` MUST contain
+AT MOST 30 entries. When the source has more than 30 of any one
+category, keep the 30 MOST DISTINCTIVE — drop the generic /
+boilerplate names first. Drop in this order:
+  1. Generic surrogate-key columns (N_*_SKEY, N_*_ID) unless the SKEY
+     is the function's specific output.
+  2. Standard audit / batch columns (FIC_MIS_DATE, N_RUN_SKEY,
+     V_BATCH_ID, V_RUN_ID, N_RUN_EXECUTION_ID, V_TASK_ID).
+  3. Standard timestamp / created-by columns (N_CREATED_BY_USER_SKEY,
+     D_CREATED_DATE, V_CREATED_BY, V_LAST_MODIFIED_BY,
+     D_LAST_MODIFIED_DATE).
+  4. Foreign-key columns that just identify a join target without
+     carrying business semantics specific to THIS function.
+Keep: business-meaningful identifiers (asset-class codes, threshold
+columns, characteristic flags, rate / amount columns specific to the
+function's purpose, regulatory metric columns).
+
+This cap is an output-VOLUME constraint only — the field shapes
+(arrays of uppercase string identifiers) are unchanged.
 """
 
 
@@ -424,28 +445,29 @@ class IndexerAgent:
                     desc_result
                 )
                 if not is_valid:
-                    logger.error(
-                        "W93 validation rejected %s:%s (%s); marking failed "
-                        "and skipping embedding | correlation_id=%s",
-                        fn_schema or "?", fn_name, reject_reason,
-                        correlation_id,
-                    )
-                    await self._vector_store.upsert_function(
+                    # W122-recovery upsert guard: if this was an LLM-call
+                    # sentinel (not a real content-quality rejection) and
+                    # an existing approved doc is in place, the guard
+                    # preserves the existing description + embedding.
+                    outcome = await self._apply_validation_rejection(
+                        schema=fn_schema or "",
                         module=module_name,
                         function_name=fn_name,
-                        description=desc_result.get("description", ""),
-                        embedding=None,
-                        tables_read=desc_result.get("tables_read", []),
-                        tables_written=desc_result.get("tables_written", []),
-                        key_columns=desc_result.get("key_columns", []),
+                        desc_result=desc_result,
+                        reject_reason=reject_reason,
                         source_hash=source_hash,
-                        status="failed",
-                        schema=fn_schema,
-                        failure_reason=reject_reason,
+                        correlation_id=correlation_id,
+                    )
+                    err_suffix = (
+                        " (existing approved doc preserved)"
+                        if outcome == "preserved" else ""
                     )
                     errors.append({
                         "name": fn_name,
-                        "error": f"description rejected: {reject_reason}",
+                        "error": (
+                            f"description rejected: {reject_reason}"
+                            f"{err_suffix}"
+                        ),
                     })
                     continue
 
@@ -502,6 +524,7 @@ class IndexerAgent:
         self,
         graph_redis_client,
         force: bool = False,
+        only_failed: bool = False,
     ) -> Dict[str, Any]:
         """Index every function the loader populated, across every schema.
 
@@ -579,6 +602,29 @@ class IndexerAgent:
                 "index_all_loaded: %d function(s) to consider for %s",
                 len(function_names), schema,
             )
+
+            # W122-recovery: when only_failed is set, narrow the
+            # candidate set to functions whose existing vector doc is
+            # in status=failed. The 247 already-approved docs are
+            # skipped here BEFORE the source read so no work is wasted
+            # on them. Functions with no existing doc are excluded too
+            # (only_failed is intended for targeted retry of a
+            # known-failed cohort, not bootstrap).
+            if only_failed:
+                pre_filter = len(function_names)
+                filtered: List[str] = []
+                for fn_name in function_names:
+                    existing = await self._vector_store.get_function_doc(
+                        schema, fn_name,
+                    )
+                    if existing and existing.get("status") == "failed":
+                        filtered.append(fn_name)
+                function_names = filtered
+                logger.info(
+                    "index_all_loaded[only_failed]: %s narrowed %d -> "
+                    "%d functions (skipped approved + missing-doc)",
+                    schema, pre_filter, len(function_names),
+                )
 
             for fn_name in function_names:
                 try:
@@ -665,30 +711,30 @@ class IndexerAgent:
                         desc_result
                     )
                     if not is_valid:
-                        logger.error(
-                            "W93 validation rejected %s:%s (%s); marking "
-                            "failed and skipping embedding | "
-                            "correlation_id=%s",
-                            schema, fn_name, reject_reason, correlation_id,
-                        )
-                        await self._vector_store.upsert_function(
+                        # W122-recovery upsert guard: see
+                        # _apply_validation_rejection. LLM-call
+                        # sentinels are treated as transient and never
+                        # destroy an existing approved doc; real
+                        # content rejections still mark failed.
+                        outcome = await self._apply_validation_rejection(
+                            schema=schema,
                             module=module_tag,
                             function_name=fn_name,
-                            description=desc_result.get("description", ""),
-                            embedding=None,
-                            tables_read=desc_result.get("tables_read", []),
-                            tables_written=desc_result.get(
-                                "tables_written", []
-                            ),
-                            key_columns=desc_result.get("key_columns", []),
+                            desc_result=desc_result,
+                            reject_reason=reject_reason,
                             source_hash=source_hash,
-                            status="failed",
-                            schema=schema,
-                            failure_reason=reject_reason,
+                            correlation_id=correlation_id,
+                        )
+                        err_suffix = (
+                            " (existing approved doc preserved)"
+                            if outcome == "preserved" else ""
                         )
                         errors.append({
                             "name": fn_name,
-                            "error": f"description rejected: {reject_reason}",
+                            "error": (
+                                f"description rejected: {reject_reason}"
+                                f"{err_suffix}"
+                            ),
                         })
                         continue
 
@@ -1061,6 +1107,92 @@ class IndexerAgent:
         if len(description) < DESCRIPTION_MIN_LENGTH:
             return False, "too_short"
         return True, ""
+
+    async def _apply_validation_rejection(
+        self,
+        *,
+        schema: str,
+        module: str,
+        function_name: str,
+        desc_result: Dict[str, Any],
+        reject_reason: str,
+        source_hash: str,
+        correlation_id: Optional[str],
+    ) -> str:
+        """W122-recovery upsert guard. Returns ``"preserved"`` or ``"failed_written"``.
+
+        Pre-guard behavior: when W93 rejected a description, the
+        indexer ALWAYS upserted with ``status="failed"``,
+        ``embedding=None``, and the sentinel description text —
+        destroying any existing approved doc's description + embedding
+        in the process. A transient OpenAI failure (RateLimitError,
+        LengthFinishReasonError) thus converted working KNN-retrievable
+        docs into KNN-dark docs, as the prior W122d attempt did at
+        full corpus scale.
+
+        With the guard: an LLM-call sentinel (``reject_reason ==
+        "sentinel_prefix"``) is treated as transient. If the existing
+        doc is healthy (``status == "approved"`` and its description
+        is itself not a sentinel), the upsert is SKIPPED entirely —
+        the existing description + embedding are preserved verbatim.
+        The errors counter still increments so the run summary
+        accurately reflects the LLM failure; only the doc state is
+        protected.
+
+        Real content rejections (``reject_reason == "too_short"`` or
+        any future class) are NOT guarded — those represent the
+        generator returning a genuinely-bad description for which
+        marking the doc failed is the correct response.
+
+        The ``status == "approved"`` proxy for "has a valid embedding"
+        relies on the indexer's invariant: only the success-path
+        upsert at the bottom of each indexing loop ever writes
+        ``status="approved"``, and that path always passes a real
+        embedding. The W93-rejection upsert (this code path)
+        unconditionally writes ``status="failed"`` with
+        ``embedding=None``. So the two states are bijective with
+        embedding presence.
+        """
+        existing = None
+        if reject_reason == "sentinel_prefix":
+            existing = await self._vector_store.get_function_doc(
+                schema, function_name,
+            )
+            if (
+                existing
+                and existing.get("status") == "approved"
+                and not (existing.get("description") or "").startswith(
+                    INDEXING_FAILED_SENTINEL_PREFIX
+                )
+            ):
+                logger.warning(
+                    "W122 upsert guard: LLM-call failure (sentinel) for "
+                    "%s:%s would have overwritten an existing approved "
+                    "doc; preserving prior description + embedding. "
+                    "correlation_id=%s",
+                    schema, function_name, correlation_id,
+                )
+                return "preserved"
+
+        logger.error(
+            "W93 validation rejected %s:%s (%s); marking failed and "
+            "skipping embedding | correlation_id=%s",
+            schema, function_name, reject_reason, correlation_id,
+        )
+        await self._vector_store.upsert_function(
+            module=module,
+            function_name=function_name,
+            description=desc_result.get("description", ""),
+            embedding=None,
+            tables_read=desc_result.get("tables_read", []),
+            tables_written=desc_result.get("tables_written", []),
+            key_columns=desc_result.get("key_columns", []),
+            source_hash=source_hash,
+            status="failed",
+            schema=schema,
+            failure_reason=reject_reason,
+        )
+        return "failed_written"
 
     async def _get_embedding(self, text: str) -> List[float]:
         """Generate an embedding vector for the given text.
