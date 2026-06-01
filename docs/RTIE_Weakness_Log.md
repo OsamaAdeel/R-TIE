@@ -995,9 +995,9 @@ The bug was load-bearing for COLUMN_LOGIC (top_k=15) and VARIABLE_TRACE (top_k=2
 
 ---
 
-## W147. W76 source-body resolver returns false-negative when anchor-injection fires for a function outside natural KNN top-K — PLANNED
+## W147. W49 PARTIAL_SOURCE_INDEXED false-negative on named-but-unretrieved functions — FIXED 2026-06-01
 
-**Status:** Logged 2026-06-01 during W122 close-out. Separable from W122 / W146; address in a follow-up branch.
+**Status:** Logged 2026-06-01 during W122 close-out; diagnosed + fixed 2026-06-01 on `fix/w147-anchor-source-resolver`. The original framing (a divergent "W76 source-body lookup path") was **refuted** during diagnosis — see corrected root cause below.
 
 **Failure surface.** E3 ("What feeds data into FN_G_TEST_CSTM?") in the 2026-06-01 post-W122 quality harness returned an `UNVERIFIED` body that read **"FN_G_TEST_CSTM — Source Not Currently Indexed"**, with four warnings: `NAMED_FUNCTION_NOT_RETRIEVED`, `GROUNDING-HIGH`, `GROUNDING-ANCHOR-MISMATCH-HIGH`, `PARTIAL_SOURCE_INDEXED`. The `PARTIAL_SOURCE_INDEXED` warning is a **false negative** — direct Redis probe confirms the function IS fully indexed:
 
@@ -1009,18 +1009,48 @@ graph:OFSERM:FN_G_TEST_CSTM         STRING  57416 B   (graph payload present)
 
 Description text begins *"Runs a customer-granularity test by loading customer limit totals and aggregating advances, then applying parameter-driven retail granularity and RRP threshold checks for cstm granularity validation."* — a quality W122a description.
 
-**Root cause.** The W76 anchor-injection path's source-body lookup uses a different code path than natural retrieval. When the query NAMES a function (e.g. "what feeds data into FN_G_TEST_CSTM?") and that function is not in the natural KNN top-K, W76 injects it by name; the source-body fetch on the W76 path then returns empty / false-negative even though Redis has the body. The same warning fired at baseline for `FN_LOAD_OPS_RISK_DATA` in OFSMDM (E4 query), so this code path has been defective pre-W122 — but it surfaced for far fewer queries because the old keyword-stuffed descriptions ranked anchor-bearing functions high enough in natural KNN that the W76 fallback rarely fired.
+**Root cause (corrected during diagnosis).** There is no divergent "W76 source-body path" — `fetch_multi_logic` (`metadata_interpreter.py:390`) is the single source loader and reads `graph:source:<schema>:<fn>` identically for natural and injected entries. The real defect is an **asymmetric availability check** in the W49 detector, exposed by a **retrieval-coverage gap**:
+
+- `detect_partial_source_function` (`logic_explainer.py:439`) judged **body-absence** from the in-memory `multi_source` (retrieval-derived) but confirmed **metadata-presence** directly against Redis (`graph:meta:`). The two consult different sources of truth; the body check never touched `graph:source:`.
+- For a query that names a function in **plain prose** ("what feeds data into FN_G_TEST_CSTM?"), neither `w76_anchor` (requires an `In/Inside/Within <Fn>` prefix) nor `bi_routing` (requires a CAP code) is set — so W95's `ensure_anchor_in_search_results` **no-ops** and never injects the function. When the function also falls outside the natural KNN top-K, its body is never loaded into `multi_source`. The detector then sees "no body in multi_source + metadata in Redis" and falsely fires `PARTIAL_SOURCE_INDEXED` even though `graph:source:OFSERM:FN_G_TEST_CSTM` (~49 KB / 1014 lines) exists.
+
+The same warning fired at baseline for `FN_LOAD_OPS_RISK_DATA` in OFSMDM (E4 query, identical plain-prose form), so the asymmetry has been latent pre-W122 — it surfaced for far fewer queries because the old keyword-stuffed descriptions ranked anchor-bearing functions high enough in natural KNN that they stayed in `multi_source`.
 
 **Important — not new rot, an exposure shift.** W122a's name-redundancy removal moved more functions out of natural KNN top-K (the cost side of finding (b) on the W122 entry above), so the W76 fallback now fires more often. That exposed the latent defective path. The W122/W146 cluster did not introduce this bug; it made an existing bug observable on a wider query surface.
 
 **In trust-contract terms, E3 IMPROVED.** Baseline: `VERIFIED` badge on a body that fabricated December gating on `FN_G_TEST_CSTM` (HOLLOW VERIFIED, the canonical failure mode the harness was built to catch). Post-W122: `UNVERIFIED` badge on an honest "source not indexed" decline. The user gets less useful content but the badge is now accurate. This is why W147 does not block the W122/W146 merge.
 
-**Fix direction (not implemented).** Either (a) unify the W76 source-body lookup with the natural-retrieval source-body lookup so both paths hit the same `graph:source:<schema>:<fn>` cache, or (b) add an explicit Redis-presence check at the W76 anchor-injection entry point and fall back to natural-retrieval fetch when the body is present but the W76 path missed it. Option (b) is the smaller blast radius.
+**Fix applied — A+B.** B is the real fix (load the body so the explainer answers); A is the backstop (the detector can never again confuse "not retrieved" with "not indexed"). A alone was forbidden — it would suppress the warning while leaving the body out, turning an honest decline into silent sibling-function speculation, which is exactly what W49 exists to prevent.
 
-**Backlog gate.** Re-prioritise W147 if:
+- **A — storage-backed body check** (`logic_explainer.py`, `detect_partial_source_function`). Before returning True, when metadata exists but retrieval came back thin, also read `get_raw_source(redis, schema, fn)` (`graph:source:<schema>:<fn>`). If the **stored** body ≥ `_PARTIAL_SOURCE_MIN_CHARS`, return False — "indexed but not retrieved" is not partial-source. Body-presence is now keyed on the same artifact whose genuine absence defines the W49 condition. On a Redis read error it falls open to the pre-W147 `True` (never suppresses a real decline).
+- **B — inject metadata-verified named functions** (`anchor_resolution.py` `ensure_named_functions_in_search_results`, wired in `main.py` right after W95's `ensure_anchor_in_search_results`, before `fetch_multi_logic`). Scans `raw_query` with the existing **W58-gated** `extract_function_candidates` and injects any candidate that (a) passes `function_exists_in_graph` and (b) is missing from `search_results`, using the W95 sentinel shape so `fetch_multi_logic` resolves the schema and loads the body. Phantom / unverified names are never injected; `redis_client=None` fails closed. Appended (not prepended) so a W95 anchor keeps position-0 primacy; W98 layer-4 (`raw_query_scan`) + W97 `promote_anchor_to_front` then lift the loaded function to `multi_source[0]`, which W108 truncation always retains.
 
-- A second function class (beyond E3's `FN_G_TEST_CSTM` and the pre-existing E4 `FN_LOAD_OPS_RISK_DATA`) starts surfacing PARTIAL_SOURCE_INDEXED on a function that Redis demonstrably indexes, or
-- An end-user reports the "source not currently indexed" decline on a query they expected to work.
+**0/333 scan finding.** A read-only sweep of every `graph:meta:*` key (2026-06-01) found **0 of 333** functions with metadata but a missing/short `graph:source:` body — i.e. every indexed function has a real body. So in the current corpus W49 should essentially never fire, and every production `PARTIAL_SOURCE_INDEXED` was this retrieval-coverage false positive. (If a genuinely partial function is ever indexed, A still fires the decline correctly — covered by unit tests `test_partial_source_true_when_body_genuinely_missing` / `_when_stored_body_below_threshold`.)
+
+**E3 live result (post-fix).** `PARTIAL_SOURCE_INDEXED` gone; `functions_analyzed[0] = FN_G_TEST_CSTM`; 367 source citations; grounded body with real line references. Badge is now driven by W57 grounding rather than the false partial-source decline — see W148 below for the calendar-fabrication warning that became reachable.
+
+**Files.** `src/agents/logic_explainer.py` (A), `src/agents/anchor_resolution.py` + `src/main.py` (B), tests `tests/unit/agents/test_grounding.py` (+3) and `tests/unit/agents/test_w147_named_function_injection.py` (new, 6). Unit: 1276 passed / 1 pre-existing xfail.
+
+---
+
+## W148. Explainer fabricates December calendar gating on FN_G_TEST_CSTM — PLANNED
+
+**Status:** Logged 2026-06-01 during W147 close-out. **NOT caused by W147** — see "Exposure, not regression" below.
+
+**Surface.** Post-W147, E3 ("What feeds data into FN_G_TEST_CSTM?") returns a grounded body (367 citations, function at `functions_analyzed[0]`) but the explainer asserts *"This entire function ONLY runs when the reporting month is December."* W57's W137-hardened calendar gate (Check 5) correctly flags it:
+
+```
+GROUNDING-HIGH: response contains template phrase 'only runs when the reporting month is
+december' but cited source for 'FN_G_TEST_CSTM' does not support it
+```
+
+Badge: `UNVERIFIED` / 0.4. **The detector is working** — this is the W57/W83b/W137 calendar-fabrication family doing its job (same family as the CAP973 canary). The open item is the **generation side**: the explainer keeps fabricating December gating for this function.
+
+**Confirmed wholesale fabrication (not over-generalization).** A read-only scan of `graph:source:OFSERM:FN_G_TEST_CSTM` (1014 lines) finds **zero** `DECEMBER` / `MONTH` / `MTH` / `QUARTER` / `EXTRACT` references and no `TO_CHAR`-based month gate (`= 12` appears once, in unrelated arithmetic). The source has **no calendar gate at all** — the December claim is invented, not an over-stated real reference. This is precisely the calendar-fabrication generation class tracked by the **W138 candidate** ("designed to run when…" passive construction) and adjacent to **W83b / W139**; the live body uses both the passive *"is designed to … under specific conditions, primarily when the reporting month is December"* and the explicit *"ONLY runs when … December"* phrasings.
+
+**Exposure, not regression.** Pre-W147 this query declined with `PARTIAL_SOURCE_INDEXED` before the body ever reached W57, so the fabrication was never evaluated on the real body. Earlier still (baseline, pre-W122), the same fabrication shipped as **HOLLOW VERIFIED** (see W147 trust-contract note). W147 did not introduce the fabrication; it made the body reachable so W57 now evaluates and correctly rejects it. Net trust-contract direction is positive — the fabrication is now caught rather than shipped.
+
+**Follow-up question (generation-side).** Why does the explainer fabricate a December gate for `FN_G_TEST_CSTM` specifically when the source has no calendar logic? Candidate causes: (a) sibling functions in `multi_source` (the regulatory-capital STD_ACCT_HEAD cluster) carry December gating and the LLM bleeds it onto the anchor; (b) a prompt-level priming toward Basel/regulatory December-reporting framing. Triage under the W83b/W138 calendar-fabrication thread, not as a W147 reopen.
 
 ---
 

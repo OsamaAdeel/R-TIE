@@ -40,6 +40,7 @@ from src.agents.orchestrator import (
 from src.agents.anchor_resolution import (
     apply_w70_anchor,
     ensure_anchor_in_search_results,
+    ensure_named_functions_in_search_results,
     promote_anchor_to_front,
     resolve_search_query,
 )
@@ -1284,6 +1285,21 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # `results` reference so the downstream stage-event preview
             # and fn_names match state["search_results"].
             ensure_anchor_in_search_results(state)
+
+            # W147: W95 above only injects when an explicit anchor fired
+            # (W76 "In <Fn>," prefix / alias recovery, or BI routing). A
+            # plain-prose query that names a function ("What feeds data
+            # into FN_G_TEST_CSTM?") sets neither anchor, so when the
+            # named function lands outside the vector top-K its body is
+            # never loaded — and the W49 detector then falsely reports
+            # PARTIAL_SOURCE_INDEXED despite graph:source: holding the
+            # body. Inject any graph-verified named function still missing
+            # from search_results so fetch_multi_logic loads it (W58 gates
+            # block phantom names; runs AFTER W95 so the anchor keeps
+            # position-0 primacy — W97 owns final multi_source prominence).
+            ensure_named_functions_in_search_results(
+                state, redis_client=_graph_redis
+            )
             results = state["search_results"]
 
             # Stage 3: Fetch source code
