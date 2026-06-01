@@ -356,6 +356,20 @@ class VectorStore:
                     "function_name", self.SCHEMA_FIELD, "module", "description",
                     "tables_read", "tables_written", "key_columns", "score",
                 )
+                # W146: explicit paging override.
+                # Pre-W146 this Query() was built without .paging(), so
+                # RediSearch's default LIMIT (offset 0, num 10) applied
+                # regardless of the top_k value interpolated into the KNN
+                # clause. Callers passing top_k=35 silently received only
+                # the top 10. Invisible pre-W122a because function-name-
+                # repetition put the named target at rank ≤10 reliably;
+                # W122a's name-redundancy removal exposed it (the C1
+                # canary, "How does FN_LOAD_OPS_RISK_DATA work?", placed
+                # the target function at KNN rank #45 and the 10-cap was
+                # hiding it from the explainer entirely — W76 anchor
+                # injection was compensating). Honoring top_k here lets
+                # the downstream cascade see all requested candidates.
+                .paging(0, top_k)
                 .dialect(2)
             )
             results = await self._client.ft(self.INDEX_NAME).search(
