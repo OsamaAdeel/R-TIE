@@ -6,6 +6,109 @@ Built at Techlogix for analysts validating Basel III/IV capital calculations, wh
 
 ---
 
+## Installation
+
+RTIE runs as a bare-metal Python backend plus a Vite frontend, with Redis and
+PostgreSQL provided as local Docker containers. There is no Docker image for the
+app itself — you run it directly from source. All commands assume `cwd = RTIE/`.
+
+**Prerequisites**
+- Python 3.11+
+- Node.js 18+ and npm (for the frontend)
+- Docker Desktop (for the Redis + PostgreSQL containers)
+- An Oracle OFSAA instance with OFSMDM (and, for regulatory queries, OFSERM)
+  reachable with read-only credentials
+- An OpenAI API key (required for embeddings even if you route generation to Claude)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/ToheedAsghar/R-TIE.git
+cd R-TIE/RTIE
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python -m venv .venv
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# macOS / Linux:
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+# or, if you use Poetry:
+poetry install && poetry shell
+```
+
+### 4. Configure environment variables
+
+```bash
+cp .env.example .env.dev
+```
+
+Edit `.env.dev` and fill in at least:
+- `ORACLE_HOST` / `ORACLE_PORT` / `ORACLE_SID` / `ORACLE_USER` / `ORACLE_PASSWORD`
+- `OPENAI_API_KEY`
+- `POSTGRES_PASSWORD`
+
+Leave `REDIS_HOST` / `POSTGRES_HOST` as `localhost` for this bare-metal workflow.
+See the [Key environment variables](#key-environment-variables) table below for the full list.
+
+### 5. Start the data services (Redis + PostgreSQL)
+
+```bash
+docker compose up -d redis postgres
+```
+
+This brings up two containers — `rtie-redis` (Redis Stack, with RediSearch) on
+`:6379` and `rtie-postgres` on `:5432`. The app backend/frontend are **not**
+started by Docker; you run those directly in the next steps.
+
+### 6. Index the corpus
+
+```bash
+python cli.py index --force
+```
+
+This parses the PL/SQL corpus, generates and embeds function descriptions, and
+builds the column and business-identifier indexes in Redis. Run it once on first
+setup and again after adding modules.
+
+### 7. Run the backend
+
+```bash
+python run.py
+```
+
+The backend serves on <http://localhost:8000> (health check at
+<http://localhost:8000/health>).
+
+> **Start the backend with `python run.py`, never `uvicorn src.main:app` directly.**
+> `run.py` sets `WindowsSelectorEventLoopPolicy` before importing uvicorn; the
+> psycopg async driver requires the selector loop, and Windows' default proactor
+> loop crashes it. The launcher is harmless on Linux.
+
+### 8. Run the frontend
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The chat UI is then at <http://localhost:5173>.
+
+A clean-machine Windows walkthrough lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md).
+
+---
+
 ## The problem it solves
 
 A regulatory analyst at a bank needs to defend a capital number to a regulator. The number was produced by a long chain of OFSAA PL/SQL functions writing into staging and fact tables, some of it loaded by external ETL rather than computed at all. Reading that pipeline by hand is slow and error-prone, and an LLM that *sounds* authoritative but invents a function name or a line range is actively dangerous in this setting.
@@ -155,44 +258,7 @@ The warning prefixes are meaningful on their own:
 
 ---
 
-## Getting it running
-
-The project lives in the `RTIE/` subdirectory of the repo; all commands assume `cwd = RTIE/`. You need an Oracle OFSAA instance with OFSMDM (and, for regulatory queries, OFSERM) reachable with read-only credentials, plus an OpenAI API key (required for embeddings even if you route generation to Claude).
-
-### Docker (recommended)
-
-```bash
-git clone https://github.com/ToheedAsghar/R-TIE.git
-cd R-TIE/RTIE
-cp .env.example .env.dev
-# Edit .env.dev: ORACLE_HOST/PORT/SID/USER/PASSWORD, OPENAI_API_KEY, POSTGRES_PASSWORD.
-docker compose up -d --build
-docker compose logs -f rtie-app-backend   # wait for /health to return 200
-```
-
-The compose file pulls a pre-warmed Redis image (`ghcr.io/toheedasghar/r-tie-redis-prewarmed:latest`) that ships the indexed corpus baked into `/data/dump.rdb`, so a teammate's first boot completes in seconds. Opt out with `RTIE_REDIS_IMAGE=redis/redis-stack:latest` (plus `docker compose down -v` to wipe the volume) to exercise the cold-start indexer, which re-parses the corpus and rebuilds the indexes in roughly 5-30 minutes. Four containers come up: `rtie-app-backend` (FastAPI + LangGraph), `rtie-app-frontend` (nginx-served Vite build), `rtie-redis` (Redis Stack), and `rtie-postgres`.
-
-After startup: the chat UI is at <http://localhost:5173>, the backend health check at <http://localhost:8000/health>.
-
-If Oracle runs on the same laptop as the containers, set `ORACLE_HOST=host.docker.internal` (Windows/macOS) - not `localhost`. The compose file overrides `REDIS_HOST` and `POSTGRES_HOST` to the container DNS names, so those two values in `.env.dev` are ignored under compose (and are correct as `localhost` for bare-metal runs).
-
-### Manual / bare-metal
-
-For iterating on backend code without rebuilding images. Python 3.11+ is required.
-
-```bash
-pip install -r requirements.txt          # or: poetry install && poetry shell
-cp .env.example .env.dev                  # fill in ORACLE_*, OPENAI_API_KEY, etc.
-docker compose up -d redis postgres       # data services only
-python cli.py index --force               # one-time: parse, describe, embed, index
-python run.py                             # backend on http://localhost:8000
-# in a second terminal:
-cd frontend && npm install && npm run dev # UI on http://localhost:5173
-```
-
-**Start the backend with `python run.py`, never `uvicorn src.main:app` directly.** `run.py` sets `WindowsSelectorEventLoopPolicy` before importing uvicorn; the psycopg async driver requires the selector loop, and Windows' default proactor loop crashes it. The launcher is harmless on Linux. To restart on Windows, find the specific PID (`netstat -ano | findstr :8000`) and kill only it - never `taskkill /F /IM python.exe`, which kills every Python process on the machine.
-
-### Key environment variables
+## Key environment variables
 
 Loaded from `.env.{ENVIRONMENT}` (`dev` by default → `.env.dev`); see `.env.example` for the full template.
 
@@ -207,8 +273,6 @@ Loaded from `.env.{ENVIRONMENT}` (`dev` by default → `.env.dev`); see `.env.ex
 | `REDIS_HOST` / `REDIS_PORT` | Redis Stack |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | LangGraph checkpointer |
 | `LANGSMITH_*` | optional tracing |
-
-A clean-machine Windows walkthrough lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md).
 
 ---
 
