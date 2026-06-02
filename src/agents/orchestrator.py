@@ -1552,3 +1552,59 @@ def build_unrecognized_term_response(
         "explanation": {"markdown": message, "summary": message[:200]},
         "correlation_id": correlation_id,
     }
+
+
+def build_near_twin_hedge_response(
+    anchor_function: str,
+    siblings: List[str],
+    schemas_searched: List[str],
+    correlation_id: str,
+) -> Dict[str, Any]:
+    """Assemble the W150 near-twin disambiguation hedge payload.
+
+    Deterministic markdown — no LLM call. Emitted (via
+    :func:`main._stream_near_twin_hedge_response`) INSTEAD of a confident
+    explainer body when :func:`anchor_resolution.detect_near_twin_ambiguity`
+    fires: the described query landed in a tight cluster of near-identical
+    functions the embedding can't separate, so RTIE hedges UNVERIFIED rather
+    than confidently describing the wrong twin. Mirrors the W87 unrecognized-
+    term payload shape so the existing SSE emitter and the frontend's generic
+    UNVERIFIED render path (badge + explanation.markdown) handle it with no
+    frontend change.
+    """
+    sib_lines = "\n".join(f"- `{s}`" for s in siblings)
+    parts: List[str] = [
+        f"## Closest match: `{anchor_function}`",
+        "",
+        "This function sits in a tight cluster of near-identical functions, and "
+        "your description didn't name one specifically. I can't confidently pick "
+        "between these closely-related candidates:",
+        "",
+        sib_lines,
+        "",
+        "### What you can do",
+        "",
+        f"Re-ask naming the exact function — e.g. `In {anchor_function}, ...` — "
+        "for a verified trace.",
+    ]
+    message = "\n".join(parts)
+    n_sib = max(len(siblings) - 1, 0)
+    return {
+        "type": "near_twin_disambiguation",
+        "status": "unverified",
+        "anchor_function": anchor_function,
+        "near_twin_siblings": list(siblings),
+        "validated": False,
+        "badge": "UNVERIFIED",
+        "confidence": 0.2,
+        "source_citations": [],
+        "warnings": [
+            "W150-NEAR-TWIN-AMBIGUOUS: described query matched a tight near-twin "
+            f"cohort ({anchor_function} + {n_sib} sibling(s)); hedged rather than "
+            "answering confidently"
+        ],
+        "schemas_searched": list(schemas_searched) if schemas_searched else [],
+        "message": message,
+        "explanation": {"markdown": message, "summary": message[:200]},
+        "correlation_id": correlation_id,
+    }

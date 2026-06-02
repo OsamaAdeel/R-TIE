@@ -34,11 +34,13 @@ from src.agents.orchestrator import (
     find_similar_function_names,
     build_function_not_found_response,
     build_unrecognized_term_response,
+    build_near_twin_hedge_response,
     resolve_bi_to_function,
     _detect_unrecognized_term_query,
 )
 from src.agents.anchor_resolution import (
     apply_w70_anchor,
+    detect_near_twin_ambiguity,
     ensure_anchor_in_search_results,
     ensure_named_functions_in_search_results,
     promote_anchor_to_front,
@@ -1340,6 +1342,38 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # deterministic on a fixed state).
             with stage_timer("w97_promote_anchor", correlation_id):
                 w70_anchor = apply_w70_anchor(state)
+                # W150: near-twin disambiguation hedge. Fires ONLY on the
+                # described-not-named L5 path (w70_anchor.source ==
+                # "semantic_top1") when the two closest genuine cosine
+                # candidates form a tight near-twin cohort the embedding can't
+                # separate (margin < 0.05). W149 is the prerequisite — it
+                # excludes the score=0.0 expansion sentinel so the margin is
+                # meaningful. When it fires, hedge UNVERIFIED with the top-5
+                # cohort siblings instead of confidently describing the wrong
+                # twin; short-circuit the explainer (mirrors the W87 gate).
+                # NAMED queries (W76/BI/W147/raw_query_scan) never reach this —
+                # their anchor source is not "semantic_top1".
+                w150_hedge = detect_near_twin_ambiguity(state, w70_anchor)
+                if w150_hedge:
+                    logger.info(
+                        "W150 near-twin hedge fired: anchor=%s margin=%.4f "
+                        "siblings=%d | correlation_id=%s",
+                        w150_hedge["top1"], w150_hedge["margin"],
+                        len(w150_hedge["siblings"]), correlation_id,
+                    )
+                    w150_payload = build_near_twin_hedge_response(
+                        anchor_function=w150_hedge["top1"],
+                        siblings=w150_hedge["siblings"],
+                        schemas_searched=list(
+                            state.get("schemas_searched", []) or []
+                        ),
+                        correlation_id=correlation_id,
+                    )
+                    async for event in _stream_near_twin_hedge_response(
+                        w150_payload
+                    ):
+                        yield event
+                    return
                 state["multi_source"] = promote_anchor_to_front(
                     state.get("multi_source", {}) or {},
                     w70_anchor,
@@ -2875,6 +2909,37 @@ async def _stream_unrecognized_term_response(payload: Dict[str, Any]):
         "correlation_id": payload.get("correlation_id"),
     }
     yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': stage_message})}\n\n"
+    yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
+    message = payload.get("message") or ""
+    for chunk in _chunk_text(message):
+        yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
+    yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
+
+
+async def _stream_near_twin_hedge_response(payload: Dict[str, Any]):
+    """Yield a W150 near-twin disambiguation hedge as SSE stage/meta/token/done.
+
+    Parallels :func:`_stream_unrecognized_term_response` — UNVERIFIED badge, the
+    system is asking the user to disambiguate, not refusing. The frontend renders
+    badge + explanation.markdown + warnings through its generic ``done`` path
+    (client.js special-cases only ``type=='clarification'``, which this is not),
+    so no frontend change is required. ``functions_analyzed`` carries the cohort
+    siblings so introspection / measurement sees what was offered.
+    """
+    meta = {
+        "type": payload.get("type", "near_twin_disambiguation"),
+        "status": payload.get("status", "unverified"),
+        "badge": payload.get("badge", "UNVERIFIED"),
+        "validated": payload.get("validated", False),
+        "confidence": payload.get("confidence", 0.2),
+        "warnings": payload.get("warnings") or [],
+        "anchor_function": payload.get("anchor_function"),
+        "near_twin_siblings": payload.get("near_twin_siblings") or [],
+        "functions_analyzed": payload.get("near_twin_siblings") or [],
+        "schemas_searched": payload.get("schemas_searched") or [],
+        "correlation_id": payload.get("correlation_id"),
+    }
+    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'classify', 'message': 'Near-twin cluster — disambiguation needed'})}\n\n"
     yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
     message = payload.get("message") or ""
     for chunk in _chunk_text(message):
