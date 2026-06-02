@@ -521,15 +521,31 @@ def _extract_insert_columns(text: str) -> tuple[list[str], list[str]]:
 
     Returns (column_names, select_expressions).
     """
-    # Find the column list between the first pair of parens after INSERT INTO tbl
+    # Find the column list between the first pair of parens after INSERT INTO tbl.
+    # Alias-qualified-INSERT fix: allow an optional table alias between the
+    # table name and the
+    # column-list paren — OFSAA writes "INSERT INTO STG_PRODUCT_PROCESSOR B
+    # (B.FIC_MIS_DATE, B.N_EOP_BAL, ...)". Without the optional `(?:\s+\w+)?`
+    # alias group the regex failed to match entirely and columns came back
+    # empty, so alias-qualified INSERT writes (e.g. POPULATE_PP_FROMGL writing
+    # N_EOP_BAL) were invisible to the whole column index.
     col_match = re.search(
-        r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)',
+        r'INSERT\s+INTO\s+\w+(?:\s+(?!VALUES\b|SELECT\b)\w+)?\s*\(([^)]+)\)',
         text,
         re.IGNORECASE | re.DOTALL,
     )
     columns: list[str] = []
     if col_match:
-        columns = [c.strip() for c in col_match.group(1).split(',')]
+        for c in col_match.group(1).split(','):
+            col = c.strip()
+            # Alias-qualified-INSERT fix: strip an optional table-alias prefix
+            # (e.g. "B.N_EOP_BAL"
+            # -> "N_EOP_BAL"), mirroring _extract_update_set. Take the segment
+            # after the LAST dot so the full column name survives intact.
+            if '.' in col:
+                col = col.split('.')[-1].strip()
+            if col:
+                columns.append(col)
 
     # Find the SELECT clause; skip over any sub-SELECT inside the column list.
     # The main SELECT is the first SELECT that comes after the closing paren of

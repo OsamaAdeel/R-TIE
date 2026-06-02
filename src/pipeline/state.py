@@ -81,6 +81,16 @@ class LogicState(TypedDict):
     # rewritten to point at a function the user named elsewhere in the
     # query. Absent when neither rule fires.
     w76_anchor: dict
+    # Column-provenance routing record. Populated by
+    # orchestrator.apply_column_provenance_anchor when the query names a
+    # known column and that column resolves to one or more WRITER functions
+    # via the graph:index:<schema> column index. Carries
+    # ``{column, writers, writer_functions, original_query_type}``;
+    # anchor_resolution.ensure_column_writers_in_search_results force-includes
+    # ``writer_functions`` into retrieval. Absent when the pass did not fire
+    # (no column named, reader-only column, or an upstream anchor claimed the
+    # query) — the existing classification + retrieval path runs unchanged.
+    column_provenance: dict
     # W70: explainer-anchor diagnostic record. Populated by
     # anchor_resolution.apply_w70_anchor right before the explainer LLM
     # call. Carries the cascade-resolved primary function (function,

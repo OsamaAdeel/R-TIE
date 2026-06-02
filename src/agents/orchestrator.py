@@ -23,7 +23,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
-from src.parsing.store import get_function_graph, get_literal_index
+from src.parsing.store import get_column_index, get_function_graph, get_literal_index
 from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.literals import compile_patterns
 from src.parsing.schema_discovery import discovered_schemas
@@ -435,6 +435,20 @@ class Orchestrator:
             state.get("raw_query", "") or "",
             self._graph_redis_client,
             self._bi_patterns,
+        )
+
+    def apply_column_provenance_anchor(self, state: LogicState) -> LogicState:
+        """Instance-level convenience for the module-level helper.
+
+        Forwards to :func:`apply_column_provenance_anchor` using the
+        injected graph redis client. Safe to call without injection —
+        the underlying helper short-circuits when ``redis_client`` is
+        None (mirrors :meth:`apply_bi_routing`'s no-op contract).
+        """
+        return apply_column_provenance_anchor(
+            state,
+            state.get("raw_query", "") or "",
+            self._graph_redis_client,
         )
 
     def apply_named_function_anchor(self, state: LogicState) -> LogicState:
@@ -1194,6 +1208,384 @@ def apply_bi_routing(
         resolved["role"],
         "yes" if resolved.get("derivation") else "no",
     )
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Column-provenance routing — extend BI-routing's pre-search lookup to columns
+# ---------------------------------------------------------------------------
+#
+# A query like "How is N_EOP_BAL written / populated?" names a *column*, not a
+# CAP-code and not a function. BI routing (CAP codes) and the W76 named-function
+# anchor both decline on it, so pre-fix it fell through to unanchored narrow
+# semantic search (top_k=5) and retrieved functions that never write the column
+# — the LLM then fabricated a relationship between name-similar siblings.
+#
+# This pass mirrors apply_bi_routing's mechanism: a deterministic pre-search
+# index lookup that, when the query names a known column, resolves the
+# column's WRITER function(s) and routes the query to the VARIABLE_TRACE path
+# (top_k=20, writer/INSERT-aware tracer) with the writer set force-included
+# into retrieval (see anchor_resolution.ensure_column_writers_in_search_results).
+#
+# Direction-awareness is load-bearing. The column index (graph:index:<schema>)
+# is direction-BLIND — it registers a column under a node whether the column is
+# written or merely read (builder.build_function_column_index). Anchoring on a
+# *reader* would reproduce the original bug. So writer classification is done
+# per-node from the structured graph: a node WRITES a column only when the
+# column is one of that node's structured write targets (INSERT columns list /
+# mapping keys, UPDATE assignment targets, MERGE when-matched/not-matched
+# targets, SCALAR_COMPUTE output_variable) — NEVER a source expression. The
+# operation LABEL is produced by reusing VariableTracer._classify_operation
+# rather than duplicating INSERT/UPDATE detection here (see
+# _classify_node_operation).
+
+# Query types the column-provenance pass may fire for. Mirrors the entity-
+# seeking set; DATA_QUERY / VALUE_TRACE / DIFFERENCE_EXPLANATION / UNSUPPORTED
+# are routed before this pass's call site (main.py) and are excluded here so
+# the logic_graph call site (no early-returns) stays in lockstep.
+_COLUMN_PROVENANCE_QUERY_TYPES = frozenset({
+    "COLUMN_LOGIC", "VARIABLE_TRACE", "FUNCTION_LOGIC",
+})
+
+# Operation labels (as emitted by VariableTracer._classify_operation) that
+# count as writing a value into the target column.
+_WRITE_OPERATIONS = frozenset({"INSERT", "UPDATE", "MERGE", "SELECT_INTO"})
+
+# Canonical statement heads per structured node type, fed to
+# _classify_operation so the operation label comes from the existing detector
+# rather than a duplicated keyword check here. SCALAR_COMPUTE maps to a
+# SELECT ... INTO head so it classifies as SELECT_INTO.
+_NODE_TYPE_CANONICAL = {
+    "INSERT": "INSERT INTO {t}",
+    "UPDATE": "UPDATE {t} SET col = val",
+    "MERGE": "MERGE INTO {t}",
+    "SCALAR_COMPUTE": "SELECT x INTO {t}",
+}
+
+# Column token in a query: OFSAA single-letter type prefix + underscore + caps
+# (N_EOP_BAL, F_CAP_CONSL_ENTITY_IND, V_LV_CODE). Matched case-sensitively —
+# columns are uppercase by convention. Validated against _COLUMN_TYPE_PREFIX so
+# multi-letter table prefixes (STG_, FCT_, DIM_) never match.
+_COLUMN_TOKEN_CANDIDATE = re.compile(r"\b([A-Z]_[A-Z0-9]+(?:_[A-Z0-9]+)*)\b")
+
+
+def detect_column_tokens(text: str) -> List[str]:
+    """Return OFSAA column-shaped tokens from *text*, first occurrence wins.
+
+    A token qualifies when it matches the single-letter type-prefix shape
+    (``N_``, ``V_``, ``F_``, ``D_``, ``I_``, ``T_`` + caps) — the same shape
+    ``extract_function_candidates`` *excludes*. Here we *select* those tokens
+    for the column-provenance lookup path only; the answer-grounding W58.c
+    exclusions are untouched. Multi-letter table prefixes (``STG_``, ``FCT_``)
+    do not match ``_COLUMN_TYPE_PREFIX`` and are dropped.
+    """
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for m in _COLUMN_TOKEN_CANDIDATE.finditer(text):
+        tok = m.group(1).upper()
+        if tok in seen:
+            continue
+        seen.add(tok)
+        if _COLUMN_TYPE_PREFIX.match(tok):
+            out.append(tok)
+    return out
+
+
+def _node_target_columns(node: Dict[str, Any]) -> set:
+    """Return the UPPERCASE set of columns *node* writes to (its targets only).
+
+    Reads the structured write-target fields and DELIBERATELY ignores source
+    expressions / values / conditions — that asymmetry is what makes the
+    classification writer-aware rather than reader/writer-blind:
+
+      * INSERT: ``column_maps["columns"]`` list + ``column_maps["mapping"]``
+        keys (the values half of the mapping is the source — excluded);
+        plus the same for each ``union_arms`` arm.
+      * UPDATE: ``column_maps["assignments"]`` target column, or the keys of a
+        flat ``{col: expr}`` map (expr values are sources — excluded).
+      * MERGE: the ``when_matched`` / ``when_not_matched`` clause maps' targets.
+      * SCALAR_COMPUTE: ``output_variable``.
+    """
+    targets: set = set()
+
+    def _add_from_maps(cm: Any) -> None:
+        if not isinstance(cm, dict):
+            return
+        if "mapping" in cm:
+            for col in cm.get("columns") or []:
+                if isinstance(col, str) and col.strip():
+                    targets.add(col.strip().upper())
+            mapping = cm.get("mapping")
+            if isinstance(mapping, dict):
+                for key in mapping.keys():
+                    if isinstance(key, str) and key.strip():
+                        targets.add(key.strip().upper())
+        elif "assignments" in cm:
+            for pair in cm.get("assignments") or []:
+                if isinstance(pair, (list, tuple)) and pair:
+                    col = pair[0]
+                    if isinstance(col, str) and col.strip():
+                        targets.add(col.strip().upper())
+        else:
+            # Flat {col: expr} (UPDATE) or a bare INSERT columns/values dict.
+            for col in cm.get("columns") or []:
+                if isinstance(col, str) and col.strip():
+                    targets.add(col.strip().upper())
+            for key in cm.keys():
+                if isinstance(key, str) and key.strip() and key not in ("columns", "values"):
+                    targets.add(key.strip().upper())
+
+    _add_from_maps(node.get("column_maps"))
+    for arm in node.get("union_arms") or []:
+        if isinstance(arm, dict):
+            _add_from_maps(arm.get("column_maps"))
+    for clause_key in ("when_matched", "when_not_matched"):
+        clause = node.get(clause_key)
+        if isinstance(clause, dict):
+            _add_from_maps(clause.get("column_maps"))
+    output_var = node.get("output_variable")
+    if isinstance(output_var, str) and output_var.strip():
+        targets.add(output_var.strip().upper())
+    return targets
+
+
+def _classify_node_operation(node: Dict[str, Any]) -> str:
+    """Return the write-operation label for *node*, or ``""``.
+
+    Reuses :meth:`VariableTracer._classify_operation` (the existing operation
+    detector) by feeding it a canonical statement head built from the node's
+    structured ``type`` — so the INSERT/UPDATE/MERGE/SELECT_INTO taxonomy is
+    single-sourced and not duplicated here. ``_classify_operation`` does not
+    use ``self``, so it is invoked unbound with a ``None`` receiver.
+    """
+    ntype = (node.get("type") or "").upper()
+    template = _NODE_TYPE_CANONICAL.get(ntype)
+    if template is None:
+        return ""
+    target = node.get("target_table") or node.get("output_variable") or "T"
+    canonical = template.format(t=target).upper()
+    # Lazy import keeps the orchestrator import-graph narrow and avoids any
+    # future import cycle (variable_tracer does not import orchestrator today).
+    from src.agents.variable_tracer import VariableTracer
+    return VariableTracer._classify_operation(None, canonical, [])
+
+
+def _column_write_operation(
+    column_upper: str,
+    node: Dict[str, Any],
+) -> Optional[str]:
+    """Return the write-operation label if *node* writes *column_upper*, else None.
+
+    Direction is decided by structured target membership
+    (:func:`_node_target_columns`); the label is classified via
+    :func:`_classify_node_operation`. Recurses into loop sub-nodes
+    (``inner_node`` for WHILE_LOOP, ``inner_operations`` for FOR_LOOP) because
+    the global column index registers loop-body columns under the OUTER loop
+    node's id (builder.build_function_column_index).
+    """
+    if not isinstance(node, dict):
+        return None
+    if column_upper in _node_target_columns(node):
+        op = _classify_node_operation(node)
+        if op in _WRITE_OPERATIONS:
+            return op
+    inner = node.get("inner_node")
+    if isinstance(inner, dict):
+        found = _column_write_operation(column_upper, inner)
+        if found:
+            return found
+    for inner_op in node.get("inner_operations") or []:
+        if isinstance(inner_op, dict):
+            found = _column_write_operation(column_upper, inner_op)
+            if found:
+                return found
+    return None
+
+
+def resolve_column_writers(
+    column: str,
+    redis_client: Any,
+    schemas: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Resolve *column* to the function(s) that WRITE it via the column index.
+
+    Reads ``graph:index:<schema>`` for each schema in scope, groups the
+    direction-blind ``"FN:node_id"`` entries by function, then confirms each
+    candidate function actually writes the column by inspecting the structured
+    graph node (:func:`_column_write_operation`). Reader-only references are
+    excluded — a function that merely SELECTs the column is never returned.
+
+    Returns a list of ``{function, schema, operation}`` dicts, deduped by
+    (schema, function). Empty list when:
+      * *column* is empty or *redis_client* is None
+      * no schema's index lists the column
+      * the column is referenced only by readers (no writer)
+    Any Redis / deserialization failure degrades to skipping that schema so
+    the pass fails open (no exception leaked) — mirrors the
+    ``resolve_bi_to_function`` contract.
+    """
+    col_upper = (column or "").strip().upper()
+    if not col_upper or redis_client is None:
+        return []
+    if schemas is None:
+        schemas = discovered_schemas(redis_client)
+    if not schemas:
+        return []
+
+    writers: List[Dict[str, Any]] = []
+    seen: set = set()
+    for schema in schemas:
+        try:
+            index = get_column_index(redis_client, schema)
+        except Exception as exc:
+            logger.warning(
+                "resolve_column_writers: column-index read failed for %s: %s",
+                schema, exc,
+            )
+            continue
+        if not index:
+            continue
+        entries = index.get(col_upper)
+        if not entries:
+            continue
+
+        fn_to_node_ids: Dict[str, set] = {}
+        for entry in entries:
+            if not isinstance(entry, str) or ":" not in entry:
+                continue
+            fn_name, node_id = entry.split(":", 1)
+            fn_to_node_ids.setdefault(fn_name, set()).add(node_id)
+
+        for fn_name, node_ids in fn_to_node_ids.items():
+            key = (schema, fn_name.upper())
+            if key in seen:
+                continue
+            try:
+                graph = get_function_graph(redis_client, schema, fn_name.upper())
+            except Exception:
+                graph = None
+            if not graph:
+                continue
+            nodes_by_id = {
+                n.get("id"): n
+                for n in graph.get("nodes", [])
+                if isinstance(n, dict)
+            }
+            operation: Optional[str] = None
+            for node_id in node_ids:
+                node = nodes_by_id.get(node_id)
+                if node is None:
+                    continue
+                operation = _column_write_operation(col_upper, node)
+                if operation:
+                    break
+            if operation:
+                seen.add(key)
+                writers.append({
+                    "function": fn_name,
+                    "schema": schema,
+                    "operation": operation,
+                })
+    return writers
+
+
+def apply_column_provenance_anchor(
+    state: LogicState,
+    raw_query: str,
+    redis_client: Any,
+) -> LogicState:
+    """Conditionally route a column-provenance query to the writer/trace path.
+
+    Idempotent and safe: when any precondition fails the state is returned
+    unchanged. Mutates and also returns *state* for chainable callers.
+
+    Fires when ALL of:
+      - ``redis_client`` is available
+      - ``state["query_type"]`` is in ``_COLUMN_PROVENANCE_QUERY_TYPES``
+      - neither the W76 anchor nor BI routing already claimed the query
+      - the user did NOT name a function from the indexed corpus (explicit
+        choice wins — mirrors ``apply_bi_routing``)
+      - a column token is present (the classifier's ``target_variable`` if it
+        is column-shaped, else a column token scanned from *raw_query*)
+      - that column resolves to a non-empty WRITER set via the column index
+
+    On fire it stamps:
+      - ``state["query_type"]`` → ``"VARIABLE_TRACE"`` (the writer/INSERT-aware
+        trace path with top_k=20, not the generic top_k=5 explain path)
+      - ``state["target_variable"]`` → the resolved column
+      - ``state["schema"]`` → the writer schema when all writers share one
+      - ``state["column_provenance"]`` → ``{column, writers, writer_functions}``
+        which :func:`ensure_column_writers_in_search_results` force-includes
+        into retrieval so the tracer's ``multi_source`` contains the writers.
+
+    A column that resolves but has zero writers (reader-only), or a query that
+    names no column, leaves the state untouched — never anchors on a reader.
+    """
+    if redis_client is None:
+        return state
+    if not raw_query:
+        return state
+    if state.get("query_type", "") not in _COLUMN_PROVENANCE_QUERY_TYPES:
+        return state
+
+    # Defer to upstream anchors that already claimed the query.
+    w76 = state.get("w76_anchor") or {}
+    if isinstance(w76, dict) and w76.get("function"):
+        return state
+    if state.get("bi_routing"):
+        return state
+
+    # Explicit-function-name override: the user named a real function — honour
+    # the explicit choice rather than re-routing on a column it happens to
+    # mention (mirrors apply_bi_routing's short-circuit).
+    for cand in extract_function_candidates(raw_query):
+        if function_exists_in_graph(cand, redis_client):
+            return state
+
+    # Candidate columns: classifier's target_variable first (if column-shaped),
+    # then any column token scanned from the raw query.
+    candidates: List[str] = []
+    target_var = (state.get("target_variable") or "").strip().upper()
+    if target_var and _COLUMN_TYPE_PREFIX.match(target_var):
+        candidates.append(target_var)
+    for tok in detect_column_tokens(raw_query):
+        if tok not in candidates:
+            candidates.append(tok)
+    if not candidates:
+        return state
+
+    for column in candidates:
+        writers = resolve_column_writers(column, redis_client)
+        if not writers:
+            continue
+
+        original_query_type = state.get("query_type", "")
+        state["query_type"] = "VARIABLE_TRACE"
+        state["target_variable"] = column
+
+        writer_schemas = {w["schema"] for w in writers}
+        if len(writer_schemas) == 1:
+            state["schema"] = next(iter(writer_schemas))
+
+        state["column_provenance"] = {
+            "column": column,
+            "writers": writers,
+            "writer_functions": [w["function"] for w in writers],
+            "original_query_type": original_query_type,
+        }
+
+        logger.info(
+            "apply_column_provenance_anchor: column %s -> writers %s "
+            "(was query_type=%s, schemas=%s)",
+            column,
+            [f"{w['schema']}.{w['function']}({w['operation']})" for w in writers],
+            original_query_type,
+            sorted(writer_schemas),
+        )
+        return state
+
     return state
 
 

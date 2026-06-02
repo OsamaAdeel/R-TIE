@@ -42,6 +42,7 @@ from src.agents.anchor_resolution import (
     apply_w70_anchor,
     detect_near_twin_ambiguity,
     ensure_anchor_in_search_results,
+    ensure_column_writers_in_search_results,
     ensure_named_functions_in_search_results,
     promote_anchor_to_front,
     resolve_search_query,
@@ -1152,6 +1153,22 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 with stage_timer("bi_routing", correlation_id):
                     _orchestrator.apply_bi_routing(state)
 
+            # --- Column-provenance routing. When the query names a known
+            # column ("How is N_EOP_BAL written / populated?"), resolve the
+            # column's WRITER function(s) via the column index and route to
+            # the VARIABLE_TRACE trace path (top_k=20, writer/INSERT-aware
+            # tracer) with the writer set force-included downstream — instead
+            # of the unanchored narrow semantic search that fabricated a
+            # relationship between name-similar siblings. Runs after BI
+            # routing (and skips when BI / W76 already fired) and BEFORE the
+            # W87 gate so a resolved column doesn't trip "unrecognized term".
+            # No-op when redis is unavailable, the column has no writer, or no
+            # column is named. The logic_graph.py parse_query call site wires
+            # this at the equivalent slot; both stay in lockstep.
+            if _graph_redis is not None:
+                with stage_timer("column_provenance_routing", correlation_id):
+                    _orchestrator.apply_column_provenance_anchor(state)
+
             # --- W87 unrecognized-term gate. When the user asked an
             # entity-seeking question (FUNCTION_LOGIC / COLUMN_LOGIC /
             # VARIABLE_TRACE) and every orchestrator-stage resolver
@@ -1302,6 +1319,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             ensure_named_functions_in_search_results(
                 state, redis_client=_graph_redis
             )
+            # Column-provenance: force-include every resolved writer so the
+            # trace path's multi_source contains the full writer set. Appends
+            # (W147 contract) so W95's position-0 anchor keeps primacy when
+            # both fire. No-op when the column-provenance pass didn't fire.
+            ensure_column_writers_in_search_results(state)
             results = state["search_results"]
 
             # Stage 3: Fetch source code

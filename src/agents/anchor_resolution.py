@@ -621,6 +621,82 @@ def ensure_named_functions_in_search_results(
     return state
 
 
+def ensure_column_writers_in_search_results(state: LogicState) -> LogicState:
+    """Force the column-provenance WRITER set into ``search_results``.
+
+    Companion to :func:`ensure_anchor_in_search_results` (W95, single anchor)
+    and :func:`ensure_named_functions_in_search_results` (W147, plain-prose
+    names). Where W95 force-injects exactly one anchor at position 0, a column
+    can have *several* writers (e.g. ``N_EOP_BAL`` ←
+    ``POPULATE_PP_FROMGL`` AND ``POPULATE_PP_FROMGL_AMC``); the writer/INSERT-
+    aware trace path must see ALL of them in ``multi_source`` or it will
+    narrate an incomplete provenance. This helper injects every writer the
+    column-provenance anchor resolved (:func:`apply_column_provenance_anchor`)
+    that is not already present.
+
+    Writers are appended to the END of ``search_results`` (the W147 contract)
+    rather than position 0: VARIABLE_TRACE has no single primary anchor — the
+    tracer walks the whole retrieved set — and appending avoids fighting W95's
+    position-0 injection when both fire on the same turn. W89 reorders the
+    resulting ``multi_source`` by manifest execution order downstream.
+
+    The writers were already resolved and verified against the structured
+    graph by the anchor pass, so no Redis lookup is needed here — this is a
+    pure state rewrite. No-op when ``state["column_provenance"]`` is absent or
+    carries no writers (mirrors the Redis-unavailable / no-op contract of its
+    siblings). Idempotent. Mutates and returns *state*.
+    """
+    provenance = state.get("column_provenance") or {}
+    if not isinstance(provenance, dict):
+        return state
+    writers = provenance.get("writers") or []
+    if not writers:
+        return state
+
+    search_results = list(state.get("search_results") or [])
+    present_upper = {
+        (r.get("function_name") or "").upper()
+        for r in search_results
+        if isinstance(r, dict)
+    }
+
+    injected_names: list = []
+    seen_upper: set = set()
+    for writer in writers:
+        if not isinstance(writer, dict):
+            continue
+        fn = (writer.get("function") or "").strip()
+        if not fn:
+            continue
+        fn_upper = fn.upper()
+        if fn_upper in present_upper or fn_upper in seen_upper:
+            continue
+        seen_upper.add(fn_upper)
+        search_results.append({
+            "function_name": fn,
+            "schema": writer.get("schema", "") or "",
+            "module": "",
+            "description": "",
+            "tables_read": "",
+            "tables_written": "",
+            "key_columns": "",
+            "score": 0.0,
+            "anchor_injected": True,
+        })
+        injected_names.append(fn)
+
+    if not injected_names:
+        return state
+
+    state["search_results"] = search_results
+    logger.info(
+        "ensure_column_writers_in_search_results: injected %s — column "
+        "writer(s) for %r were missing from search_results",
+        injected_names, provenance.get("column", ""),
+    )
+    return state
+
+
 def apply_w70_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
     """Compute primary anchor, stamp diagnostic onto *state*, log decision.
 

@@ -22,6 +22,7 @@ from src.pipeline.state import LogicState
 from src.parsing.schema_discovery import fallback_to_default_schema
 from src.agents.anchor_resolution import (
     ensure_anchor_in_search_results,
+    ensure_column_writers_in_search_results,
     resolve_search_query,
 )
 from src.agents.retrieval_config import resolve_top_k
@@ -116,6 +117,16 @@ def build_logic_graph(
         # query type is outside the BI scope, when the user named an
         # explicit function, or when the identifier is unknown.
         orchestrator.apply_bi_routing(state)
+        # Column-provenance routing: when the query names a known column
+        # (e.g. "How is N_EOP_BAL written?"), resolve the column's WRITER
+        # function(s) via the column index and route to the VARIABLE_TRACE
+        # path with the writer set force-included downstream. No-op when
+        # redis is unavailable, when an upstream anchor already fired, when
+        # the column has no writer, or when no column is named. Runs after
+        # BI routing (and skips when BI fired) so CAP-code routing wins.
+        # The /v1/stream call site in main.py wires this at the equivalent
+        # slot; both stay in lockstep.
+        orchestrator.apply_column_provenance_anchor(state)
         return state
 
     async def semantic_search(state: LogicState) -> LogicState:
@@ -187,6 +198,11 @@ def build_logic_graph(
         # the same helper at the equivalent point in its pipeline;
         # both stay in lockstep.
         ensure_anchor_in_search_results(state)
+
+        # Column-provenance: force-include every resolved writer so the
+        # trace path's multi_source contains the full writer set (the
+        # /v1/stream call site does the same after fetch — lockstep).
+        ensure_column_writers_in_search_results(state)
 
         logger.info(
             f"[semantic_search] Found {len(state['search_results'])} results: "
