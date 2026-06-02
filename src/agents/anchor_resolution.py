@@ -185,18 +185,153 @@ def determine_primary_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
             if v is None:
                 return float("inf")
             try:
-                return float(v)
+                fv = float(v)
             except (TypeError, ValueError):
                 return float("inf")
+            # W149: cosine distance is in [0, 2]; a score outside that range is
+            # the W80c "no vector score" sentinel (graph_rerank.NO_VECTOR_SCORE)
+            # on a 1-hop-expansion candidate that was never a vector hit.
+            # Exclude it so semantic_top1 anchors on a genuine cosine hit, never
+            # a graph-expansion neighbour. W95/W147 injected entries use score
+            # 0.0 and resolve at L1/L4 BEFORE this layer, so they are unaffected.
+            if fv > 2.0:
+                return float("inf")
+            return fv
 
-        top_fn = min(multi_source.items(), key=_score)[0]
+        top_item = min(multi_source.items(), key=_score)
+        # W149: if even the best candidate has no genuine cosine score (every
+        # entry is an expansion/sentinel), there is no semantic_top1 to anchor
+        # on — return None so the caller emits no anchor block rather than
+        # anchoring on a graph-expansion neighbour.
+        if _score(top_item) == float("inf"):
+            return None
         return {
-            "function": top_fn,
+            "function": top_item[0],
             "source": "semantic_top1",
             "confidence": "low",
         }
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# W150 — near-twin disambiguation gate
+#
+# W149 made L5 select on genuine cosine distance (the 0.0 expansion sentinel is
+# excluded). That unmasked a deeper limit: for described-not-named queries in
+# dense sibling clusters, the genuinely-closest embedding is frequently a
+# near-twin of the asked function (significant vs insignificant, above vs below,
+# AT1 vs T1), and the explainer then confidently describes the wrong twin.
+#
+# W150 does NOT fix retrieval. It is a SAFETY hedge: when the L5 anchor sits in
+# a tight near-twin cohort the embedding can't separate, RTIE stops answering
+# confidently and emits an UNVERIFIED disambiguation prompt instead.
+#
+# The margin diagnostic (scratch/findingb_margin_report.md, driver
+# tmp_findingb_margin.py) measured that margin ALONE does not separate
+# silent-miss from HIT, but (top1≈top2 stem-cohort) AND (margin < 0.05) catches
+# 8/10 misses while false-hedging only dense-cluster correct answers (0
+# distinctive queries). The cohort predicate below is ported verbatim from that
+# driver — it is the version that produced those acceptance numbers; do not
+# loosen it without re-running the offline gate (Group-B 0-false-hedge is the
+# non-negotiable invariant the stem test guarantees).
+# ---------------------------------------------------------------------------
+
+_W150_INVERSIONS = [
+    {"SIGNIFICANT", "INSIGNIFICANT"}, {"ABOVE", "BELOW"},
+    {"INDIVIDUAL", "AGGREGATE"}, {"AT1", "T1", "T2", "TIER", "CET1", "2"},
+    {"AMOUNT", "PERCENTAGE", "PERCENT"}, {"GOODWILL", "OTHER", "INTANGIBLE"},
+]
+_W150_MARGIN_MAX = 0.05
+_W150_COSINE_MAX = 2.0  # RediSearch COSINE ceiling; > this == W149 sentinel
+_W150_SIBLINGS = 5      # top-N cohort siblings listed in the hedge
+
+
+def _w150_tokens(fn: str) -> list:
+    return [t for t in (fn or "").upper().split("_") if t]
+
+
+def _w150_common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(_w150_tokens(a), _w150_tokens(b)):
+        if x == y:
+            n += 1
+        else:
+            break
+    return n
+
+
+def _w150_jaccard(a: str, b: str) -> float:
+    sa, sb = set(_w150_tokens(a)), set(_w150_tokens(b))
+    return len(sa & sb) / len(sa | sb) if (sa | sb) else 0.0
+
+
+def _w150_near_twin(a: str, b: str) -> bool:
+    """True iff two function names form a near-twin cohort: a shared leading
+    stem (>=2 tokens) plus either a known one-word inversion swap or high
+    token-set overlap. Ported verbatim from tmp_findingb_margin.py — the
+    predicate that produced the W150 acceptance numbers."""
+    if not a or not b:
+        return False
+    diff = set(_w150_tokens(a)) ^ set(_w150_tokens(b))
+    inv = any(diff & pair for pair in _W150_INVERSIONS)
+    return _w150_common_prefix_len(a, b) >= 2 and (
+        inv or _w150_jaccard(a, b) >= 0.6
+    )
+
+
+def detect_near_twin_ambiguity(
+    state: LogicState,
+    anchor: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """W150 — decide whether to hedge instead of confidently anchoring.
+
+    Fires ONLY on the described-not-named L5 path, identified by
+    ``anchor["source"] == "semantic_top1"`` — the single signal that excludes
+    every resolved path (W76 prefix, classifier_object, bi_routing,
+    raw_query_scan), so a NAMED query can never trigger the hedge.
+
+    Returns ``{"top1", "margin", "siblings"}`` when the two closest genuine
+    cosine candidates form a near-twin cohort (:func:`_w150_near_twin`) AND
+    their distance margin is < ``_W150_MARGIN_MAX``. Returns ``None`` otherwise
+    (caller proceeds to the normal confident explainer path).
+    """
+    if not isinstance(anchor, dict) or anchor.get("source") != "semantic_top1":
+        return None
+
+    multi_source = state.get("multi_source") or {}
+    real = []
+    for fn, data in multi_source.items():
+        if not isinstance(data, dict):
+            continue
+        v = data.get("score")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv <= _W150_COSINE_MAX:  # exclude the W149 >2.0 expansion sentinel
+            real.append((fn, fv))
+    real.sort(key=lambda kv: kv[1])
+
+    if len(real) < 2:
+        return None
+    (top1_fn, top1_d), (top2_fn, top2_d) = real[0], real[1]
+    # Defensive re-affirm of condition 2 (a genuine cosine hit won L5). Post-W149
+    # source="semantic_top1" already implies this, but never hedge on a sentinel.
+    if top1_d > _W150_COSINE_MAX:
+        return None
+    if not _w150_near_twin(top1_fn, top2_fn):
+        return None
+    margin = top2_d - top1_d
+    if margin >= _W150_MARGIN_MAX:
+        return None
+    return {
+        "top1": top1_fn,
+        "margin": margin,
+        "siblings": [fn for fn, _ in real[:_W150_SIBLINGS]],
+    }
 
 
 _HIGH_BLOCK = (

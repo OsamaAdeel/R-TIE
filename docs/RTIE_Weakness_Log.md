@@ -1105,3 +1105,25 @@ W137 was exactly this failure mode. Pre-W137 Check 5's December-literal lambda u
 The current sites (W83a→Check 5, W83b→Check 5/W83a) take option 1's "defer to narrower check" stance — acceptable as long as the narrower check's predicate stays strict. W137 hardened Check 5's predicate accordingly. Future calendar-class detectors that want to defer to Check 5 must keep this invariant alive.
 
 **Out of scope.** `seen_cited_fn` dedup is a different shape (same-message dedup across structurally-similar sub-checks within Check 1, not predicate-deferring across distinct detectors), but is listed above because the failure mode is structurally similar — a fabrication added to the seen set on one path skips the other paths regardless of whether they would have produced a more informative warning. Worth a separate audit if the seen-set construction proves load-bearing for a future fabrication class.
+
+---
+
+## W149 — W80c expansion `score=0.0` sentinel collides with the L5 min-cosine anchor selector
+
+**Resolved.** W80c hybrid rerank ([src/agents/graph_rerank.py](src/agents/graph_rerank.py)) pulls 1-hop graph neighbours of the top vector hits into the candidate set. An expansion-only neighbour was never a vector hit, so it has no cosine score — the stub emitted `score: 0.0`. But the anchor cascade's L5 (`determine_primary_anchor`, semantic_top1) selects the **minimum** cosine distance, and RediSearch COSINE distance is in `[0, 2]` where smaller = closer. So `0.0` read as a *perfect match*: every W80c-expansion neighbour silently outranked every genuine vector hit in anchor selection.
+
+This was invisible on most queries — the W70 low-confidence anchor block let the explainer override an implausible position-0 — but on described-not-named queries in dense clusters a hub-connected sibling became the confident primary anchor with badge VERIFIED (the finding-b silent-wrong-anchor; trace in [scratch/findingb_w80c_trace_report.md](scratch/findingb_w80c_trace_report.md)). The bug spans two layers: the producer ([graph_rerank.py](src/agents/graph_rerank.py) expansion stub) and the consumer ([anchor_resolution.py](src/agents/anchor_resolution.py#L179) L5 `_score`).
+
+**Fix.** Producer emits an out-of-band sentinel `NO_VECTOR_SCORE = 9.0` (above the cosine ceiling) instead of `0.0`; consumer's L5 `_score` clamps any value `> 2.0` to `+inf` (excluded from `min`) and returns `None` when *every* candidate is a sentinel (no semantic_top1 to anchor on) rather than anchoring a graph-expansion neighbour. W95/W147 injected anchors keep `score 0.0` but resolve at L1/L4 **before** L5, so they are unaffected. Necessary but **insufficient alone** — removing the implausible sentinel anchor unmasked plausible near-twin siblings the explainer no longer overrides (A/B Group-A silent-miss 6/16 → 10/16), which W150 addresses. Ships with W150.
+
+---
+
+## W150 — near-twin disambiguation hedge for described-not-named dense-cluster queries
+
+**Resolved (partial — a safety hedge, not a recall fix).** After W149, L5 selects on genuine cosine distance — but for described-not-named queries in dense sibling clusters the genuinely-closest embedding is frequently a **near-twin** of the asked function (significant vs insignificant, above vs below, AT1 vs T1). The embedding can't separate these one-word inversions, so the explainer confidently describes the wrong twin (silent-miss).
+
+The margin diagnostic ([scratch/findingb_margin_report.md](scratch/findingb_margin_report.md)) measured that cosine **margin alone does not separate** silent-miss from HIT (the discriminating fact — is the closest embedding the right one — is not runtime-observable). The viable signal is **(top1≈top2 stem-cohort) AND (margin < 0.05)**: the stem-cohort test isolates dense clusters from distinctive queries (0 false-hedge on distinctive controls).
+
+**Fix.** `detect_near_twin_ambiguity` ([anchor_resolution.py](src/agents/anchor_resolution.py)) fires ONLY on the L5 path (`anchor.source == "semantic_top1"` — the single check that excludes every named/resolved path, so NAMED queries never hedge), when the two closest genuine cosine candidates form a near-twin cohort within margin 0.05. It runs in [main.py](src/main.py)'s W97 block (after `apply_w70_anchor`, before `promote_anchor_to_front`) and short-circuits the explainer (mirrors the W87 gate), emitting an **UNVERIFIED** disambiguation hedge (`build_near_twin_hedge_response`) listing the top-5 cohort siblings instead of a confident wrong answer.
+
+**Effect (live A/B grid):** Group-A silent-miss **10/16 → 2/16** (and below the 6/16 pre-W149 baseline); 8/10 silent-misses converted to honest hedges; Group-B distinctive **0 false-hedge**; named grid 24/24, zero hedge leak. **Known residual (out of scope):** ~2/10 dense-cluster silent-misses persist — one cohort-escapee plus two cases where the intended fn isn't even in the top-5 hedge list. This is a deeper described-query **recall** limit in dense clusters (the embedding ranks the intended fn at position 7), not a W150 gate miss; tracked as future work.
