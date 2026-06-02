@@ -6,109 +6,6 @@ Built at Techlogix for analysts validating Basel III/IV capital calculations, wh
 
 ---
 
-## Installation
-
-RTIE runs as a bare-metal Python backend plus a Vite frontend, with Redis and
-PostgreSQL provided as local Docker containers. There is no Docker image for the
-app itself — you run it directly from source. All commands assume `cwd = RTIE/`.
-
-**Prerequisites**
-- Python 3.11+
-- Node.js 18+ and npm (for the frontend)
-- Docker Desktop (for the Redis + PostgreSQL containers)
-- An Oracle OFSAA instance with OFSMDM (and, for regulatory queries, OFSERM)
-  reachable with read-only credentials
-- An OpenAI API key (required for embeddings even if you route generation to Claude)
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/ToheedAsghar/R-TIE.git
-cd R-TIE/RTIE
-```
-
-### 2. Create and activate a virtual environment
-
-```bash
-python -m venv .venv
-# Windows (PowerShell):
-.venv\Scripts\Activate.ps1
-# macOS / Linux:
-source .venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-# or, if you use Poetry:
-poetry install && poetry shell
-```
-
-### 4. Configure environment variables
-
-```bash
-cp .env.example .env.dev
-```
-
-Edit `.env.dev` and fill in at least:
-- `ORACLE_HOST` / `ORACLE_PORT` / `ORACLE_SID` / `ORACLE_USER` / `ORACLE_PASSWORD`
-- `OPENAI_API_KEY`
-- `POSTGRES_PASSWORD`
-
-Leave `REDIS_HOST` / `POSTGRES_HOST` as `localhost` for this bare-metal workflow.
-See the [Key environment variables](#key-environment-variables) table below for the full list.
-
-### 5. Start the data services (Redis + PostgreSQL)
-
-```bash
-docker compose up -d redis postgres
-```
-
-This brings up two containers — `rtie-redis` (Redis Stack, with RediSearch) on
-`:6379` and `rtie-postgres` on `:5432`. The app backend/frontend are **not**
-started by Docker; you run those directly in the next steps.
-
-### 6. Index the corpus
-
-```bash
-python cli.py index --force
-```
-
-This parses the PL/SQL corpus, generates and embeds function descriptions, and
-builds the column and business-identifier indexes in Redis. Run it once on first
-setup and again after adding modules.
-
-### 7. Run the backend
-
-```bash
-python run.py
-```
-
-The backend serves on <http://localhost:8000> (health check at
-<http://localhost:8000/health>).
-
-> **Start the backend with `python run.py`, never `uvicorn src.main:app` directly.**
-> `run.py` sets `WindowsSelectorEventLoopPolicy` before importing uvicorn; the
-> psycopg async driver requires the selector loop, and Windows' default proactor
-> loop crashes it. The launcher is harmless on Linux.
-
-### 8. Run the frontend
-
-In a second terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The chat UI is then at <http://localhost:5173>.
-
-A clean-machine Windows walkthrough lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md).
-
----
-
 ## The problem it solves
 
 A regulatory analyst at a bank needs to defend a capital number to a regulator. The number was produced by a long chain of OFSAA PL/SQL functions writing into staging and fact tables, some of it loaded by external ETL rather than computed at all. Reading that pipeline by hand is slow and error-prone, and an LLM that *sounds* authoritative but invents a function name or a line range is actively dangerous in this setting.
@@ -255,6 +152,109 @@ The warning prefixes are meaningful on their own:
 **`/v1/stream` is canonical.** It runs the W57 grounding overlay and is the only endpoint whose `done` payload carries `badge` / `validated` / `warnings`. The frontend, the canary harness, and any benchmark driver must read this one.
 
 **`/v1/query` returns raw LangGraph state** and skips the grounding overlay entirely - no badge, no warnings. It is for debugging only. The body prose can look like a valid explanation even when the route is wrong, so never probe `/v1/query` for trust signals.
+
+---
+
+## Installation
+
+RTIE runs as a bare-metal Python backend plus a Vite frontend, with Redis and
+PostgreSQL provided as local Docker containers. There is no Docker image for the
+app itself — you run it directly from source. All commands assume `cwd = RTIE/`.
+
+**Prerequisites**
+- Python 3.11+
+- Node.js 18+ and npm (for the frontend)
+- Docker Desktop (for the Redis + PostgreSQL containers)
+- An Oracle OFSAA instance with OFSMDM (and, for regulatory queries, OFSERM)
+  reachable with read-only credentials
+- An OpenAI API key (required for embeddings even if you route generation to Claude)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/ToheedAsghar/R-TIE.git
+cd R-TIE/RTIE
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python -m venv .venv
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# macOS / Linux:
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+# or, if you use Poetry:
+poetry install && poetry shell
+```
+
+### 4. Configure environment variables
+
+```bash
+cp .env.example .env.dev
+```
+
+Edit `.env.dev` and fill in at least:
+- `ORACLE_HOST` / `ORACLE_PORT` / `ORACLE_SID` / `ORACLE_USER` / `ORACLE_PASSWORD`
+- `OPENAI_API_KEY`
+- `POSTGRES_PASSWORD`
+
+Leave `REDIS_HOST` / `POSTGRES_HOST` as `localhost` for this bare-metal workflow.
+See the [Key environment variables](#key-environment-variables) table below for the full list.
+
+### 5. Start the data services (Redis + PostgreSQL)
+
+```bash
+docker compose up -d redis postgres
+```
+
+This brings up two containers — `rtie-redis` (Redis Stack, with RediSearch) on
+`:6379` and `rtie-postgres` on `:5432`. The app backend/frontend are **not**
+started by Docker; you run those directly in the next steps.
+
+### 6. Index the corpus
+
+```bash
+python cli.py index --force
+```
+
+This parses the PL/SQL corpus, generates and embeds function descriptions, and
+builds the column and business-identifier indexes in Redis. Run it once on first
+setup and again after adding modules.
+
+### 7. Run the backend
+
+```bash
+python run.py
+```
+
+The backend serves on <http://localhost:8000> (health check at
+<http://localhost:8000/health>).
+
+> **Start the backend with `python run.py`, never `uvicorn src.main:app` directly.**
+> `run.py` sets `WindowsSelectorEventLoopPolicy` before importing uvicorn; the
+> psycopg async driver requires the selector loop, and Windows' default proactor
+> loop crashes it. The launcher is harmless on Linux.
+
+### 8. Run the frontend
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The chat UI is then at <http://localhost:5173>.
+
+A clean-machine Windows walkthrough lives at [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md).
 
 ---
 
