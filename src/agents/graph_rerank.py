@@ -59,6 +59,18 @@ logger = get_logger(__name__, concern="app")
 # dwarfs the keep_top + vector_hit count.
 _NO_GRAPH_REACH_RANK = 1_000_000
 
+# W149: RediSearch COSINE distance is in [0, 2]. Expansion-only candidates
+# (1-hop graph neighbours that were never a vector hit) have NO vector score.
+# Emitting 0.0 here made the anchor cascade's L5 min-cosine selector
+# (anchor_resolution.determine_primary_anchor) read them as a PERFECT match
+# (distance 0) and the prompt-body sort rank them first — so a hub-connected
+# graph neighbour silently became the primary anchor on described queries
+# (see scratch/findingb_w80c_trace_report.md). A value ABOVE the cosine range
+# marks "no vector score": cosine-min selectors never pick it and ascending
+# sorts place it last; the prompt's "relevance: …" line then honestly shows
+# low relevance instead of a misleading 0.0000.
+NO_VECTOR_SCORE: float = 9.0
+
 _DEFAULT_WEIGHTS: Dict[str, float] = {
     # PR 2 retune attempt (2026-05-18, reverted same day): lifting α to
     # 3.0 was a no-op because RRF fuses INTEGER ranks, not raw scores —
@@ -690,7 +702,8 @@ def rerank_with_rrf(
                 "tables_read": "",
                 "tables_written": "",
                 "key_columns": "",
-                "score": 0.0,
+                # W149: "no vector score" sentinel (NOT 0.0 — see NO_VECTOR_SCORE).
+                "score": NO_VECTOR_SCORE,
                 "graph_rerank_added": True,
             })
 
