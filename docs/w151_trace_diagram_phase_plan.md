@@ -11,7 +11,7 @@ This doc tracks the phased build and the items deferred out of each phase.
 | Phase | Scope | Status |
 |---|---|---|
 | **1** | Backend data assembler `build_trace_diagram` + per-element grounding + unit tests. No SSE, no layout, no frontend, no `/v1/source`. | **DONE** (this commit) |
-| 2 | Client-side auto-layout (dagre) over emitted topology. | not started |
+| 2 | Client-side auto-layout (dagre) over emitted topology. | **DONE** |
 | 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion. | not started |
 | 4 | Frontend render via the prototype component (`_proto_trace/CitedTraceDiagram.jsx`), fed the event instead of the fixture. | not started |
 | 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
@@ -37,6 +37,35 @@ This doc tracks the phased build and the items deferred out of each phase.
 - **Grammar extensions ratified into the spec** (`trace_diagram_grammar_spec.md`
   §1.3 / §1.4): the optional edge `label` field (`+`/`−`/`=`) and pass-through
   `groups` semantics.
+
+## Phase 2 — landed
+
+- **Module:** `frontend/src/_proto_trace/layout.js` — pure
+  `computeLayout(topology) -> {nodes:{id:{x,y,w,h}}, groups, bounds}`. Topology
+  in, coordinates out. Trust-blind: never reads or touches grounding.
+- **Approach:** dagre (`@dagrejs/dagre`), `rankdir: 'LR'` (sources/operands left
+  → target sink right), dagre center coords converted to top-left. Alternative
+  groups are a **computed overlay** — frame = bounding box of member rects;
+  OR-divider + divergence anchors derived from member positions (never
+  hand-placed).
+- **Renderer wiring:** `_proto_trace/CitedTraceDiagram.jsx` consumes the computed
+  rects (`Frames` → `LayoutFrames`); SVG canvas + container sized to
+  `bounds`. The `groundingGuard` dispatch and the edge bezier are untouched —
+  only the coordinate source changed.
+- **Tests:** `frontend/src/_proto_trace/layout.test.js` — 9 Vitest tests
+  (`npm test` → `vitest run`), all passing. Lint clean.
+- **Visual check:** headless render confirmed the alternatives frame reads as
+  disjoint "pick one" (two stacked lanes + OR divider + ringed divergence), with
+  the VERIFIED cited path solid and outside the frame.
+- **Dependencies added:** `@dagrejs/dagre` (runtime), `vitest` (dev).
+- **Still sandboxed** in `_proto_trace/`; Phase 4 relocates `layout.js` to a
+  shared lib when the renderer leaves the sandbox.
+
+> **npm audit note (left as-is, per decision).** The Phase-2 installs surfaced
+> **1 moderate-severity transitive advisory** in the frontend dependency tree.
+> It is unrelated to RTIE code. `npm audit fix` was deliberately **not** run
+> (could shift transitive versions out from under the lockfile). Revisit during
+> a dedicated frontend dependency pass, not mid-feature.
 
 ## Deferred items (gate later phases)
 
