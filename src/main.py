@@ -69,6 +69,7 @@ from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
+from src.agents.trace_diagram import diagram_from_bi_routing
 from src.pipeline.logic_graph import compile_graph
 from src.pipeline.state import LogicState
 from src.parsing.query_engine import (
@@ -85,6 +86,7 @@ from src.parsing.schema_discovery import (
     schema_for_function,
     schemas_for_column,
 )
+from src.parsing.store import get_function_graph
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
@@ -1611,6 +1613,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating detailed explanation...'})}\n\n"
 
             full_markdown = ""
+            # W151 Phase 3: hoisted local for the fan-in stash. Inert in
+            # Phase 3 (nothing reads it yet); Phase 3.5's tagged_lines ->
+            # fan_in_steps adapter consumes this. Initialized here, before the
+            # streaming if/elif/else, so it is defined on every branch.
+            vt_tagged = None  # noqa: F841  (Phase 3.5 consumes this)
 
             # W45 pre-generation check: if the user asked about a business
             # identifier (e.g. CAP973) that is absent from every retrieved
@@ -1777,6 +1784,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         tagged = _variable_tracer.extract_relevant_lines(
                             target_var, functions_source, alias_map, seeds
                         )
+                        # W151 Phase 3.5 consumes this: the structured
+                        # tagged_lines (function/line/operation) are exactly
+                        # what the fan-in projection adapter needs. Stashed
+                        # here so they survive to the diagram-emit point.
+                        vt_tagged = tagged
                     with stage_timer("variable_transformation_chain_build", correlation_id):
                         # W89: pass functions_source's iteration order
                         # (already manifest-reordered above before the
@@ -1932,6 +1944,47 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                         yield f"event: token\ndata: {json_mod.dumps(chunk)}\n\n"
                 final_markdown = full_markdown + caveat_block
 
+            # --- W151 Phase 3: trace diagram (derivation-dag only) ----------
+            # Emitted AFTER grounding["badge"] is final (post W49/W108
+            # overrides) and BEFORE the done event. The diagram is a navigation
+            # aid layered on the authoritative prose, so any failure here is
+            # non-fatal — it must never break the stream.
+            #
+            # Phase 3 wires ONLY the BI-routed derivation-dag path; the fan-in
+            # projection (consuming vt_tagged) is Phase 3.5. The Redis read is
+            # at the caller (existing graph:{schema}:{fn} keyspace via
+            # get_function_graph) so the assembler stays pure.
+            diagram_emitted = False
+            diagram_grounding_value: Optional[str] = None
+            try:
+                _diagram = diagram_from_bi_routing(
+                    state.get("bi_routing"),
+                    state.get("multi_source", {}) or {},
+                    grounding,
+                    lambda _sch, _fn: get_function_graph(_graph_redis, _sch, _fn),
+                )
+                if _diagram is not None:
+                    # diagram_grounding == body badge BY CONSTRUCTION (Phase-1
+                    # rule 3). A mismatch is an assembler bug — suppress rather
+                    # than ship a diagram that disagrees with the prose.
+                    if _diagram.get("diagram_grounding") == grounding["badge"]:
+                        diagram_grounding_value = _diagram["diagram_grounding"]
+                        with stage_timer("diagram_emit", correlation_id):
+                            yield f"event: diagram\ndata: {json_mod.dumps(_diagram)}\n\n"
+                        diagram_emitted = True
+                    else:
+                        logger.error(
+                            "Trace diagram grounding (%s) != body badge (%s); "
+                            "suppressing | correlation_id=%s",
+                            _diagram.get("diagram_grounding"),
+                            grounding["badge"], correlation_id,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "Trace diagram build/emit failed (non-fatal): %s | "
+                    "correlation_id=%s", exc, correlation_id,
+                )
+
             done_payload = {
                 "confidence": grounding["confidence"],
                 "validated": grounding["badge"] == "VERIFIED",
@@ -1968,6 +2021,13 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                 # logs. Additive; consumers that only read the
                 # existing fields are unaffected.
                 "diagnostic": _build_diagnostic_block(state),
+                # W151 Phase 3: diagram seam. `diagram_emitted` tells the
+                # frontend an event: diagram was sent this turn;
+                # `diagram_grounding` is the value the diagram claimed (== badge
+                # by construction). Phase 4 uses the equality to suppress a
+                # diagram that disagrees with the authoritative prose.
+                "diagram_emitted": diagram_emitted,
+                "diagram_grounding": diagram_grounding_value,
             }
             with stage_timer("done_emit", correlation_id):
                 yield f"event: done\ndata: {json_mod.dumps(done_payload)}\n\n"

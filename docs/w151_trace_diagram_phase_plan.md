@@ -12,7 +12,7 @@ This doc tracks the phased build and the items deferred out of each phase.
 |---|---|---|
 | **1** | Backend data assembler `build_trace_diagram` + per-element grounding + unit tests. No SSE, no layout, no frontend, no `/v1/source`. | **DONE** (this commit) |
 | 2 | Client-side auto-layout (dagre) over emitted topology. | **DONE** |
-| 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion. | not started |
+| 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion (derivation-dag path). | **DONE** |
 | 4 | Frontend render via the prototype component (`_proto_trace/CitedTraceDiagram.jsx`), fed the event instead of the fixture. | not started |
 | 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
 
@@ -66,6 +66,43 @@ This doc tracks the phased build and the items deferred out of each phase.
 > It is unrelated to RTIE code. `npm audit fix` was deliberately **not** run
 > (could shift transitive versions out from under the lockfile). Revisit during
 > a dedicated frontend dependency pass, not mid-feature.
+
+## Phase 3 — landed (derivation-dag path)
+
+- **Orchestration:** `src/agents/trace_diagram.py` →
+  `diagram_from_bi_routing(bi_routing, multi_source, grounding, graph_lookup)`.
+  Pure: injected `graph_lookup` callable `(schema, function) -> graph | None`
+  keeps it Redis-free and unit-testable. Reads the **full** derivation records
+  from the per-function graph (`graph["derivations"]`, loader.py:448-449) — NOT
+  the literal-index summary on `bi_routing["derivation"]`.
+- **Emit seam (`src/main.py`):** `event: diagram` is yielded **after the caveat
+  stream and before `event: done`** (once `grounding["badge"]` is final, post
+  W49/W108 overrides). A **defensive pre-emit assert** verifies
+  `diagram["diagram_grounding"] == grounding["badge"]` (true by Phase-1 rule 3);
+  on mismatch it suppresses + logs. The whole block is best-effort
+  (try/except) — a diagram failure never breaks the stream. The Redis read is
+  at the caller (`get_function_graph` on the existing `graph:{schema}:{fn}`
+  keyspace), so the assembler stays pure.
+- **`done` payload:** adds `diagram_emitted` (bool) and `diagram_grounding`
+  (badge-or-null) for the Phase-4 frontend suppression check.
+- **DECLINED:** structurally never reaches the emit point (it's built in the
+  `except` branch), so no diagram is produced — automatic.
+- **Fan-in stash (inert):** `vt_tagged` is hoisted in the VARIABLE_TRACE branch
+  and marked `# W151 Phase 3.5 consumes this` — landed now, consumed in 3.5.
+- **Tests:** +7 unit tests in `tests/unit/agents/test_trace_diagram.py`
+  (solid / ceiling / retrieval-gap-dashed / no-routing / incomplete /
+  no-derivations / DECLINED). Full file 23/23 passing.
+- **Round-trip checkpoint:** confirmed `graph["derivations"]` survives the
+  MessagePack round-trip both at the codec level and against real stored Redis
+  data (4 live OFSERM derivation graphs decoded intact).
+- **End-to-end canary (`scratch/w151_canary_derivation_dag.py`, untracked):**
+  `"How is CAP943 derived?"` → `event: diagram` `derivation-dag`,
+  `CAP943 ← CAP309 (+) / CAP863 (−)`, all VERIFIED; **CASE = SOLID** (resolved
+  function in `functions_analyzed`); invariant `diagram_grounding == done.badge`
+  holds. The canary reports SOLID vs DASHED(retrieval-gap) vs CEILING so a
+  dashed result reads as designed degradation, not a bug. (`CAP943 = CAP309 −
+  CAP863` is a real corpus record in `CS_DEFERRED_TAX_ASSET_NET_OF_DTL_
+  CALCULATION`.)
 
 ## Deferred items (gate later phases)
 
