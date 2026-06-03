@@ -79,7 +79,7 @@ _EDGE_KIND_BY_OP = {
     "SOURCE": "reads",
 }
 
-__all__ = ["build_trace_diagram"]
+__all__ = ["build_trace_diagram", "diagram_from_bi_routing"]
 
 
 # ---------------------------------------------------------------------------
@@ -483,3 +483,50 @@ def build_trace_diagram(
     _apply_ceiling(diagram, badge)
 
     return diagram
+
+
+# ---------------------------------------------------------------------------
+# Stream orchestration (W151 Phase 3) — derivation-dag from BI routing.
+# ---------------------------------------------------------------------------
+def diagram_from_bi_routing(
+    bi_routing: Optional[Dict[str, Any]],
+    multi_source: Dict[str, Any],
+    grounding: Dict[str, Any],
+    graph_lookup,
+) -> Optional[Dict[str, Any]]:
+    """Build a derivation-dag diagram for a BI-routed CAP query, or ``None``.
+
+    Pure orchestration over :func:`build_trace_diagram`. The full derivation
+    records (operands + line_range) live on the per-function graph at
+    ``graph["derivations"]`` (loader.py:448-449), NOT in ``state`` and NOT in
+    the literal-index summary carried on ``bi_routing["derivation"]``. The
+    caller injects ``graph_lookup`` — a callable ``(schema, function) ->
+    graph_dict | None`` (e.g. ``get_function_graph``) — so this stays
+    Redis-free and unit-testable.
+
+    Returns ``None`` when there is no BI routing, the routing record is
+    incomplete, the resolved function has no derivation records, or the
+    assembler declines (e.g. DECLINED badge). The caller should treat any
+    exception from ``graph_lookup`` as "no diagram" — a diagram must never
+    break the stream.
+    """
+    if not bi_routing:
+        return None
+    identifier = bi_routing.get("identifier")
+    function = bi_routing.get("function")
+    schema = bi_routing.get("schema")
+    if not (identifier and function and schema):
+        return None
+
+    graph = graph_lookup(schema, function) or {}
+    records = graph.get("derivations") or []
+    if not records:
+        return None
+
+    return build_trace_diagram(
+        target=identifier,
+        trace_kind="derivation-dag",
+        multi_source=multi_source or {},
+        grounding=grounding or {},
+        derivation_records=records,
+    )

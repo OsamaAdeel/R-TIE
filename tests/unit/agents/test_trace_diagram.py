@@ -5,7 +5,7 @@ DECLINED-None), the citation atom (sliced from multi_source, never markdown),
 and assembly of both trace shapes (column fan-in + CAP-code derivation DAG).
 """
 
-from src.agents.trace_diagram import build_trace_diagram
+from src.agents.trace_diagram import build_trace_diagram, diagram_from_bi_routing
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +282,79 @@ def test_derivation_dag_respects_ceiling():
     assert d["diagram_grounding"] == "UNVERIFIED"
     assert all(e["grounding"] == "UNVERIFIED" for e in d["edges"])
     assert all(n["citation"]["grounding"] == "UNVERIFIED" for n in d["nodes"])
+
+
+# ---------------------------------------------------------------------------
+# diagram_from_bi_routing — Phase 3 stream orchestration (real CAP943 shape)
+# ---------------------------------------------------------------------------
+# Mirrors the live record in graph:OFSERM:CS_DEFERRED_TAX_ASSET_NET_OF_DTL_
+# CALCULATION["derivations"]: CAP943 = CAP309 - CAP863, line_range [24,24].
+_CAP_FN = "CS_DEFERRED_TAX_ASSET_NET_OF_DTL_CALCULATION"
+_CAP_BI = {"identifier": "CAP943", "function": _CAP_FN, "schema": "OFSERM",
+           "role": "case_when_target",
+           "derivation": {"operation": "SUBTRACT", "source_literals": ["CAP309", "CAP863"]}}
+_CAP_GRAPH = {
+    "nodes": [], "edges": [],
+    "derivations": [{
+        "target_literal": "CAP943", "target_column": "N_CARRYING_AMOUNT",
+        "source_literals": ["CAP309", "CAP863"], "operation": "SUBTRACT",
+        "operands": [{"literal": "CAP309", "amount_column": "A"},
+                     {"literal": "CAP863", "amount_column": "B"}],
+        "function": _CAP_FN, "line_range": [24, 24],
+    }],
+}
+
+
+def _lookup_ok(schema, function):
+    return _CAP_GRAPH if function == _CAP_FN else None
+
+
+def test_bi_routing_builds_derivation_dag():
+    ms = _ms(_CAP_FN, {24: "MERGE ... CAP943 = MAX(CASE CAP309) - MAX(CASE CAP863)"})
+    d = diagram_from_bi_routing(_CAP_BI, ms, VERIFIED_BODY, _lookup_ok)
+    assert d is not None
+    assert d["trace_kind"] == "derivation-dag"
+    assert d["target"] == "CAP943"
+    ids = {n["id"] for n in d["nodes"]}
+    assert {"CAP943", "CAP309", "CAP863"} <= ids
+    into = [e for e in d["edges"] if e["to"] == "CAP943"]
+    assert {e["label"] for e in into} == {"+", "−"}
+    # function in multi_source + resolved span → solid (the happy path)
+    assert all(e["grounding"] == "VERIFIED" for e in into)
+
+
+def test_bi_routing_respects_ceiling_unverified_body():
+    ms = _ms(_CAP_FN, {24: "MERGE ... CAP943 = MAX(CASE CAP309) - MAX(CASE CAP863)"})
+    d = diagram_from_bi_routing(_CAP_BI, ms, UNVERIFIED_BODY, _lookup_ok)
+    assert d["diagram_grounding"] == "UNVERIFIED"
+    assert all(e["grounding"] == "UNVERIFIED" for e in d["edges"])
+
+
+def test_bi_routing_dashed_when_function_not_in_multi_source():
+    # retrieval gap: body VERIFIED but the cited function isn't in multi_source.
+    # Ceiling only downgrades, never upgrades → honest dashed, not a bug.
+    d = diagram_from_bi_routing(_CAP_BI, {}, VERIFIED_BODY, _lookup_ok)
+    assert d is not None
+    assert d["diagram_grounding"] == "VERIFIED"   # aggregate == body badge
+    assert all(n["citation"]["grounding"] == "UNVERIFIED" for n in d["nodes"])
+    assert all(e["grounding"] == "UNVERIFIED" for e in d["edges"])
+
+
+def test_bi_routing_none_when_no_routing():
+    assert diagram_from_bi_routing(None, {}, VERIFIED_BODY, _lookup_ok) is None
+    assert diagram_from_bi_routing({}, {}, VERIFIED_BODY, _lookup_ok) is None
+
+
+def test_bi_routing_none_when_incomplete():
+    incomplete = {"identifier": "CAP943", "schema": "OFSERM"}  # no function
+    assert diagram_from_bi_routing(incomplete, {}, VERIFIED_BODY, _lookup_ok) is None
+
+
+def test_bi_routing_none_when_no_derivations():
+    lookup_empty = lambda s, f: {"nodes": [], "edges": []}  # no 'derivations'
+    assert diagram_from_bi_routing(_CAP_BI, {}, VERIFIED_BODY, lookup_empty) is None
+
+
+def test_bi_routing_none_on_declined_badge():
+    ms = _ms(_CAP_FN, {24: "x"})
+    assert diagram_from_bi_routing(_CAP_BI, ms, DECLINED_BODY, _lookup_ok) is None
