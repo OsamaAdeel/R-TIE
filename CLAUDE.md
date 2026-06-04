@@ -67,7 +67,7 @@ All graph/source/cache keys are namespaced by schema. The layout (which is what 
 
 The two source/logic caches (`graph:source:*` vs. `rtie:logic:*`) are tracked for Phase 8 rationalization — leave them alone for now.
 
-After indexing, `graph:index:OFSERM` should be ~385 KB and `graph:OFSERM:*` should hold ~166 functions; `graph:index:OFSMDM` ~40 KB with ~12 functions. Diverging materially from those baselines means a parser/loader regression (counts grow as new modules are added — re-baseline after a deliberate add).
+After indexing, `graph:index:OFSERM` should be ~1.1 MB and `graph:OFSERM:*` should hold ~321 functions; `graph:index:OFSMDM` ~39 KB with ~12 functions. Diverging materially from those baselines means a parser/loader regression (counts grow as new modules are added — re-baseline after a deliberate add). Re-baselined 2026-06-03: OFSERM grew ~166→~321 functions (index ~385 KB→~1.1 MB) with the `ABL_CAR_CSTM_V4` batch expansion; OFSMDM unchanged at 12.
 
 ## Don't
 
