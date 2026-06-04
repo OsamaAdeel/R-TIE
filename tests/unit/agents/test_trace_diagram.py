@@ -5,7 +5,11 @@ DECLINED-None), the citation atom (sliced from multi_source, never markdown),
 and assembly of both trace shapes (column fan-in + CAP-code derivation DAG).
 """
 
-from src.agents.trace_diagram import build_trace_diagram, diagram_from_bi_routing
+from src.agents.trace_diagram import (
+    build_trace_diagram,
+    diagram_from_bi_routing,
+    fan_in_steps_from_tagged_lines,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +362,105 @@ def test_bi_routing_none_when_no_derivations():
 def test_bi_routing_none_on_declined_badge():
     ms = _ms(_CAP_FN, {24: "x"})
     assert diagram_from_bi_routing(_CAP_BI, ms, DECLINED_BODY, _lookup_ok) is None
+
+
+# ---------------------------------------------------------------------------
+# fan_in_steps_from_tagged_lines — Phase 3.5 adapter (Model A, flat)
+# ---------------------------------------------------------------------------
+def _tl(function, line, operation, text="x", commented=False):
+    return {"function": function, "line": line, "text": text,
+            "aliases_matched": ["V"], "operation": operation, "commented": commented}
+
+
+def test_fanin_two_writer_functions_fan_in_to_sink():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_B", 12, "ASSIGN")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    assert len(steps) == 2
+    assert all(s["successor"] == "TGT" and s["edge_kind"] == "writes" for s in steps)
+    assert {s["function"] for s in steps} == {"FN_A", "FN_B"}
+
+
+def test_fanin_read_attaches_to_own_function_writer_no_cross_function():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 38, "READ"), _tl("FN_B", 12, "ASSIGN")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    read = next(s for s in steps if s["edge_kind"] == "reads")
+    assert read["function"] == "FN_A"
+    assert read["successor"] == "FN_A:INSERT:L40"
+    # no cross-function edge (FN_A read never points into FN_B)
+    assert all(not (s["function"] == "FN_A" and str(s["successor"]).startswith("FN_B"))
+               for s in steps)
+
+
+def test_fanin_read_attaches_to_first_writer_when_multiple():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 60, "UPDATE"), _tl("FN_A", 30, "READ")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    read = next(s for s in steps if s["edge_kind"] == "reads")
+    assert read["successor"] == "FN_A:INSERT:L40"  # first writer by line (40 < 60)
+
+
+def test_fanin_coalesces_multiline_statement():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 41, "INSERT"), _tl("FN_A", 42, "INSERT")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    assert len(steps) == 1
+    assert steps[0]["line_start"] == 40 and steps[0]["line_end"] == 42
+
+
+def test_fanin_splits_distinct_statements_beyond_gap():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 50, "INSERT")]  # gap 10 > 2
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    assert len(steps) == 2
+
+
+def test_fanin_excludes_commented_out():
+    tl = [_tl("FN_A", 40, "INSERT"),
+          _tl("FN_A", 41, "COMMENTED_OUT", commented=True)]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    assert len(steps) == 1 and steps[0]["line_start"] == 40
+
+
+def test_fanin_drops_reads_in_writerless_function():
+    tl = [_tl("FN_R", 10, "READ"), _tl("FN_R", 11, "FILTER")]  # no writer
+    assert fan_in_steps_from_tagged_lines(tl, "TGT") == []
+
+
+def test_fanin_transform_and_parameter_are_context_not_writers():
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 42, "TRANSFORM"),
+          _tl("FN_A", 44, "PARAMETER")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    writes = [s for s in steps if s["edge_kind"] == "writes"]
+    reads = [s for s in steps if s["edge_kind"] == "reads"]
+    assert len(writes) == 1                      # only the INSERT writes
+    assert len(reads) == 2                       # TRANSFORM + PARAMETER are context
+    assert all(r["successor"] == "FN_A:INSERT:L40" for r in reads)
+
+
+def test_fanin_empty_when_no_target_or_no_active_lines():
+    assert fan_in_steps_from_tagged_lines([_tl("FN_A", 40, "INSERT")], "") == []
+    assert fan_in_steps_from_tagged_lines([], "TGT") == []
+
+
+def test_fanin_end_to_end_solid_under_verified_body():
+    ms = {}
+    ms.update(_ms("FN_A", {38: "SELECT x FROM SRC", 40: "INSERT INTO T (TGT)"}))
+    ms.update(_ms("FN_B", {12: "TGT := compute()"}))
+    tl = [_tl("FN_A", 40, "INSERT"), _tl("FN_A", 38, "READ"), _tl("FN_B", 12, "ASSIGN")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    d = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    assert d is not None and d["trace_kind"] == "fan-in"
+    writes = [e for e in d["edges"] if e["kind"] == "writes"]
+    assert len(writes) == 2 and all(e["grounding"] == "VERIFIED" for e in writes)
+    # sink is synthesized + UNVERIFIED (no span of its own) by design
+    sink = _node(d, "TGT")
+    assert sink["kind"] == "target-column"
+    assert sink["citation"]["grounding"] == "UNVERIFIED"
+
+
+def test_fanin_end_to_end_respects_ceiling():
+    ms = _ms("FN_A", {40: "INSERT INTO T (TGT)"})
+    tl = [_tl("FN_A", 40, "INSERT")]
+    steps = fan_in_steps_from_tagged_lines(tl, "TGT")
+    d = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                            grounding=UNVERIFIED_BODY, fan_in_steps=steps)
+    assert d["diagram_grounding"] == "UNVERIFIED"
+    assert all(e["grounding"] == "UNVERIFIED" for e in d["edges"])

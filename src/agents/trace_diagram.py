@@ -43,6 +43,7 @@ Citation atom (closes W51): every node/edge citation
 resolve, never regex-scraped from rendered markdown.
 """
 
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 VERIFIED = "VERIFIED"
@@ -79,7 +80,28 @@ _EDGE_KIND_BY_OP = {
     "SOURCE": "reads",
 }
 
-__all__ = ["build_trace_diagram", "diagram_from_bi_routing"]
+__all__ = [
+    "build_trace_diagram",
+    "diagram_from_bi_routing",
+    "fan_in_steps_from_tagged_lines",
+]
+
+# Variable-trace operation classes (from variable_tracer._classify_operation).
+# Writers actually write the target variable; everything else is read/context
+# (TRANSFORM = target on the RHS of some other assignment; PARAMETER = IN/OUT
+# param) and never asserts a write to the sink.
+_WRITER_OPS = {"ASSIGN", "SELECT_INTO", "INSERT", "UPDATE", "MERGE"}
+_FANIN_KIND = {
+    "ASSIGN": "derived-column",
+    "SELECT_INTO": "derived-column",
+    "INSERT": "derived-column",
+    "UPDATE": "derived-column",
+    "MERGE": "derived-column",
+    "READ": "source-table",
+    "FILTER": "filter",
+    "TRANSFORM": "intermediate",
+    "PARAMETER": "intermediate",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -530,3 +552,113 @@ def diagram_from_bi_routing(
         grounding=grounding or {},
         derivation_records=records,
     )
+
+
+# ---------------------------------------------------------------------------
+# Variable-trace fan-in projection (W151 Phase 3.5) — Model A, flat.
+# ---------------------------------------------------------------------------
+def fan_in_steps_from_tagged_lines(
+    tagged_lines: List[Dict[str, Any]],
+    target_variable: str,
+    *,
+    gap: int = 2,
+) -> List[Dict[str, Any]]:
+    """Project variable-trace ``tagged_lines`` into ``fan_in_steps``.
+
+    Model A (flat, locally-grounded flow only — no cross-function chaining):
+
+      * a **writer** line (ASSIGN/SELECT_INTO/INSERT/UPDATE/MERGE) → the target
+        sink  (edge kind ``writes``);
+      * a **read/filter** line → its OWN function's **first writer** by line
+        (edge kind ``reads``);
+      * read/filter lines in a function that has **no writer** are DROPPED — no
+        locally-grounded edge exists for them;
+      * ``COMMENTED_OUT`` lines are excluded; TRANSFORM/PARAMETER are context,
+        never writers.
+
+    Multi-line coalescing: consecutive same-``(function, operation)`` tags whose
+    line difference is ``<= gap`` collapse into one node spanning
+    ``[line_start, line_end]`` (so a multi-line statement is one node, but two
+    distinct statements stay apart).
+
+    Input entry shape (``variable_tracer.extract_relevant_lines``):
+    ``{function, line, text, aliases_matched, operation, commented}``.
+
+    Returns step dicts for ``build_trace_diagram(trace_kind="fan-in")``:
+    ``{node_id, function, kind, line_start, line_end, label, successor,
+    edge_kind}``. Returns ``[]`` when there is no target or no active lines.
+    """
+    target_variable = (target_variable or "").strip()
+    if not target_variable:
+        return []
+
+    active = [
+        t for t in (tagged_lines or [])
+        if not t.get("commented")
+        and (t.get("operation") or "").upper() != "COMMENTED_OUT"
+    ]
+    if not active:
+        return []
+
+    # 1. group by (function, operation); split into line-contiguous runs (gap);
+    #    coalesce each run into one node.
+    by_fn_op: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+    for t in active:
+        op = (t.get("operation") or "").upper()
+        by_fn_op[(t.get("function", ""), op)].append(t)
+
+    nodes: List[Dict[str, Any]] = []
+    for (fn, op), tags in by_fn_op.items():
+        tags.sort(key=lambda t: t.get("line", 0))
+        run: List[Dict[str, Any]] = [tags[0]]
+        runs: List[List[Dict[str, Any]]] = []
+        for prev, cur in zip(tags, tags[1:]):
+            if cur.get("line", 0) - prev.get("line", 0) <= gap:
+                run.append(cur)
+            else:
+                runs.append(run)
+                run = [cur]
+        runs.append(run)
+
+        for r in runs:
+            ls = min(t.get("line", 0) for t in r)
+            le = max(t.get("line", 0) for t in r)
+            is_writer = op in _WRITER_OPS
+            label = fn if is_writer else ((r[0].get("text") or fn)[:60])
+            nodes.append({
+                "node_id": f"{fn}:{op}:L{ls}",
+                "function": fn,
+                "kind": _FANIN_KIND.get(op, "intermediate"),
+                "line_start": ls,
+                "line_end": le,
+                "label": label,
+                "is_writer": is_writer,
+            })
+
+    # 2. first writer (by line) per function — the read-attachment target (7.1).
+    first_writer: Dict[str, str] = {}
+    for n in sorted(nodes, key=lambda n: n["line_start"]):
+        if n["is_writer"] and n["function"] not in first_writer:
+            first_writer[n["function"]] = n["node_id"]
+
+    # 3. assign successors per Model A; drop writer-less-function reads (7.2).
+    steps: List[Dict[str, Any]] = []
+    for n in nodes:
+        if n["is_writer"]:
+            successor, edge_kind = target_variable, "writes"
+        else:
+            fw = first_writer.get(n["function"])
+            if not fw:
+                continue
+            successor, edge_kind = fw, "reads"
+        steps.append({
+            "node_id": n["node_id"],
+            "function": n["function"],
+            "kind": n["kind"],
+            "line_start": n["line_start"],
+            "line_end": n["line_end"],
+            "label": n["label"],
+            "successor": successor,
+            "edge_kind": edge_kind,
+        })
+    return steps

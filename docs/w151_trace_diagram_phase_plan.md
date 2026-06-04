@@ -13,6 +13,8 @@ This doc tracks the phased build and the items deferred out of each phase.
 | **1** | Backend data assembler `build_trace_diagram` + per-element grounding + unit tests. No SSE, no layout, no frontend, no `/v1/source`. | **DONE** (this commit) |
 | 2 | Client-side auto-layout (dagre) over emitted topology. | **DONE** |
 | 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion (derivation-dag path). | **DONE** |
+| 3.5 | `tagged_lines → fan_in_steps` adapter (Model A, flat) + fan-in emit branch. **Fallback-path-only coverage** (see finding below). | **DONE** |
+| 3.6 | `graph → fan_in_steps` projection — real common-case fan-in (graph/`llm_payload` path). Own Stage-2 plan; modeling task. | not started |
 | 4 | Frontend render via the prototype component (`_proto_trace/CitedTraceDiagram.jsx`), fed the event instead of the fixture. | not started |
 | 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
 
@@ -103,6 +105,57 @@ This doc tracks the phased build and the items deferred out of each phase.
   dashed result reads as designed degradation, not a bug. (`CAP943 = CAP309 −
   CAP863` is a real corpus record in `CS_DEFERRED_TAX_ASSET_NET_OF_DTL_
   CALCULATION`.)
+
+## Phase 3.5 — landed (fan-in adapter, FALLBACK-PATH-ONLY coverage)
+
+- **Adapter:** `src/agents/trace_diagram.py` → `fan_in_steps_from_tagged_lines(
+  tagged_lines, target_variable, *, gap=2)`. Pure, in the diagram module (no
+  tracer changes). Model A, flat: writer→sink, read→own-function-writer (first
+  writer by line), no cross-function chaining; writer-less-function reads
+  dropped; `COMMENTED_OUT`/`TRANSFORM`/`PARAMETER` excluded as writers;
+  same-`(function, operation)` tags within `gap=2` lines coalesced into one
+  node with `[line_start, line_end]`.
+- **Emit branch (`src/main.py`):** derivation-dag wins; else, if `vt_tagged` was
+  stashed, project it and build a fan-in diagram. Reuses the Phase-3
+  assert/emit/done logic verbatim.
+- **Tests:** +11 unit tests (34/34 in the file pass), incl. end-to-end through
+  `build_trace_diagram` (solid under VERIFIED, ceiling-clamped under UNVERIFIED).
+
+> ### ⚠️ KNOWN GAP — Phase 3.5 covers only the fallback path
+> The `tagged_lines` stash (`vt_tagged`) is set **only** in the variable-tracer
+> streaming branch (`main.py` ~1706), which runs **only when the graph pipeline
+> produced no `llm_payload`**. The dispatch chain checks
+> `elif state.get("llm_payload")` (~1694) **first**, so every graph-resolvable
+> VARIABLE_TRACE query is streamed by the graph-payload branch
+> (`stream_semantic`) and **never sets `vt_tagged`** → **no fan-in diagram**.
+>
+> **Evidence (2026-06-03 canary):** all 6 `"How is X calculated?"` candidates
+> routed `VARIABLE_TRACE` but emitted **no** diagram; the stage-timer log showed
+> the last 8 streams were all `llm_stream_semantic_graph`, and lifetime
+> `llm_stream_variable_trace` had fired only 13× vs 42 graph + 193
+> semantic-fallback. So the variable-tracer branch is the **rare** path.
+>
+> **Conclusion:** for the common case, the real fan-in source is the **graph**
+> (`llm_payload` / `graph_node_ids` / per-function graphs), **NOT** `tagged_lines`.
+> Phase 3.5's adapter is correct and unit-tested but, by design, fires only on
+> the (rare) graph-unresolvable fallback path. A deliberately graph-unresolvable
+> variable was **NOT** used to fake a live green — that would validate only the
+> rare path and read as misleading coverage. Live fan-in on the common path is
+> Phase 3.6.
+
+## Phase 3.6 — graph → fan_in_steps (the real common-case fan-in)
+
+**Scope (own Stage-2 plan required — a modeling task, not a quick add-on).**
+Project the graph the common VARIABLE_TRACE path already builds (the assembled
+`llm_payload` / `graph_node_ids` and the per-function `graph:{schema}:{fn}`
+nodes+edges) into `fan_in_steps`, so a fan-in diagram fires on the
+graph-resolvable path. Keep **Model A, flat** (writer→sink, read→own-function
+context, **no cross-function inference**) — the same locally-grounded topology
+rule as 3.5, now sourced from graph nodes instead of `tagged_lines`. Reuses the
+Phase-1 assembler + Phase-3 emit seam unchanged. The 3.5 `tagged_lines` adapter
+remains as the fallback-path producer. Open modeling questions (node grouping
+from graph nodes, writer-vs-read classification on graph node types, multi-line
+coalescing equivalent) to be settled in the 3.6 Stage-2 plan before code.
 
 ## Deferred items (gate later phases)
 

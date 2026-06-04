@@ -69,7 +69,11 @@ from src.agents.validator import Validator
 from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
-from src.agents.trace_diagram import diagram_from_bi_routing
+from src.agents.trace_diagram import (
+    build_trace_diagram,
+    diagram_from_bi_routing,
+    fan_in_steps_from_tagged_lines,
+)
 from src.pipeline.logic_graph import compile_graph
 from src.pipeline.state import LogicState
 from src.parsing.query_engine import (
@@ -1613,11 +1617,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating detailed explanation...'})}\n\n"
 
             full_markdown = ""
-            # W151 Phase 3: hoisted local for the fan-in stash. Inert in
-            # Phase 3 (nothing reads it yet); Phase 3.5's tagged_lines ->
-            # fan_in_steps adapter consumes this. Initialized here, before the
+            # W151 Phase 3.5: hoisted local for the fan-in stash. Set in the
+            # VARIABLE_TRACE branch (the structured tagged_lines) and consumed
+            # by the fan-in diagram emit below. Initialized here, before the
             # streaming if/elif/else, so it is defined on every branch.
-            vt_tagged = None  # noqa: F841  (Phase 3.5 consumes this)
+            vt_tagged = None
 
             # W45 pre-generation check: if the user asked about a business
             # identifier (e.g. CAP973) that is absent from every retrieved
@@ -1963,6 +1967,23 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     grounding,
                     lambda _sch, _fn: get_function_graph(_graph_redis, _sch, _fn),
                 )
+                # W151 Phase 3.5: variable-trace fan-in. Derivation-dag wins
+                # when BI routing fired; otherwise project the stashed
+                # tagged_lines (vt_tagged) into fan_in_steps (Model A, flat) and
+                # build the fan-in diagram. Reuses the assert/emit/done logic
+                # below verbatim.
+                if _diagram is None and vt_tagged:
+                    _steps = fan_in_steps_from_tagged_lines(
+                        vt_tagged, state.get("target_variable", "")
+                    )
+                    if _steps:
+                        _diagram = build_trace_diagram(
+                            target=state.get("target_variable", ""),
+                            trace_kind="fan-in",
+                            multi_source=state.get("multi_source", {}) or {},
+                            grounding=grounding,
+                            fan_in_steps=_steps,
+                        )
                 if _diagram is not None:
                     # diagram_grounding == body badge BY CONSTRUCTION (Phase-1
                     # rule 3). A mismatch is an assembler bug — suppress rather
