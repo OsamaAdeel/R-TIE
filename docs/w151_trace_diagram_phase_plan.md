@@ -327,10 +327,12 @@ phase:** build an `alternatives`-from-near-twin adapter feeding
 `build_trace_diagram`, sourcing candidate labels/descriptions from the vector
 store, not the LLM.
 
-## HOLD
-**All phases (1–5) landed** — the W151 trace-diagram feature is complete:
-backend assembler + per-element grounding, dagre layout, SSE `event: diagram`,
-both fan-in producers (graph common-path + tagged_lines fallback), live frontend
-render with done-equality suppression, and the bounded `/v1/source` overflow.
-Next action is **push + merge the whole stack** (the standard close-out
-sequence) — held unpushed pending that go-ahead.
+## Status — MERGED
+**W151 is complete and merged to `origin/main`** (2026-06-04): backend assembler
++ per-element grounding, dagre layout, SSE `event: diagram`, both fan-in
+producers (graph common-path + tagged_lines fallback), live frontend render with
+done-equality suppression, and the bounded `/v1/source` overflow. The 7 commits
+(Phases 1, 2, 3, 3.5, 3.6, 4, 5) were rebased linear onto `e8f9202` (W155) and
+fast-forwarded — Phase-1 `4e28719` → Phase-5 `0ee0bef`, no merge commit. The
+old `feature/w151-phase3.5-fanin-adapter` branch is a redundant local-only ref
+(its pre-rebase hashes are dead).
