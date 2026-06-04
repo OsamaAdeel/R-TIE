@@ -16,7 +16,7 @@ This doc tracks the phased build and the items deferred out of each phase.
 | 3.5 | `tagged_lines → fan_in_steps` adapter (Model A, flat) + fan-in emit branch. **Fallback-path-only coverage** (see finding below). | **DONE** |
 | 3.6 | `graph → fan_in_steps` projection — real common-case fan-in (graph/`llm_payload` path). Model A flat, W153 structural write-attestation, **`multi_source`-cohort scope**. | **DONE** |
 | 4 | Frontend render: relocate the component to the live app, consume `event: diagram`, done-equality suppression, render below the prose under the badge. | **DONE** |
-| 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
+| 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap, bounded + capped). | **DONE** |
 
 ## Phase 1 — landed
 
@@ -264,6 +264,45 @@ This doc tracks the phased build and the items deferred out of each phase.
   UNVERIFIED → renders dashed under the Unverified banner. The mismatch-
   suppression path is covered by the predicate unit tests.
 
+## Phase 5 — landed (`/v1/source` bounded lazy overflow)
+
+- **Endpoint:** `POST /v1/source` ([main.py](../src/main.py), beside `/v1/query`
+  /`/v1/stream`/`/v1/models`) with `SourceRequest{function, schema, line_start,
+  line_end}`. Read-only; no LLM, no generation.
+- **Single resolve (no W51 drift):** reuses `MetadataInterpreter.fetch_logic`
+  via the same `mini_state` `fetch_multi_logic` builds — the *exact* resolver
+  the inline citation excerpt was sliced from (loader `graph:source:*` → Oracle
+  `TMPL_FETCH_SOURCE` via the SqlGuardian SELECT-only template → disk). **Schema
+  comes from the node verbatim, NEVER re-probed** (the single-resolve decision,
+  flag a): re-probing the owning schema could resolve a different body than the
+  excerpt and reopen citation/source drift.
+- **Bounded, as a number:** the pure `_bound_source_window(source_code, start,
+  end, margin=SOURCE_CONTEXT_MARGIN=3, max_lines=SOURCE_MAX_LINES=400)` windows
+  the cited range ± a fixed margin, clamped to the body, **hard-capped at 400
+  lines** — the returned line count can never exceed 400, so a pathological
+  `[1, 99999]` cannot dump a body. `clamped`/`truncated_to` flag when the cap
+  fired. Clean errors: unknown/unindexed function → 404, range outside the body
+  → 404, bad range → 422 (no stack trace).
+- **Frontend wiring:** `api/client.js` → `fetchSource(fn, schema, s, e)`. The
+  Phase-4 truncation marker in `CitedTraceDiagram.jsx`'s `CitationPanel` becomes
+  a **"Load full cited range"** action — fetches *only* when `citation.truncated`
+  (non-truncated excerpts render fully inline, no fetch); spinner while loading;
+  on failure **falls back to the bounded excerpt** in the payload (never blank);
+  fetched ranges **cached** (`sourceCache` ref, keyed `schema:fn:s-e`) so
+  re-expanding a node doesn't refetch; the panel is keyed by node id so
+  switching nodes remounts with fresh state.
+- **Validation:** backend `_bound_source_window` 8/8 unit tests (margin, body
+  clamp, the **400-cap fires + property "count ≤ 400 for any input"**, out-of-
+  range, malformed-line skip); frontend `vitest` 17/17 (incl. `fetchSource`
+  request/response + throw-on-error), `eslint` clean, `vite build` compiles.
+  **End-to-end (2026-06-04, throwaway `:8002` Phase-5 build):** a real cited
+  range (`CAP_CONSL_EFFECTIVE_SHAREHOLDING_PERCENT_…` [24,24]) → 7 lines
+  (±3 margin); the **400-cap on the real 722-line `ABL_LEV_RATIO`** ([1,99999] →
+  exactly 400 lines, `clamped: true`, `truncated_to: 400`); unknown function →
+  clean 404. (Browser eyeball of the in-app expand is the remaining manual
+  check — needs the `:8000` backend restarted on the Phase-5 build via the dev
+  proxy.)
+
 ## Deferred items (gate later phases)
 
 ### (A) Flag B — variable-trace path must stash STRUCTURED steps — **RESOLVED (3.5 + 3.6)**
@@ -289,7 +328,9 @@ phase:** build an `alternatives`-from-near-twin adapter feeding
 store, not the LLM.
 
 ## HOLD
-Phases 1–4 landed (backend assembler + grounding + SSE + both fan-in producers +
-live frontend render). **Phase 5 (`/v1/source` lazy overflow) is the last piece**;
-after it, push + merge the whole stack. Do not start Phase 5 without explicit
-go-ahead. Stack held unpushed.
+**All phases (1–5) landed** — the W151 trace-diagram feature is complete:
+backend assembler + per-element grounding, dagre layout, SSE `event: diagram`,
+both fan-in producers (graph common-path + tagged_lines fallback), live frontend
+render with done-equality suppression, and the bounded `/v1/source` overflow.
+Next action is **push + merge the whole stack** (the standard close-out
+sequence) — held unpushed pending that go-ahead.

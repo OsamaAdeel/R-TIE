@@ -162,6 +162,32 @@ export async function fetchModels() {
   return res.json();
 }
 
+/**
+ * W151 Phase 5: fetch the full cited source range for a truncated citation.
+ * Read-only, bounded server-side (SOURCE_MAX_LINES). Keys come straight from
+ * the diagram node: its resolved `schema` + the citation's function + range.
+ *
+ * @returns {Promise<{function, schema, line_start, line_end, lines:
+ *   Array<{line, text}>, clamped: boolean, truncated_to: number|null}>}
+ */
+export async function fetchSource(functionName, schema, lineStart, lineEnd) {
+  const res = await fetch(`${API_BASE}/v1/source`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      function: functionName,
+      schema,
+      line_start: lineStart,
+      line_end: lineEnd,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`source fetch ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
 export async function checkHealth() {
   const res = await fetch(`${API_BASE}/health`);
   if (!res.ok) throw new Error('Health check failed');
