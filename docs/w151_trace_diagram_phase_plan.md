@@ -14,7 +14,7 @@ This doc tracks the phased build and the items deferred out of each phase.
 | 2 | Client-side auto-layout (dagre) over emitted topology. | **DONE** |
 | 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion (derivation-dag path). | **DONE** |
 | 3.5 | `tagged_lines → fan_in_steps` adapter (Model A, flat) + fan-in emit branch. **Fallback-path-only coverage** (see finding below). | **DONE** |
-| 3.6 | `graph → fan_in_steps` projection — real common-case fan-in (graph/`llm_payload` path). Own Stage-2 plan; modeling task. | not started |
+| 3.6 | `graph → fan_in_steps` projection — real common-case fan-in (graph/`llm_payload` path). Model A flat, W153 structural write-attestation, **`multi_source`-cohort scope**. | **DONE** |
 | 4 | Frontend render via the prototype component (`_proto_trace/CitedTraceDiagram.jsx`), fed the event instead of the fixture. | not started |
 | 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
 
@@ -143,35 +143,94 @@ This doc tracks the phased build and the items deferred out of each phase.
 > rare path and read as misleading coverage. Live fan-in on the common path is
 > Phase 3.6.
 
-## Phase 3.6 — graph → fan_in_steps (the real common-case fan-in)
+## Phase 3.6 — landed (graph → fan_in_steps, the real common-case fan-in)
 
-**Scope (own Stage-2 plan required — a modeling task, not a quick add-on).**
-Project the graph the common VARIABLE_TRACE path already builds (the assembled
-`llm_payload` / `graph_node_ids` and the per-function `graph:{schema}:{fn}`
-nodes+edges) into `fan_in_steps`, so a fan-in diagram fires on the
-graph-resolvable path. Keep **Model A, flat** (writer→sink, read→own-function
-context, **no cross-function inference**) — the same locally-grounded topology
-rule as 3.5, now sourced from graph nodes instead of `tagged_lines`. Reuses the
-Phase-1 assembler + Phase-3 emit seam unchanged. The 3.5 `tagged_lines` adapter
-remains as the fallback-path producer. Open modeling questions (node grouping
-from graph nodes, writer-vs-read classification on graph node types, multi-line
-coalescing equivalent) to be settled in the 3.6 Stage-2 plan before code.
+- **Projection:** `src/agents/trace_diagram.py` →
+  `fan_in_steps_from_graph(fetched_nodes, target_column, multi_source=None)`,
+  pure, with helpers `_node_writes_column` / `_column_in_maps`. Consumes the
+  structured per-function graph nodes the common VARIABLE_TRACE path already
+  fetched (`fetch_nodes_by_ids` entries `{"function","node",…}`) — **not** the
+  lossy `llm_payload` text, and **not** `graph_node_ids` (which is dead/empty on
+  this path). Model A flat, same locally-grounded topology as 3.5 (writer→sink
+  `writes`; read→own-function first-writer-by-line `reads`; writer-less-function
+  reads dropped; **graph edges NOT converted** — `matching_columns` links are
+  Model-B cross-function inference, forbidden).
+- **W153 structural write-attestation (the trust core).** A node *writes* the
+  target column ONLY when it literally appears as a written target in that
+  node's own parsed records — never on a mention/filter/RHS. Index membership ≠
+  write; the projection re-derives the write structurally by node `type`
+  (builder.py): `INSERT`/`UPDATE` → `column_maps` mapping/assignments;
+  `MERGE` → top-level OR either `when_matched`/`when_not_matched` arm's
+  `column_maps` (**either arm ⇒ one writer node**, not an alternative group);
+  `SCALAR_COMPUTE` → `output_variable`; everything else never a writer. This is
+  the guard against the W153 / C04 wrong-family fabrication leaking into the
+  diagram as an authoritative arrow. An explicit **read-not-drawn-as-writer**
+  unit test is the W153 proof.
+- **`multi_source`-cohort scope (prose-alignment invariant).** `fetched_nodes`
+  is resolved from the **global** column index — every writer of the column
+  across the schema (90 for `N_STD_ACCT_HEAD_AMT`). Drawing the global set would
+  make the diagram disagree with the prose (anchored on the retrieved cohort)
+  and be unusable. So a candidate writer/read whose function ∉
+  `functions_analyzed == list(multi_source.keys())` is **dropped and counted as
+  `scoped_out`** (logged in `main.py`, never silent). `multi_source=None` keeps
+  the unscoped path for isolation tests. This restores the W151 core invariant
+  (diagram is a navigation aid on the *authoritative prose*), not just a degree
+  bound.
+- **Span discipline (W153 ceiling):** an in-cohort attested writer with no
+  resolved `[line_start,line_end]` is dropped **before** assembly (not drawn
+  dashed) and counted (`writer_drops`).
+- **Stash + emit seam (`src/main.py`):** the structured `fetched_nodes` are
+  stashed into a hoisted `vt_graph` local; the fan-in emit branch sits **between**
+  `diagram_from_bi_routing` and the 3.5 `vt_tagged` fallback (graph fan-in wins;
+  3.5 becomes genuine fallback). Phase-3 assert/emit/done logic kept **verbatim**.
+  - **⚠️ Ordering bug the HTTP leg caught (now fixed):** `vt_graph` is set in the
+    Stage-3 graph block, so its `= None` initializer **must precede that block** —
+    initializing it later (in the Stage-4 hoist beside `vt_tagged`, which is set
+    even later) clobbered the stash to `None` and produced **0 diagrams** in the
+    first end-to-end run. The in-process leg can't catch this (it calls the
+    projection directly, bypassing the wiring); the HTTP leg is what exposed it.
+- **Tests:** +15 unit tests (49/49 in the file pass) — 11 attestation/Model-A
+  (incl. the W153 read-not-drawn proof, MERGE either-arm, span-drop) + 4
+  cohort-scope (bounds, does-not-zero, out-of-cohort-read drop, `None`=no-scope).
+- **End-to-end canary (`scratch/w151_canary_fanin_graph.py`, untracked):** proves
+  graph-branch routing in-process (node_ids non-empty ⇒ `llm_payload` set ⇒
+  `vt_tagged` never set ⇒ an emitted fan-in *must* be 3.6), then streams real
+  queries. **Result (2026-06-04, `:8002` 3.6 build):** 6/9 graph-routed
+  candidates emit fan-in; **invariant `diagram_grounding == done.badge` holds for
+  all**; `N_SHAREHOLDING_PERCENT` = **SOLID** (degree 22), the rest honest
+  **CEILING/dashed**. **Real-cohort collapse confirmed end-to-end** — global→
+  drawn degree: `N_STD_ACCT_HEAD_AMT` 90→12, `N_SHAREHOLDING_PERCENT` 35→22,
+  `N_GROUP_ASSET_SIZE` 21→4, `N_RISK_WEIGHT` 21→6, `N_CAP_COMP_GROUP_SKEY` 38→11,
+  `N_STD_ACCT_HEAD_SKEY` 46→13 — bounded to the analyzed cohort without zeroing
+  the modest cases. `N_EOP_BAL` → 0 writers, no diagram (W153 guard, no
+  fabrication); `N_CARRYING_AMOUNT` graph-unresolvable, skipped; writer-span
+  drops 0/258.
+
+> ### Finding — cohort scope correctly declines wrong-family-cohort columns
+> `N_ANNUAL_GROSS_INCOME` (OPS_RISK/OFSMDM) and `N_ALPHA_PERCENT` emit **no**
+> diagram end-to-end: their real `functions_analyzed` (40 functions) is a
+> **wrong-family** cohort (capital-structure `CS_*` / `*_STD_ACCT_HEAD_*`) that
+> contains **none** of the columns' graph-attested writers
+> (`FN_LOAD_OPS_RISK_DATA`, `TLX_OPS_ADJ_MISDATE`, `OPS_RISK_DATA_POPULATION_CSTM`).
+> This is the **W153 wrong-family phenomenon at the retrieval layer** (see
+> `project_w153_writer_enumeration_wrong_family`), and the cohort scope does the
+> right thing — drawing a structurally-correct writer the prose never analyzed
+> would make the diagram contradict the prose. So the scope correctly draws
+> nothing (the body badge is UNVERIFIED, already flagged by the grounding net).
+> The "bound without zeroing" property is still demonstrated by
+> `N_GROUP_ASSET_SIZE` (21→4) and `N_RISK_WEIGHT` (21→6). **This is a downstream
+> retrieval issue, not a 3.6 defect** — 3.6 declines rather than fabricating.
 
 ## Deferred items (gate later phases)
 
-### (A) Flag B — variable-trace path must stash STRUCTURED steps
-**Wiring-phase prerequisite (blocks Phase 3 for the fan-in shape).**
-Today the variable-trace producer stores only `state["variable_chain"]
-["chain_text"]` — prose, not topology (`variable_tracer.py:1345-1354`). The
-assembler's `fan_in_steps` needs structured nodes (`node_id, function,
-node_type/operation, line_start, line_end`). Reconstructing them from
-`chain_text` would re-introduce the markdown-scrape coupling W51 exists to kill.
-**Action when Phase 3 wiring starts:** have the variable-trace path stash a
-structured step list into state (or have the caller read the per-function graph
-nodes `graph:{schema}:{fn}`, which already carry `id/type/line_start/line_end`),
-and feed that to `build_trace_diagram`. The Phase-2 value path already has the
-structure via `proof_builder.steps[]` — use the graph node's `line_start/line_end`,
-not the step's stringified `source_ref` (`proof_builder.py:267-272`).
+### (A) Flag B — variable-trace path must stash STRUCTURED steps — **RESOLVED (3.5 + 3.6)**
+The fan-in shape needs structured nodes (`node_id, function, node_type/operation,
+line_start, line_end`), not prose, to avoid re-introducing the markdown-scrape
+coupling W51 kills. Both producers now stash structured topology: **3.5** stashes
+`vt_tagged` (structured `tagged_lines`) on the fallback path; **3.6** stashes
+`vt_graph` (the structured per-function graph `fetched_nodes`, which already carry
+`id/type/line_start/line_end`) on the common graph path. No `chain_text` scraping.
+Closed.
 
 ### (B) Alternative-group derivation has no producer — tie to W150 near-twin
 **Deferred to a later phase.** The Phase-1 assembler takes `alternatives` as an
@@ -187,5 +246,6 @@ phase:** build an `alternatives`-from-near-twin adapter feeding
 store, not the LLM.
 
 ## HOLD
-Phase 1 only. Do not start Phase 2 (layout), Phase 3 (SSE), Phase 4 (frontend),
-or Phase 5 (`/v1/source`) without explicit go-ahead.
+Phases 1–3.6 landed (fan-in now fires on both the common graph path and the
+fallback `tagged_lines` path). Do not start Phase 4 (frontend render) or Phase 5
+(`/v1/source`) without explicit go-ahead. Stack held unpushed.
