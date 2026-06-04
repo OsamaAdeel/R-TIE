@@ -1,32 +1,33 @@
 // ============================================================================
-// PROTOTYPE — cited trace diagram (custom React + SVG path).
+// Cited trace diagram (custom React + SVG path) — W151 Phase 4.
 //
-// This is a RENDER TEST, not the production feature. It exists to answer one
-// yes/no question: does a hand-written React/SVG component render the trust
-// model FAITHFULLY on the hard fan-in case — solid only when verified,
-// alternatives unmistakably disjoint, ungrounded gaps dashed-with-"?" — and
-// is that worth standardising into a grammar, or should we reach for Mermaid?
+// Relocated from the _proto_trace sandbox into the live app. The trust-critical
+// rendering — groundingGuard and the Edges/bezier dispatch — is VERBATIM from
+// the validated prototype; only the surrounding chrome changed: the standalone
+// page wrapper, the adversarial toolbar (downgrade / forceSolid), and the
+// legend are gone. There is NO client-side grounding override: `forceSolid` is
+// hardcoded false and the prototype's `downgrade` data-transform is removed, so
+// trust flows straight from the payload's grounding.
 //
-// The trust contract is enforced IN CODE here (see groundingGuard / SolidEdge),
-// not by the fixture happening to be consistent. Flip a grounding value in the
-// fixture (or via the toolbar) and the render downgrades automatically.
+// The trust contract is enforced IN CODE here (see groundingGuard / Edges): a
+// solid edge is impossible to draw unless grounding === "VERIFIED". The
+// renderer is dumb — it draws what grounding says and never infers it.
 // ============================================================================
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
-import { computeLayout } from './layout.js';
+import { computeLayout } from '../lib/layout.js';
 import {
-  Check, AlertTriangle, HelpCircle, ShieldAlert, Database,
-  FunctionSquare, Filter, FileWarning, GitBranch, Target,
+  Check, AlertTriangle, Database,
+  FunctionSquare, Filter, GitBranch, Target, FileCode,
 } from 'lucide-react';
 
-// --- design tokens are inherited from ../../src/index.css (role-based: ivory
-//     = text, gold = accent, emerald/amber/burgundy = status). We never
-//     hard-code hex; we read the same CSS vars the live app uses so the
-//     prototype looks native. ------------------------------------------------
+// --- design tokens are inherited from ../index.css (role-based: ivory = text,
+//     gold = accent, emerald/amber/burgundy = status). We never hard-code hex;
+//     we read the same CSS vars the live app uses. -------------------------
 const VAR = (name) => `var(--color-${name})`;
 
 // ----------------------------------------------------------------------------
-// THE TRUST GUARANTEE, IN CODE.
+// THE TRUST GUARANTEE, IN CODE.  (VERBATIM — do not alter.)
 //
 // A solid edge can ONLY be produced by passing through `groundingGuard`, and
 // the guard refuses any edge whose grounding is not exactly "VERIFIED". Even
@@ -83,9 +84,13 @@ function bezier(sp, tp, horizontal) {
 
 // ----------------------------------------------------------------------------
 // EDGE LAYER (SVG). Dispatches strictly on grounding. `forceSolid` is the
-// adversarial toggle: it tries to push EVERY edge through the solid path to
-// prove the guard — unverified edges throw, get caught, and fall back to
-// dashed with a "GUARD BLOCKED" marker.
+// adversarial toggle (always false in the app): it tries to push EVERY edge
+// through the solid path to prove the guard — unverified edges throw, get
+// caught, and fall back to dashed with a "GUARD BLOCKED" marker.
+//
+// The grounding dispatch below is VERBATIM. The only addition is a cosmetic
+// +/−/= operand label (edge.label, present on derivation-dag edges) rendered
+// at the edge midpoint — it never touches the solid/dashed decision.
 // ----------------------------------------------------------------------------
 function Edges({ nodes, edges, forceSolid, width = 1240, height = 780 }) {
   const byId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
@@ -163,6 +168,19 @@ function Edges({ nodes, edges, forceSolid, width = 1240, height = 780 }) {
                 </text>
               </g>
             )}
+            {/* W151 Phase 4: cosmetic operand sign for derivation-dag edges
+                (+/−/=). Additive only — does NOT affect the solid/dashed
+                grounding decision above. Skipped when an ungrounded "?" disc
+                already occupies the midpoint. */}
+            {edge.label && !edge.ungroundedGap && (
+              <g>
+                <rect x={mid.x - 9} y={mid.y - 9} width="18" height="18" rx="4"
+                  fill={VAR('ink')} stroke={VAR(color)} strokeWidth="1.25" opacity="0.95" />
+                <text x={mid.x} y={mid.y + 4} textAnchor="middle" fontSize="12" fontWeight="700" fill={VAR(color)}>
+                  {edge.label}
+                </text>
+              </g>
+            )}
           </g>
         );
       })}
@@ -171,7 +189,9 @@ function Edges({ nodes, edges, forceSolid, width = 1240, height = 780 }) {
 }
 
 // ----------------------------------------------------------------------------
-// NODE (HTML, absolutely positioned). Styling keys off kind + grounding.
+// NODE (HTML, absolutely positioned). Styling keys off kind + grounding
+// (VERBATIM). Phase 4 adds click-to-select (additive) so the citation excerpt
+// can expand below the canvas — it does not touch the grounding-driven style.
 // ----------------------------------------------------------------------------
 const KIND_ICON = {
   'target-column': Target,
@@ -181,7 +201,7 @@ const KIND_ICON = {
   'absent-filter': GitBranch,
 };
 
-function Node({ node, dimmed }) {
+function Node({ node, dimmed, selected, onSelect }) {
   const verified = node.citation?.grounding === 'VERIFIED';
   const ghost = node.kind === 'absent-filter';
   const Icon = KIND_ICON[node.kind] || Database;
@@ -190,14 +210,19 @@ function Node({ node, dimmed }) {
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect?.(node.id)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect?.(node.id); } }}
       className={clsx(
-        'absolute rounded-[10px] px-3 py-2 text-left transition-colors',
+        'absolute rounded-[10px] px-3 py-2 text-left transition-colors cursor-pointer',
         ghost
           ? 'border border-dashed border-line-strong bg-transparent'
           : verified
             ? 'border border-emerald/55 bg-emerald/5'
             : 'border border-amber/45 bg-amber/[0.04]',
         node.isDivergence && !ghost && 'ring-2 ring-violet/70 ring-offset-2 ring-offset-[var(--color-ink)]',
+        selected && !node.isDivergence && 'ring-2 ring-gold/70 ring-offset-2 ring-offset-[var(--color-ink)]',
         dimmed && 'opacity-50',
       )}
       style={{ left: node.pos.x, top: node.pos.y, width: node.w, minHeight: node.h }}
@@ -242,10 +267,8 @@ function GroundingPill({ grounding }) {
 // ----------------------------------------------------------------------------
 // REGION FRAMES — the "alternatives" frame is what makes the two candidate
 // subgraphs read as DISJOINT ("pick one") rather than a branching flow.
-//
-// W151 Phase 2: every rectangle is now COMPUTED by computeLayout from the
-// members' laid-out positions (bounding boxes), not hand-placed. Same visual
-// language as the prototype; the coordinates just come from layout.
+// Every rectangle is COMPUTED by computeLayout from the members' laid-out
+// positions (bounding boxes), not hand-placed. (VERBATIM from Phase 2.)
 // ----------------------------------------------------------------------------
 function LayoutFrames({ groups }) {
   if (!groups || !groups.length) return null;
@@ -290,95 +313,110 @@ function LayoutFrames({ groups }) {
 }
 
 // ----------------------------------------------------------------------------
-// MAIN
+// CITATION EXCERPT (Q3) — click a node to expand its bounded citation.text
+// (already in the payload) below the canvas. NO fetch: the embedded excerpt is
+// what renders; overflow beyond the line cap is marked and owned by Phase 5
+// (/v1/source). Uses the app's expand/close idiom.
 // ----------------------------------------------------------------------------
-// Initial toggle state can be seeded from the URL (?downgrade=1&force=1) so the
-// three trust states can be captured headlessly; the checkboxes still drive it.
-const qp = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
+function CitationPanel({ node, onClose }) {
+  const cit = node.citation || {};
+  const { function: fn, lines, text, truncated, grounding } = cit;
+  const lineLabel = lines && (lines[0] || lines[1]) ? `${fn} [${lines[0]}–${lines[1]}]` : fn;
 
+  return (
+    <div className="mt-2 rounded-[10px] border border-line bg-panel-2/60">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <FileCode size={12} className="shrink-0 text-ivory-faint" />
+        <span className="font-mono text-[11.5px] font-semibold text-ivory truncate" title={lineLabel}>{lineLabel}</span>
+        <GroundingPill grounding={grounding} />
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto text-[11px] text-ivory-faint hover:text-ivory transition-colors"
+        >
+          Close
+        </button>
+      </div>
+      {text ? (
+        <pre className="px-3 pb-2 text-[11.5px] font-mono text-ivory-dim whitespace-pre-wrap break-words leading-relaxed">{text}</pre>
+      ) : (
+        <div className="px-3 pb-2 text-[11.5px] text-ivory-faint italic">
+          No source excerpt in the payload for this element.
+        </div>
+      )}
+      {truncated && (
+        <div className="px-3 pb-3 text-[10.5px] text-amber">
+          Excerpt truncated to the embedded line cap — full source in a later phase.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// MAIN — lean app embed. Consumes the assembler's payload verbatim
+// ({nodes, edges, groups, target, trace_kind}); no toolbar, no page chrome, no
+// client-side grounding override. Sized to the computed layout bounds and
+// horizontally scrollable so a wide fan-in never breaks the chat column.
+// ----------------------------------------------------------------------------
 export default function CitedTraceDiagram({ data }) {
-  const [downgrade, setDowngrade] = useState(qp.get('downgrade') === '1');   // flip CITED edge → UNVERIFIED
-  const [forceSolid, setForceSolid] = useState(qp.get('force') === '1');     // adversarial: try solid on all
+  const [selectedId, setSelectedId] = useState(null);
 
-  // Apply the toolbar downgrade as a data transform — the renderer below is
-  // untouched; it simply re-reads grounding. (Proof: trust flows from data.)
-  const edges = useMemo(() => data.edges.map((e) =>
-    downgrade && e.id === 'e_verified' ? { ...e, grounding: 'UNVERIFIED', citation: { ...e.citation, grounding: 'UNVERIFIED' } } : e
-  ), [data.edges, downgrade]);
+  // Stable references (data is set once at `done`), so the layout memo below
+  // doesn't recompute every render — and keeps react-hooks/exhaustive-deps
+  // happy about the `|| []` fallbacks.
+  const { nodes, edges, groups } = useMemo(() => ({
+    nodes: data?.nodes || [],
+    edges: data?.edges || [],
+    groups: data?.groups || [],
+  }), [data]);
 
-  const nodes = useMemo(() => data.nodes.map((n) =>
-    downgrade && n.id === 'CITED_WRITER' ? { ...n, citation: { ...n.citation, grounding: 'UNVERIFIED' } } : n
-  ), [data.nodes, downgrade]);
-
-  // W151 Phase 2: topology IN, coordinates OUT. computeLayout is trust-blind —
-  // grounding flips (downgrade) don't change topology, so layout is stable.
+  // topology IN, coordinates OUT. computeLayout is trust-blind.
   const layout = useMemo(
-    () => computeLayout({ nodes, edges, groups: data.groups || [] }),
-    [nodes, edges, data.groups],
+    () => computeLayout({ nodes, edges, groups }),
+    [nodes, edges, groups],
   );
 
   // Merge computed rects onto the nodes so Edges/Node read pos/w/h exactly as
-  // before — the edge layer and groundingGuard dispatch are untouched.
+  // in the prototype — the edge layer and groundingGuard dispatch are untouched.
   const positioned = useMemo(() => nodes.map((n) => {
     const r = layout.nodes[n.id] || { x: 0, y: 0, w: 200, h: 50 };
     return { ...n, pos: { x: r.x, y: r.y }, w: r.w, h: r.h };
   }), [nodes, layout]);
 
-  const verifiedCount = edges.filter((e) => e.grounding === 'VERIFIED').length;
+  const selected = useMemo(
+    () => positioned.find((n) => n.id === selectedId) || null,
+    [positioned, selectedId],
+  );
+
+  if (!nodes.length) return null;
+
+  const kindLabel = data?.trace_kind === 'derivation-dag' ? 'Derivation' : 'Fan-in';
 
   return (
-    <div className="rtie-chat-wash min-h-screen w-full text-ivory p-6">
-      <div className="max-w-[1300px] mx-auto">
-        {/* header */}
-        <div className="mb-4">
-          <h1 className="font-display text-xl font-bold text-ivory">Cited trace — fan-in to <span className="font-mono text-gold">{data.target}</span></h1>
-          <p className="text-[13px] text-ivory-dim mt-1 max-w-3xl">
-            Prototype render test. One trace, three trust states. The renderer draws what each element's
-            <span className="text-emerald font-semibold"> grounding</span> says and never infers it — a solid
-            edge is physically impossible to draw unless <span className="font-mono">grounding === "VERIFIED"</span>.
-          </p>
-        </div>
-
-        {/* toolbar — the grounding-flip demonstration */}
-        <div className="flex flex-wrap items-center gap-3 mb-4 p-3 rounded-[10px] border border-line bg-panel-2/60">
-          <ShieldAlert size={15} className="text-gold" />
-          <span className="text-[12px] font-semibold text-ivory">Trust-test controls:</span>
-          <label className="flex items-center gap-1.5 text-[12px] text-ivory-dim cursor-pointer select-none">
-            <input type="checkbox" checked={downgrade} onChange={(e) => setDowngrade(e.target.checked)} className="accent-[var(--color-burgundy)]" />
-            Downgrade the CITED edge’s grounding → <span className="font-mono text-amber">UNVERIFIED</span>
-            <span className="text-ivory-faint">(watch it go solid → dashed)</span>
-          </label>
-          <label className="flex items-center gap-1.5 text-[12px] text-ivory-dim cursor-pointer select-none">
-            <input type="checkbox" checked={forceSolid} onChange={(e) => setForceSolid(e.target.checked)} className="accent-[var(--color-burgundy)]" />
-            Adversarial: force every edge through the solid path
-            <span className="text-ivory-faint">(guard should block the unverified ones)</span>
-          </label>
-          <span className="ml-auto text-[11px] font-mono text-ivory-faint">{verifiedCount} verified edge{verifiedCount === 1 ? '' : 's'} of {edges.length}</span>
-        </div>
-
-        {/* the diagram — canvas sized to the computed layout bounds */}
-        <div className="relative rounded-[12px] border border-line bg-panel/40 overflow-hidden"
-          style={{ height: layout.bounds.h, width: layout.bounds.w }}>
-          <LayoutFrames groups={layout.groups} />
-          <Edges nodes={positioned} edges={edges} forceSolid={forceSolid}
-            width={layout.bounds.w} height={layout.bounds.h} />
-          {positioned.map((n) => <Node key={n.id} node={n} />)}
-        </div>
-
-        <Legend />
+    <div className="mt-3">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ivory-faint">
+        <GitBranch size={11} className="text-gold" />
+        <span>Trace diagram · {kindLabel} →</span>
+        <span className="font-mono text-gold normal-case tracking-normal">{data?.target}</span>
       </div>
+      {/* canvas — fixed to the computed bounds, scrolls horizontally if wide */}
+      <div className="overflow-x-auto rounded-[12px] border border-line bg-panel/40">
+        <div className="relative" style={{ height: layout.bounds.h, width: layout.bounds.w }}>
+          <LayoutFrames groups={layout.groups} />
+          <Edges nodes={positioned} edges={edges} forceSolid={false}
+            width={layout.bounds.w} height={layout.bounds.h} />
+          {positioned.map((n) => (
+            <Node
+              key={n.id}
+              node={n}
+              selected={n.id === selectedId}
+              onSelect={(id) => setSelectedId((cur) => (cur === id ? null : id))}
+            />
+          ))}
+        </div>
+      </div>
+      {selected && <CitationPanel node={selected} onClose={() => setSelectedId(null)} />}
     </div>
   );
 }
-
-function Legend() {
-  return (
-    <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-[11.5px] text-ivory-dim">
-      <LegendRow><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke={VAR('emerald')} strokeWidth="2.4" /></svg> <Check size={12} className="text-emerald" /> Verified — solid (guarded in code)</LegendRow>
-      <LegendRow><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke={VAR('amber')} strokeWidth="1.8" strokeDasharray="6 5" /></svg> <AlertTriangle size={12} className="text-amber" /> Unverified candidate — dashed</LegendRow>
-      <LegendRow><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke={VAR('burgundy')} strokeWidth="1.8" strokeDasharray="2 6" /></svg> <HelpCircle size={12} className="text-burgundy" /> Ungrounded gap — dashed + “?”</LegendRow>
-      <LegendRow><GitBranch size={12} className="text-violet" /> Alternatives — disjoint sub-cards, “pick one”, divergence ringed</LegendRow>
-    </div>
-  );
-}
-const LegendRow = ({ children }) => <span className="inline-flex items-center gap-1.5">{children}</span>;

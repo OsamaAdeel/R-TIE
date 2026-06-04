@@ -5,6 +5,7 @@ import TrustBanner from './TrustBanner';
 import AgentActivity from './AgentActivity';
 import CommandResult from './CommandResult';
 import Answer, { MarkdownBody } from './Answer';
+import CitedTraceDiagram from './CitedTraceDiagram';
 import { buildPipelineSteps } from '../lib/pipelineSteps';
 
 export default function MessageBubble({ message, onRetry, onEdit }) {
@@ -69,6 +70,11 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
         <>
           {!message.cancelled && <TrustBanner data={data} />}
           {data ? <Answer data={data} /> : null}
+          {/* W151 Phase 4: trace diagram — supplementary nav aid BELOW the
+              authoritative prose, governed by the TrustBanner badge above.
+              Only present when the done-equality suppression rule passed
+              (App.jsx); a suppressed diagram leaves the prose answer complete. */}
+          {data?.diagram ? <CitedTraceDiagram data={data.diagram} /> : null}
           {message.cancelled && <CancelledNotice />}
         </>
       )}
