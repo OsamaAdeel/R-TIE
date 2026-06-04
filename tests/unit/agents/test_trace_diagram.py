@@ -9,6 +9,7 @@ from src.agents.trace_diagram import (
     build_trace_diagram,
     diagram_from_bi_routing,
     fan_in_steps_from_tagged_lines,
+    fan_in_steps_from_graph,
 )
 
 
@@ -464,3 +465,194 @@ def test_fanin_end_to_end_respects_ceiling():
                             grounding=UNVERIFIED_BODY, fan_in_steps=steps)
     assert d["diagram_grounding"] == "UNVERIFIED"
     assert all(e["grounding"] == "UNVERIFIED" for e in d["edges"])
+
+
+# ---------------------------------------------------------------------------
+# fan_in_steps_from_graph — Phase 3.6 common-case projection (Model A, flat)
+# ---------------------------------------------------------------------------
+def _gn(function, node_id, ntype, line_start, line_end, **node_extra):
+    """A fetch_nodes_by_ids entry: {function, node, execution_condition}."""
+    node = {"id": node_id, "type": ntype,
+            "line_start": line_start, "line_end": line_end}
+    node.update(node_extra)
+    return {"function": function, "node": node, "execution_condition": None}
+
+
+def test_graph_fanin_insert_writer_writes_to_sink():
+    nodes = [_gn("FN_INS", "n1", "INSERT", 40, 58,
+                 column_maps={"mapping": {"TGT": "src.x"}})]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    assert res["writers_total"] == 1 and res["writer_drops"] == 0
+    assert len(res["steps"]) == 1
+    s = res["steps"][0]
+    assert s["edge_kind"] == "writes" and s["successor"] == "TGT"
+    assert s["node_id"] == "FN_INS:n1" and s["kind"] == "derived-column"
+
+
+def test_graph_fanin_update_assignment_writer():
+    nodes = [_gn("FN_UPD", "n1", "UPDATE", 12, 14,
+                 column_maps={"assignments": [("TGT", "a + b")]})]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    assert [s["edge_kind"] for s in res["steps"]] == ["writes"]
+
+
+def test_graph_fanin_scalar_compute_output_variable_writer():
+    nodes = [_gn("FN_SC", "n1", "SCALAR_COMPUTE", 30, 31, output_variable="TGT")]
+    res = fan_in_steps_from_graph(nodes, "tgt")  # case-insensitive
+    assert [s["edge_kind"] for s in res["steps"]] == ["writes"]
+
+
+def test_graph_fanin_merge_either_arm_is_one_writer():
+    # target only in the not_matched arm — still one writer node, not a group.
+    nodes = [_gn("FN_MRG", "n1", "MERGE", 70, 90,
+                 column_maps={"mapping": {}},
+                 when_matched={"column_maps": {"mapping": {"OTHER": "x"}}},
+                 when_not_matched={"column_maps": {"mapping": {"TGT": "y"}}})]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    assert res["writers_total"] == 1
+    assert [s["edge_kind"] for s in res["steps"]] == ["writes"]
+
+
+def test_graph_fanin_read_only_node_not_drawn_as_writer_W153():
+    # THE W153 PROOF. FN_WRONG mentions TGT only as a VALUE (RHS) while writing
+    # a DIFFERENT column — it is in the resolved set (mention-based index) but
+    # does NOT structurally write TGT, so it must NOT be drawn as a writer. With
+    # no attested writer of TGT in FN_WRONG, its node drops entirely (7.2), so a
+    # wrong-family function (the G-Test / C04 failure) contributes nothing.
+    nodes = [
+        _gn("FN_RIGHT", "w", "INSERT", 40, 41,
+            column_maps={"mapping": {"TGT": "src.v"}}),                 # real writer
+        _gn("FN_WRONG", "x", "INSERT", 10, 11,
+            column_maps={"mapping": {"OTHER_COL": "TGT * 2"}}),         # TGT on RHS only
+    ]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    # only the real writer is attested; the wrong-family node is not a writer.
+    assert res["writers_total"] == 1
+    writes = [s for s in res["steps"] if s["edge_kind"] == "writes"]
+    assert len(writes) == 1 and writes[0]["function"] == "FN_RIGHT"
+    # the wrong-family node never appears (no writer in its function → dropped).
+    assert all(not s["node_id"].startswith("FN_WRONG") for s in res["steps"])
+
+
+def test_graph_fanin_spanless_writer_dropped_and_counted():
+    # An attested writer with no resolved span is dropped before assembly
+    # (not drawn dashed); the drop is counted for the canary to surface.
+    nodes = [
+        _gn("FN_OK", "w1", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}}),
+        _gn("FN_NS", "w2", "INSERT", 0, 0, column_maps={"mapping": {"TGT": "y"}}),
+    ]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    assert res["writers_total"] == 2 and res["writer_drops"] == 1
+    writes = [s for s in res["steps"] if s["edge_kind"] == "writes"]
+    assert len(writes) == 1 and writes[0]["function"] == "FN_OK"
+
+
+def test_graph_fanin_multi_writer_degree_two():
+    nodes = [
+        _gn("FN_A", "w", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}}),
+        _gn("FN_B", "w", "UPDATE", 12, 13, column_maps={"assignments": [("TGT", "y")]}),
+    ]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    writes = [s for s in res["steps"] if s["edge_kind"] == "writes"]
+    assert {s["function"] for s in writes} == {"FN_A", "FN_B"}
+
+
+def test_graph_fanin_read_attaches_to_own_function_first_writer():
+    # A read in a function that HAS a writer attaches to that writer (reads),
+    # never cross-function. The read here is a SCALAR_COMPUTE feeding the writer.
+    nodes = [
+        _gn("FN_A", "w1", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "interm"}}),
+        _gn("FN_A", "w2", "UPDATE", 60, 61, column_maps={"assignments": [("TGT", "z")]}),
+        _gn("FN_A", "r", "SCALAR_COMPUTE", 30, 31, output_variable="INTERM"),
+    ]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    read = next(s for s in res["steps"] if s["edge_kind"] == "reads")
+    assert read["function"] == "FN_A"
+    assert read["successor"] == "FN_A:w1"  # first writer by line (40 < 60)
+    assert read["kind"] == "intermediate"
+
+
+def test_graph_fanin_writerless_function_read_dropped():
+    # A SCALAR_COMPUTE that does not write TGT, in a function with no TGT
+    # writer, has nowhere locally-grounded to attach → dropped (7.2).
+    nodes = [_gn("FN_R", "r", "SCALAR_COMPUTE", 10, 11, output_variable="SOMETHING")]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    assert res["steps"] == [] and res["writers_total"] == 0
+
+
+def test_graph_fanin_empty_when_no_target():
+    nodes = [_gn("FN_A", "w", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}})]
+    assert fan_in_steps_from_graph(nodes, "")["steps"] == []
+    assert fan_in_steps_from_graph([], "TGT")["steps"] == []
+
+
+def test_graph_fanin_cohort_scope_bounds_big_fan_in():
+    # 5 global writers; only 2 functions are in the analyzed cohort
+    # (multi_source). The diagram collapses to those 2 — prose alignment.
+    nodes = [
+        _gn(f"FN_{i}", "w", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}})
+        for i in range(5)
+    ]
+    cohort = _ms("FN_0", {40: "x"})
+    cohort.update(_ms("FN_2", {40: "x"}))
+    res = fan_in_steps_from_graph(nodes, "TGT", multi_source=cohort)
+    writes = [s for s in res["steps"] if s["edge_kind"] == "writes"]
+    assert {s["function"] for s in writes} == {"FN_0", "FN_2"}  # bounded
+    assert res["writers_total"] == 5 and res["scoped_out"] == 3   # logged, not silent
+
+
+def test_graph_fanin_cohort_scope_does_not_zero_legit_fan_in():
+    # The N_ANNUAL_GROSS_INCOME shape: 2 legit writers, both in the cohort →
+    # degree 2 survives. The scope must bound the big cases without zeroing a
+    # genuine multi-writer fan-in.
+    nodes = [
+        _gn("FN_LOAD_OPS_RISK_DATA", "w", "INSERT", 40, 41,
+            column_maps={"mapping": {"N_ANNUAL_GROSS_INCOME": "x"}}),
+        _gn("TLX_OPS_ADJ_MISDATE", "w", "UPDATE", 12, 13,
+            column_maps={"assignments": [("N_ANNUAL_GROSS_INCOME", "y")]}),
+    ]
+    cohort = _ms("FN_LOAD_OPS_RISK_DATA", {40: "x"})
+    cohort.update(_ms("TLX_OPS_ADJ_MISDATE", {12: "y"}))
+    res = fan_in_steps_from_graph(nodes, "N_ANNUAL_GROSS_INCOME", multi_source=cohort)
+    writes = [s for s in res["steps"] if s["edge_kind"] == "writes"]
+    assert len(writes) == 2 and res["scoped_out"] == 0
+
+
+def test_graph_fanin_cohort_scope_drops_out_of_cohort_read():
+    # A read whose function is outside the cohort is dropped even though its
+    # function would otherwise have an (out-of-cohort, hence absent) writer.
+    nodes = [
+        _gn("FN_IN", "w", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}}),
+        _gn("FN_OUT", "r", "SCALAR_COMPUTE", 10, 11, output_variable="OTHER"),
+    ]
+    cohort = _ms("FN_IN", {40: "x"})
+    res = fan_in_steps_from_graph(nodes, "TGT", multi_source=cohort)
+    assert all(not s["node_id"].startswith("FN_OUT") for s in res["steps"])
+
+
+def test_graph_fanin_no_cohort_means_no_scoping():
+    # multi_source=None ⇒ global behavior (isolation tests of the topology).
+    nodes = [
+        _gn(f"FN_{i}", "w", "INSERT", 40, 41, column_maps={"mapping": {"TGT": "x"}})
+        for i in range(5)
+    ]
+    res = fan_in_steps_from_graph(nodes, "TGT")  # no multi_source
+    assert res["scoped_out"] == 0
+    assert len([s for s in res["steps"] if s["edge_kind"] == "writes"]) == 5
+
+
+def test_graph_fanin_end_to_end_solid_under_verified_body():
+    ms = {}
+    ms.update(_ms("FN_A", {40: "INSERT INTO T (TGT) SELECT x"}))
+    ms.update(_ms("FN_B", {12: "UPDATE T SET TGT = y"}))
+    nodes = [
+        _gn("FN_A", "w", "INSERT", 40, 40, column_maps={"mapping": {"TGT": "x"}}),
+        _gn("FN_B", "w", "UPDATE", 12, 12, column_maps={"assignments": [("TGT", "y")]}),
+    ]
+    steps = fan_in_steps_from_graph(nodes, "TGT")["steps"]
+    d = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    assert d is not None and d["trace_kind"] == "fan-in"
+    writes = [e for e in d["edges"] if e["kind"] == "writes"]
+    assert len(writes) == 2 and all(e["grounding"] == "VERIFIED" for e in writes)
+    assert _node(d, "TGT")["kind"] == "target-column"

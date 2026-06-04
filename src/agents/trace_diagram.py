@@ -84,6 +84,7 @@ __all__ = [
     "build_trace_diagram",
     "diagram_from_bi_routing",
     "fan_in_steps_from_tagged_lines",
+    "fan_in_steps_from_graph",
 ]
 
 # Variable-trace operation classes (from variable_tracer._classify_operation).
@@ -662,3 +663,233 @@ def fan_in_steps_from_tagged_lines(
             "edge_kind": edge_kind,
         })
     return steps
+
+
+# ---------------------------------------------------------------------------
+# Common-case graph fan-in projection (W151 Phase 3.6) — Model A, flat.
+# ---------------------------------------------------------------------------
+# Per-function graph node ``type`` (builder.py) → fan-in node kind for the
+# READ side. Writers always render "derived-column". A node is only a *read*
+# here when it does NOT structurally write the target (see _node_writes_column).
+_GRAPH_READ_KIND = {
+    "SCALAR_COMPUTE": "intermediate",
+    "INSERT": "source-table",
+    "UPDATE": "source-table",
+    "MERGE": "source-table",
+}
+
+
+def _column_in_maps(column_maps: Any, target_upper: str) -> bool:
+    """True iff *target_upper* appears as a WRITTEN column in a parsed
+    ``column_maps`` record — an INSERT ``mapping`` key or an UPDATE
+    ``assignments`` left-hand column. A column appearing only as a value /
+    RHS expression / WHERE reference is NOT a write and returns False."""
+    if not isinstance(column_maps, dict):
+        return False
+    mapping = column_maps.get("mapping")
+    if isinstance(mapping, dict):
+        for col in mapping:
+            if str(col).strip().upper() == target_upper:
+                return True
+    for pair in (column_maps.get("assignments") or []):
+        try:
+            col = pair[0]
+        except (TypeError, IndexError, KeyError):
+            continue
+        if str(col).strip().upper() == target_upper:
+            return True
+    return False
+
+
+def _node_writes_column(node: Dict[str, Any], target_upper: str) -> bool:
+    """Structural write-attestation (the W153 guard).
+
+    A graph node WRITES the target column ONLY when the column literally
+    appears as a *written* target in that node's own parsed records — NOT when
+    it is merely mentioned in a filter/condition, on a read, or on an
+    expression RHS. The mention-based column index (indexer.py) and the
+    cross-function ``matching_columns`` walk (query_engine.py) pull a node into
+    the resolved set if it *references* the column at all; this re-derives the
+    write structurally so the G-Test / C04 wrong-family failure (W153) cannot
+    leak a fabricated writer into the diagram as an authoritative arrow.
+
+    Attestation by node ``type`` (builder.py):
+
+      * ``SCALAR_COMPUTE``      — ``output_variable`` equals the target.
+      * ``INSERT`` / ``UPDATE`` — target in the node's ``column_maps``.
+      * ``MERGE``               — target in the top-level ``column_maps`` OR in
+        either the ``when_matched`` / ``when_not_matched`` arm's ``column_maps``
+        (either arm ⇒ one writer node; arms are not split into an alternative
+        group).
+      * everything else (DELETE, loops, calc sub-types) — never a writer.
+    """
+    ntype = (node.get("type") or "").upper()
+    if ntype == "SCALAR_COMPUTE":
+        return (node.get("output_variable") or "").strip().upper() == target_upper
+    if ntype in ("INSERT", "UPDATE", "MERGE"):
+        if _column_in_maps(node.get("column_maps"), target_upper):
+            return True
+        if ntype == "MERGE":
+            for arm in ("when_matched", "when_not_matched"):
+                if _column_in_maps((node.get(arm) or {}).get("column_maps"), target_upper):
+                    return True
+        return False
+    return False
+
+
+def fan_in_steps_from_graph(
+    fetched_nodes: List[Dict[str, Any]],
+    target_column: str,
+    multi_source: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Project common-path graph nodes into ``fan_in_steps`` (Model A, flat).
+
+    This is the common-case fan-in source (W151 Phase 3.6): graph-resolvable
+    VARIABLE_TRACE queries stream via the ``llm_payload`` branch and never set
+    the Phase-3.5 ``tagged_lines``, so the fan-in must come from the structured
+    per-function graph nodes already fetched on that path
+    (``fetch_nodes_by_ids`` — entries shaped
+    ``{"function", "node", "execution_condition"[, "is_upstream"]}``).
+
+    Model A (flat, locally-grounded flow only — NO cross-function inference):
+
+      * a node that **structurally writes** the target (``_node_writes_column``)
+        → the target sink (edge kind ``writes``);
+      * a node that mentions the target but does **not** write it (a read /
+        filter / RHS reference) → its OWN function's **first writer** by line
+        (edge kind ``reads``);
+      * reads in a function with **no** attested writer are DROPPED (7.2) — no
+        locally-grounded edge exists, and a wholly-wrong function (W153) thus
+        contributes nothing at all;
+      * graph **edges are NOT converted** into diagram edges — the merged
+        graph's ``matching_columns`` links are exactly the cross-function
+        (Model B) inference Model A forbids. Diagram edges are synthesized from
+        node write/read attestation only.
+
+    **Cohort scope (prose-alignment invariant).** ``fetched_nodes`` is resolved
+    from the *global* column index — every function that writes the column
+    across the whole schema — but the prose answer is anchored on the retrieved
+    cohort (``functions_analyzed == list(multi_source.keys())``). Drawing the
+    global writer set produces a diagram that disagrees with the prose (a common
+    column has dozens of global writers) and breaks the W151 core invariant
+    (diagram is a navigation aid on the *authoritative prose*). When
+    *multi_source* is provided, a candidate writer/read whose function is NOT in
+    that cohort is **dropped** (counted as ``scoped_out``), bounding the fan-in
+    to exactly the analyzed cohort. When *multi_source* is ``None`` no cohort
+    filter applies (used to unit-test the attestation / Model-A logic in
+    isolation). This is the prose-alignment fix, not a degree cap.
+
+    Span discipline (the W153 ceiling, applied early): an in-cohort attested
+    writer with no resolved ``[line_start, line_end]`` span is **dropped before
+    assembly** (not drawn dashed) — an undrawable writer is not a claim. The
+    drop count is returned so the fan-in canary can surface coverage loss rather
+    than have it silently truncate the diagram. Span-less reads are skipped as
+    context.
+
+    Coalescing (3.5's gap rule) is NOT applied: each per-function graph node is
+    already one statement-level block with its own span, so there is nothing to
+    coalesce.
+
+    Returns ``{"steps", "writer_drops", "writers_total", "scoped_out"}`` —
+    ``steps`` for :func:`build_trace_diagram` (``trace_kind="fan-in"``);
+    ``writers_total`` is all globally-attested writers, ``scoped_out`` those
+    dropped for being outside the cohort, ``writer_drops`` the in-cohort writers
+    dropped for a missing span. ``steps`` is empty when there is no target or no
+    attested in-cohort writer survives.
+    """
+    target_upper = (target_column or "").strip().upper()
+    if not target_upper:
+        return {"steps": [], "writer_drops": 0, "writers_total": 0,
+                "scoped_out": 0}
+
+    # Cohort = the analyzed functions the body badge consumed (case-folded).
+    # None ⇒ no cohort filter (isolation tests of the topology logic).
+    cohort = None
+    if multi_source is not None:
+        cohort = {str(k).strip().upper() for k in multi_source}
+
+    writer_nodes: List[Dict[str, Any]] = []
+    read_nodes: List[Dict[str, Any]] = []
+    writer_drops = 0
+    writers_total = 0
+    scoped_out = 0
+    seen_ids: set = set()
+
+    for entry in fetched_nodes or []:
+        if not isinstance(entry, dict):
+            continue
+        node = entry.get("node", entry)
+        if not isinstance(node, dict):
+            continue
+        fn = entry.get("function", "") or ""
+        raw_id = node.get("id")
+        if not raw_id:
+            continue
+        node_id = f"{fn}:{raw_id}"
+        if node_id in seen_ids:
+            continue
+
+        ls, le = _norm_lines([node.get("line_start"), node.get("line_end")])
+        span_ok = ls > 0 and le >= ls
+        ntype = (node.get("type") or "").upper()
+        in_cohort = cohort is None or fn.strip().upper() in cohort
+
+        if _node_writes_column(node, target_upper):
+            writers_total += 1
+            if not in_cohort:
+                scoped_out += 1  # global writer outside the analyzed cohort.
+                continue
+            if not span_ok:
+                writer_drops += 1  # W153: undrawable writer is not a claim.
+                continue
+            seen_ids.add(node_id)
+            writer_nodes.append({
+                "node_id": node_id, "function": fn, "type": ntype,
+                "line_start": ls, "line_end": le,
+            })
+        else:
+            if not in_cohort:
+                continue  # read outside the analyzed cohort.
+            if not span_ok:
+                continue  # span-less read = context, not a grounded node.
+            seen_ids.add(node_id)
+            read_nodes.append({
+                "node_id": node_id, "function": fn, "type": ntype,
+                "line_start": ls, "line_end": le,
+                "summary": node.get("summary") or "",
+            })
+
+    # First writer (by line) per function — the read-attachment target (7.1).
+    first_writer: Dict[str, str] = {}
+    for w in sorted(writer_nodes, key=lambda n: n["line_start"]):
+        first_writer.setdefault(w["function"], w["node_id"])
+
+    steps: List[Dict[str, Any]] = []
+    for w in writer_nodes:
+        steps.append({
+            "node_id": w["node_id"],
+            "function": w["function"],
+            "kind": "derived-column",
+            "line_start": w["line_start"],
+            "line_end": w["line_end"],
+            "label": w["function"],
+            "successor": target_column,
+            "edge_kind": "writes",
+        })
+    for r in read_nodes:
+        fw = first_writer.get(r["function"])
+        if not fw or fw == r["node_id"]:
+            continue  # 7.2 drop (writer-less function) / self-loop guard.
+        steps.append({
+            "node_id": r["node_id"],
+            "function": r["function"],
+            "kind": _GRAPH_READ_KIND.get(r["type"], "source-table"),
+            "line_start": r["line_start"],
+            "line_end": r["line_end"],
+            "label": (r["summary"] or r["function"])[:60],
+            "successor": fw,
+            "edge_kind": "reads",
+        })
+
+    return {"steps": steps, "writer_drops": writer_drops,
+            "writers_total": writers_total, "scoped_out": scoped_out}

@@ -73,6 +73,7 @@ from src.agents.trace_diagram import (
     build_trace_diagram,
     diagram_from_bi_routing,
     fan_in_steps_from_tagged_lines,
+    fan_in_steps_from_graph,
 )
 from src.pipeline.logic_graph import compile_graph
 from src.pipeline.state import LogicState
@@ -1486,6 +1487,16 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             }
             yield f"event: meta\ndata: {json_mod.dumps(meta)}\n\n"
 
+            # W151 Phase 3.6: hoisted local for the common-case graph fan-in.
+            # MUST be initialized BEFORE the graph block (which runs here, in
+            # Stage 3) sets it to the structured `fetched_nodes` — initializing
+            # it later (Stage 4, with vt_tagged) would clobber the stash back to
+            # None. Consumed by the fan-in diagram emit. The common-case
+            # VARIABLE_TRACE stream goes through the graph/llm_payload branch,
+            # NOT the variable-trace branch that sets vt_tagged — so this is the
+            # real fan-in source.
+            vt_graph = None
+
             # --- Graph pipeline: resolve nodes for structured LLM payload ---
             if _graph_available and _graph_redis:
                 try:
@@ -1586,6 +1597,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
+                        # W151 Phase 3.6: stash the structured graph nodes so
+                        # the common-case fan-in projection can consume them at
+                        # the diagram-emit point (mirrors the vt_tagged stash).
+                        # Only the nodes are kept — graph edges are NOT used
+                        # (converting them is Model B / cross-function).
+                        vt_graph = fetched_nodes
                         _w43_diag.info(
                             "[W43_DIAG] correlation_id=%s stage=graph_path_selected"
                             " fetched_nodes=%d edges=%d payload_chars=%d",
@@ -1967,6 +1984,35 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     grounding,
                     lambda _sch, _fn: get_function_graph(_graph_redis, _sch, _fn),
                 )
+                # W151 Phase 3.6: common-case graph fan-in. When BI routing
+                # did not fire, project the stashed graph nodes (vt_graph) into
+                # fan_in_steps (Model A, flat; W153 structural write-attestation)
+                # and build the fan-in diagram. This is the common path — the
+                # graph/llm_payload branch — so it precedes the Phase-3.5
+                # tagged_lines fallback, which now only fires when the graph
+                # produced no diagram. Reuses the assert/emit/done logic below.
+                if _diagram is None and vt_graph:
+                    _gres = fan_in_steps_from_graph(
+                        vt_graph, state.get("target_variable", ""),
+                        multi_source=state.get("multi_source", {}) or {},
+                    )
+                    if _gres["scoped_out"] or _gres["writer_drops"]:
+                        logger.info(
+                            "W151 Phase 3.6 fan-in: %d/%d attested writer(s) "
+                            "scoped out (outside analyzed cohort, prose-"
+                            "alignment), %d in-cohort dropped span-less "
+                            "(W153) | correlation_id=%s",
+                            _gres["scoped_out"], _gres["writers_total"],
+                            _gres["writer_drops"], correlation_id,
+                        )
+                    if _gres["steps"]:
+                        _diagram = build_trace_diagram(
+                            target=state.get("target_variable", ""),
+                            trace_kind="fan-in",
+                            multi_source=state.get("multi_source", {}) or {},
+                            grounding=grounding,
+                            fan_in_steps=_gres["steps"],
+                        )
                 # W151 Phase 3.5: variable-trace fan-in. Derivation-dag wins
                 # when BI routing fired; otherwise project the stashed
                 # tagged_lines (vt_tagged) into fan_in_steps (Model A, flat) and
