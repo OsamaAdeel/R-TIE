@@ -13,12 +13,13 @@
 // solid edge is impossible to draw unless grounding === "VERIFIED". The
 // renderer is dumb — it draws what grounding says and never infers it.
 // ============================================================================
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef } from 'react';
 import clsx from 'clsx';
 import { computeLayout } from '../lib/layout.js';
+import { fetchSource } from '../api/client';
 import {
   Check, AlertTriangle, Database,
-  FunctionSquare, Filter, GitBranch, Target, FileCode,
+  FunctionSquare, Filter, GitBranch, Target, FileCode, ChevronRight, Loader2,
 } from 'lucide-react';
 
 // --- design tokens are inherited from ../index.css (role-based: ivory = text,
@@ -313,15 +314,46 @@ function LayoutFrames({ groups }) {
 }
 
 // ----------------------------------------------------------------------------
-// CITATION EXCERPT (Q3) — click a node to expand its bounded citation.text
-// (already in the payload) below the canvas. NO fetch: the embedded excerpt is
-// what renders; overflow beyond the line cap is marked and owned by Phase 5
-// (/v1/source). Uses the app's expand/close idiom.
+// CITATION EXCERPT (Q3 + Phase 5) — click a node to expand its bounded
+// citation.text (already in the payload) below the canvas. When the excerpt hit
+// the embed cap (citation.truncated), a "Load full cited range" action fetches
+// the full range from /v1/source on demand (W151 Phase 5). NOT a fetch for
+// non-truncated excerpts — those already render fully inline. On fetch failure
+// we fall back to the bounded excerpt (never a blank). Fetched ranges are
+// cached (sourceCache) so re-expanding a node doesn't refetch.
 // ----------------------------------------------------------------------------
-function CitationPanel({ node, onClose }) {
+function CitationPanel({ node, onClose, sourceCache }) {
   const cit = node.citation || {};
   const { function: fn, lines, text, truncated, grounding } = cit;
+  const schema = node.schema;
   const lineLabel = lines && (lines[0] || lines[1]) ? `${fn} [${lines[0]}–${lines[1]}]` : fn;
+  const cacheKey = `${schema}:${fn}:${lines?.[0]}-${lines?.[1]}`;
+  const canFetch = !!(truncated && fn && schema && lines && lines[0] && lines[1]);
+
+  // Lazy initial state: serve a cached full range immediately on re-expand.
+  const [state, setState] = useState(() =>
+    sourceCache.current.has(cacheKey)
+      ? { status: 'loaded', data: sourceCache.current.get(cacheKey) }
+      : { status: 'idle' },
+  );
+
+  const loadFull = async () => {
+    if (!canFetch) return;
+    setState({ status: 'loading' });
+    try {
+      const data = await fetchSource(fn, schema, lines[0], lines[1]);
+      sourceCache.current.set(cacheKey, data);
+      setState({ status: 'loaded', data });
+    } catch (err) {
+      // Fall back to the bounded excerpt already in the payload — never blank.
+      setState({ status: 'error', error: err?.message || 'fetch failed' });
+    }
+  };
+
+  const loaded = state.status === 'loaded' ? state.data : null;
+  const fullText = loaded
+    ? loaded.lines.map((l) => `${String(l.line).padStart(5)}  ${l.text}`).join('\n')
+    : null;
 
   return (
     <div className="mt-2 rounded-[10px] border border-line bg-panel-2/60">
@@ -337,16 +369,45 @@ function CitationPanel({ node, onClose }) {
           Close
         </button>
       </div>
-      {text ? (
+
+      {loaded ? (
+        <pre className="px-3 pb-2 text-[11.5px] font-mono text-ivory-dim whitespace-pre-wrap break-words leading-relaxed">{fullText}</pre>
+      ) : text ? (
         <pre className="px-3 pb-2 text-[11.5px] font-mono text-ivory-dim whitespace-pre-wrap break-words leading-relaxed">{text}</pre>
       ) : (
         <div className="px-3 pb-2 text-[11.5px] text-ivory-faint italic">
           No source excerpt in the payload for this element.
         </div>
       )}
-      {truncated && (
-        <div className="px-3 pb-3 text-[10.5px] text-amber">
-          Excerpt truncated to the embedded line cap — full source in a later phase.
+
+      {loaded && loaded.clamped && (
+        <div className="px-3 pb-2 text-[10.5px] text-amber">
+          Showing the first {loaded.truncated_to} lines of the cited range (capped).
+        </div>
+      )}
+
+      {/* Truncated, not yet loaded → offer the on-demand full fetch. */}
+      {canFetch && !loaded && (
+        <div className="px-3 pb-3">
+          {state.status === 'error' && (
+            <div className="mb-1 text-[10.5px] text-amber">
+              Couldn’t load the full source — showing the bounded excerpt.
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={loadFull}
+            disabled={state.status === 'loading'}
+            className="inline-flex items-center gap-1.5 text-[11px] text-gold hover:text-gold-dim transition-colors disabled:opacity-60"
+          >
+            {state.status === 'loading'
+              ? <Loader2 size={12} className="animate-spin" />
+              : <ChevronRight size={12} />}
+            {state.status === 'loading'
+              ? 'Loading full cited range…'
+              : state.status === 'error' ? 'Retry full cited range'
+              : 'Load full cited range'}
+          </button>
         </div>
       )}
     </div>
@@ -361,6 +422,9 @@ function CitationPanel({ node, onClose }) {
 // ----------------------------------------------------------------------------
 export default function CitedTraceDiagram({ data }) {
   const [selectedId, setSelectedId] = useState(null);
+  // Phase 5: cache fetched /v1/source ranges across panel open/close so
+  // re-expanding the same node doesn't refetch. Lives for the component's life.
+  const sourceCache = useRef(new Map());
 
   // Stable references (data is set once at `done`), so the layout memo below
   // doesn't recompute every render — and keeps react-hooks/exhaustive-deps
@@ -416,7 +480,14 @@ export default function CitedTraceDiagram({ data }) {
           ))}
         </div>
       </div>
-      {selected && <CitationPanel node={selected} onClose={() => setSelectedId(null)} />}
+      {selected && (
+        <CitationPanel
+          key={selected.id}
+          node={selected}
+          onClose={() => setSelectedId(null)}
+          sourceCache={sourceCache}
+        />
+      )}
     </div>
   );
 }

@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 # psycopg uses psycopg-binary which handles the event loop internally.
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -666,6 +666,65 @@ class QueryRequest(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     schema_scope: str = "ALL"
+
+
+# W151 Phase 5: /v1/source bounded overflow. The cited [start,end] is served
+# with a small fixed context margin, capped at a HARD ceiling so a single
+# response can never dump a whole function body (the W51 bound, as a number).
+SOURCE_CONTEXT_MARGIN = 3
+SOURCE_MAX_LINES = 400
+
+
+class SourceRequest(BaseModel):
+    """Request body for /v1/source (W151 Phase 5).
+
+    Identifies a single cited range to expand: the diagram node's resolved
+    ``schema`` + the citation's ``function`` and ``[line_start, line_end]``.
+    ``schema`` is taken from the node verbatim and NEVER re-probed — it is the
+    schema the inline excerpt was resolved under, so the overflow comes from the
+    same resolve (single source-of-truth; re-probing could pick a different
+    schema and reopen W51 citation/source drift).
+    """
+
+    model_config = {"strict": True}
+
+    function: str
+    schema: str
+    line_start: int
+    line_end: int
+
+
+def _bound_source_window(
+    source_code: List[Dict[str, Any]],
+    start: int,
+    end: int,
+    margin: int = SOURCE_CONTEXT_MARGIN,
+    max_lines: int = SOURCE_MAX_LINES,
+):
+    """Window numbered ``source_code`` to ``[start, end]`` ± ``margin``, hard-
+    capped at ``max_lines`` (W151 Phase 5 / W51 bound).
+
+    Pure and side-effect-free so the bound is unit-testable without a server.
+    The returned line count NEVER exceeds ``max_lines`` — that is the trust
+    guarantee: a pathological range (e.g. ``[1, 99999]``) cannot dump a whole
+    body. Returns ``(win_start, win_end, lines, clamped)``; ``lines`` is empty
+    when ``source_code`` is empty or the window lands outside the body.
+    """
+    nums = [ln["line"] for ln in source_code
+            if isinstance(ln, dict) and isinstance(ln.get("line"), int)]
+    if not nums:
+        return (0, 0, [], False)
+    body_min, body_max = min(nums), max(nums)
+    win_start = max(body_min, start - margin)
+    win_end = min(body_max, end + margin)
+    clamped = False
+    if win_end - win_start + 1 > max_lines:
+        win_end = win_start + max_lines - 1
+        clamped = True
+    lines = [ln for ln in source_code
+             if isinstance(ln, dict) and isinstance(ln.get("line"), int)
+             and win_start <= ln["line"] <= win_end]
+    return (win_start, win_end, lines, clamped)
 
 
 def _build_diagnostic_block(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -3292,6 +3351,70 @@ async def _handle_command(
                 "/index-status",
             ],
         }
+
+
+@app.post("/v1/source")
+async def source_endpoint(request: SourceRequest) -> Dict[str, Any]:
+    """Serve a BOUNDED numbered source range for a cited function (W151 Phase 5).
+
+    Read-only lazy-overflow for the trace-diagram citation excerpt: when the
+    inline excerpt hit the embed cap (``citation.truncated``), the UI expands by
+    fetching the full cited range here. Routes through the SAME
+    ``MetadataInterpreter.fetch_logic`` the excerpt was sliced from (single
+    resolve — no citation/source drift), serving at most ``SOURCE_MAX_LINES``
+    (the hard W51 ceiling). No LLM, no generation; the Oracle fallback inside
+    fetch_logic goes through the SqlGuardian SELECT-only template.
+    """
+    correlation_id = get_correlation_id()
+    fn = (request.function or "").strip()
+    schema = (request.schema or "").strip()
+    start, end = request.line_start, request.line_end
+
+    if not fn or not schema:
+        raise HTTPException(status_code=422, detail="function and schema are required")
+    if start < 1 or end < start:
+        raise HTTPException(status_code=422, detail="invalid line range")
+    if _metadata_interpreter is None:
+        raise HTTPException(status_code=503, detail="source resolver unavailable")
+
+    # Single-resolve: the same fetch_logic the citation came from, keyed by the
+    # node's schema (NOT re-probed). Build the same mini_state fetch_multi_logic
+    # uses so this is one function, not the whole multi-logic set.
+    mini_state: Dict[str, Any] = {
+        "schema": schema,
+        "object_name": fn,
+        "source_code": [],
+        "cache_hit": False,
+        "cache_stale": False,
+    }
+    try:
+        resolved = await _metadata_interpreter.fetch_logic(mini_state)
+    except Exception as exc:
+        logger.warning(
+            "v1/source fetch_logic failed for %s.%s: %s | correlation_id=%s",
+            schema, fn, exc, correlation_id,
+        )
+        raise HTTPException(status_code=404, detail="source not available for the requested function")
+
+    source_code = resolved.get("source_code") or []
+    if not source_code:
+        raise HTTPException(status_code=404, detail=f"no indexed source for {schema}.{fn}")
+
+    # Window to [start,end] ± fixed margin, hard-capped at SOURCE_MAX_LINES.
+    win_start, win_end, lines, clamped = _bound_source_window(source_code, start, end)
+    if not lines:
+        raise HTTPException(status_code=404, detail="requested range is outside the function body")
+
+    return {
+        "function": fn,
+        "schema": schema,
+        "line_start": win_start,
+        "line_end": win_end,
+        "lines": lines,
+        "clamped": clamped,
+        "truncated_to": SOURCE_MAX_LINES if clamped else None,
+        "correlation_id": correlation_id,
+    }
 
 
 @app.get("/v1/models")
