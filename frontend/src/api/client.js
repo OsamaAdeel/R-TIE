@@ -41,6 +41,9 @@ export async function sendQuery(query, sessionId, engineerId, provider, model, s
  * @param {function} callbacks.onStage         - per `event: stage` SSE frame
  * @param {function} callbacks.onMeta          - once with {schema, functions_analyzed, ...}
  * @param {function} callbacks.onToken         - per markdown text chunk
+ * @param {function} callbacks.onDiagram       - W151: per `event: diagram` SSE frame
+ *                                              ({nodes, edges, groups, target,
+ *                                              trace_kind, diagram_grounding})
  * @param {function} callbacks.onDone          - once with final payload
  * @param {function} callbacks.onClarification - backend asks for missing input
  * @param {function} callbacks.onError         - any non-abort failure
@@ -55,7 +58,7 @@ export async function streamQuery(
   provider,
   model,
   schemaScope,
-  { onStage, onMeta, onToken, onDone, onClarification, onError, onAbort } = {},
+  { onStage, onMeta, onToken, onDiagram, onDone, onClarification, onError, onAbort } = {},
   { signal } = {},
 ) {
   const body = {
@@ -116,6 +119,8 @@ export async function streamQuery(
                 onMeta?.(parsed);
               } else if (currentEvent === 'token') {
                 onToken?.(parsed);
+              } else if (currentEvent === 'diagram') {
+                onDiagram?.(parsed);
               } else if (currentEvent === 'done') {
                 if (parsed?.type === 'clarification') {
                   onClarification?.(parsed);

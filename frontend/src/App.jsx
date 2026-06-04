@@ -5,6 +5,7 @@ import { useSessions } from './hooks/useSessions';
 import { useHealth } from './hooks/useHealth';
 import { useTheme } from './hooks/useTheme';
 import { streamQuery } from './api/client';
+import { shouldRenderDiagram } from './lib/diagramGate';
 
 const ENGINEER_ID = 'engineer@rtie.local';
 
@@ -96,6 +97,10 @@ export default function App() {
       abortRef.current = controller;
 
       let meta = null;
+      // W151 Phase 4: the `event: diagram` payload arrives before `done`
+      // (after caveats). Stash it like `meta` and resolve the done-equality
+      // suppression in onDone, where the body badge is known.
+      let diagram = null;
 
       await streamQuery(
         text, sid, ENGINEER_ID, provider, model, schemaScope,
@@ -124,7 +129,15 @@ export default function App() {
             }));
           },
 
+          onDiagram: (diagramPayload) => {
+            diagram = diagramPayload;
+          },
+
           onDone: (finalPayload) => {
+            // Trust backstop: render the diagram ONLY if `done` says it was
+            // emitted AND its grounding equals the body badge. Otherwise drop
+            // it — the prose is authoritative and complete on its own.
+            const renderDiagram = shouldRenderDiagram(finalPayload);
             updateLastMessage(sid, (msg) => {
               const fullMarkdown = msg.streamedMarkdown || '';
               return {
@@ -138,6 +151,7 @@ export default function App() {
                   explanation: {
                     markdown: fullMarkdown,
                   },
+                  diagram: renderDiagram ? diagram : null,
                 },
               };
             });

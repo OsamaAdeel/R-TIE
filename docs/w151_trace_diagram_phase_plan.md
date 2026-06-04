@@ -15,7 +15,7 @@ This doc tracks the phased build and the items deferred out of each phase.
 | 3 | SSE `event: diagram` emission in `/v1/stream` + the `done`-event grounding-equality assertion (derivation-dag path). | **DONE** |
 | 3.5 | `tagged_lines → fan_in_steps` adapter (Model A, flat) + fan-in emit branch. **Fallback-path-only coverage** (see finding below). | **DONE** |
 | 3.6 | `graph → fan_in_steps` projection — real common-case fan-in (graph/`llm_payload` path). Model A flat, W153 structural write-attestation, **`multi_source`-cohort scope**. | **DONE** |
-| 4 | Frontend render via the prototype component (`_proto_trace/CitedTraceDiagram.jsx`), fed the event instead of the fixture. | not started |
+| 4 | Frontend render: relocate the component to the live app, consume `event: diagram`, done-equality suppression, render below the prose under the badge. | **DONE** |
 | 5 | `/v1/source` lazy overflow endpoint (serves citation spans beyond the ~80-line embed cap). | not started |
 
 ## Phase 1 — landed
@@ -221,6 +221,49 @@ This doc tracks the phased build and the items deferred out of each phase.
 > `N_GROUP_ASSET_SIZE` (21→4) and `N_RISK_WEIGHT` (21→6). **This is a downstream
 > retrieval issue, not a 3.6 defect** — 3.6 declines rather than fabricating.
 
+## Phase 4 — landed (frontend render of `event: diagram`)
+
+- **Relocation:** the component left the `_proto_trace/` sandbox into the live
+  app — `frontend/src/components/CitedTraceDiagram.jsx` and
+  `frontend/src/lib/layout.js` (+ `layout.test.js`). `layout.js`/`layout.test.js`
+  moved verbatim; the component kept its trust-critical functions **byte-for-byte**
+  (`groundingGuard`, the `Edges`/bezier dispatch, `Node` grounding-styling,
+  `GroundingPill`, `LayoutFrames`) and shed the prototype chrome (page wrapper,
+  adversarial toolbar, legend). **No client-side grounding override survives:**
+  `forceSolid` is hardcoded `false` and the prototype `downgrade` transform is
+  gone — trust flows straight from the payload's grounding. The proto scaffolding
+  (`proto-main.jsx`, `fixture.json`, `proto.css`, `index.html`, shots) stays
+  **untracked**.
+- **SSE consume:** `api/client.js` gained an `onDiagram` callback + an
+  `event: diagram` dispatch branch beside token/meta/done. The payload
+  (`{nodes, edges, groups, target, trace_kind, diagram_grounding}`) feeds the
+  component **unreshaped**.
+- **Done-equality suppression (trust backstop):** `lib/diagramGate.js` →
+  pure `shouldRenderDiagram(done)` = `done.diagram_emitted === true &&
+  done.diagram_grounding === done.badge`. Wired in `App.jsx onDone` (the diagram
+  is stashed like `meta` on the earlier `event: diagram`, resolved at done when
+  the badge is known): render iff the predicate passes, else `data.diagram =
+  null`. A suppressed diagram degrades cleanly to the prose — no empty box.
+- **Render position:** `MessageBubble.jsx` renders `<CitedTraceDiagram>` **after
+  `Answer`** (below the authoritative prose), under the governing `TrustBanner`
+  badge — so a dashed/UNVERIFIED diagram sits under the amber banner and a solid
+  one under the green banner; they always agree (guaranteed by the suppression
+  rule + the Phase-1 render ceiling).
+- **(B) derivation-dag edge labels:** the `Edges` layer now renders a cosmetic
+  `+`/`−`/`=` operand sign at the edge midpoint when `edge.label` is present —
+  additive only, never touches the solid/dashed grounding decision.
+- **(Q3) citation excerpt:** clicking a node expands its bounded `citation.text`
+  (already in the payload) in a panel below the canvas, with a **truncated**
+  marker when the embed cap was hit. **No fetch** — overflow is Phase 5.
+- **Validation:** `vitest` 15/15 (9 relocated layout + 6 `diagramGate`
+  predicate), `eslint` clean, `vite build` compiles. **Live (2026-06-04, `:8000`
+  3.6 backend):** `N_SHAREHOLDING_PERCENT` → `event: diagram` fan-in degree 22,
+  all edges VERIFIED, `done.diagram_emitted` true, `diagram_grounding ==
+  badge == VERIFIED` → `shouldRenderDiagram` true (SOLID under Verified banner);
+  `N_STD_ACCT_HEAD_AMT` → degree 12, all UNVERIFIED, grounding == badge ==
+  UNVERIFIED → renders dashed under the Unverified banner. The mismatch-
+  suppression path is covered by the predicate unit tests.
+
 ## Deferred items (gate later phases)
 
 ### (A) Flag B — variable-trace path must stash STRUCTURED steps — **RESOLVED (3.5 + 3.6)**
@@ -246,6 +289,7 @@ phase:** build an `alternatives`-from-near-twin adapter feeding
 store, not the LLM.
 
 ## HOLD
-Phases 1–3.6 landed (fan-in now fires on both the common graph path and the
-fallback `tagged_lines` path). Do not start Phase 4 (frontend render) or Phase 5
-(`/v1/source`) without explicit go-ahead. Stack held unpushed.
+Phases 1–4 landed (backend assembler + grounding + SSE + both fan-in producers +
+live frontend render). **Phase 5 (`/v1/source` lazy overflow) is the last piece**;
+after it, push + merge the whole stack. Do not start Phase 5 without explicit
+go-ahead. Stack held unpushed.
