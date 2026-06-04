@@ -36,6 +36,8 @@ from src.agents.orchestrator import (
     build_unrecognized_term_response,
     build_near_twin_hedge_response,
     resolve_bi_to_function,
+    w155_named_functions_in_query,
+    w155_cap_associated_with_named_fn,
     _detect_unrecognized_term_query,
 )
 from src.agents.anchor_resolution import (
@@ -924,6 +926,47 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             w88_pre = detect_named_computation(
                 raw_query=request.query, query_type="DATA_QUERY",
             )
+            # W155 — CAP↔function association gate (fix F-GT-1). When the
+            # query names a real corpus function ALONGSIDE a registry CAP,
+            # only force the DATA_QUERY aggregate if that CAP is actually
+            # computed/contained by the named function. Otherwise the W130
+            # force-route would aggregate the CAP's stored amount with no
+            # function-association check and badge it VERIFIED — a bluff
+            # (e.g. "How is CAP169 calculated in FN_G_TEST_CSTM?", where
+            # CAP169 is not in FN_G_TEST_CSTM). Falling back to w88_pre=None
+            # routes through the classifier + bi_routing (the honest path).
+            #
+            # Scoped to the cap_code ANCHOR arm only:
+            #   - method_skey (BIA) and the decline arm (LCR/NSFR/Leverage)
+            #     are left exactly as W130 has them.
+            #   - bare-CAP queries (no function named) -> named_funcs empty
+            #     -> gate skipped -> aggregate still returned.
+            # KNOWN RESIDUAL (W155, accepted): a NON-EXISTENT function named
+            # alongside a registry CAP yields named_funcs empty (it fails
+            # function_exists_in_graph) -> gate skipped -> still aggregates.
+            # Not widened to non-corpus tokens by design. See Weakness Log
+            # 2026-05-18 (W155).
+            if w88_pre is not None:
+                _w155_defn = w88_pre.definition
+                if (
+                    _w155_defn.arm == "anchor"
+                    and _w155_defn.filter_kind == "cap_code"
+                ):
+                    _w155_named_funcs = w155_named_functions_in_query(
+                        request.query, _graph_redis
+                    )
+                    if _w155_named_funcs and not w155_cap_associated_with_named_fn(
+                        _w155_defn.filter_code, _w155_named_funcs, _graph_redis
+                    ):
+                        logger.info(
+                            "W155: registry CAP %s not associated with named "
+                            "function(s) %s — falling through to classifier "
+                            "(no context-free aggregate) | correlation_id=%s",
+                            _w155_defn.filter_code,
+                            _w155_named_funcs,
+                            correlation_id,
+                        )
+                        w88_pre = None  # fall through; classifier + bi_routing run
             if w88_pre is not None:
                 logger.info(
                     "W130: W88 matched pre-classifier | computation=%s "

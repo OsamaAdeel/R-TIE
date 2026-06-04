@@ -1065,6 +1065,63 @@ def resolve_bi_to_function(
     }
 
 
+def w155_named_functions_in_query(
+    raw_query: str,
+    redis_client: Any,
+) -> List[str]:
+    """Return upper-cased corpus functions named in *raw_query*.
+
+    W155. A "corpus function" is a function-looking token from
+    :func:`extract_function_candidates` that actually resolves to a parsed
+    graph via :func:`function_exists_in_graph`. Non-existent tokens (e.g.
+    ``SOME_FAKE_FN``) are dropped — this is the deliberate W155 scope limit:
+    the association gate only engages when a *real* function is named.
+
+    Fails open: a ``None`` redis client makes ``function_exists_in_graph``
+    return ``False`` for every candidate, so the result is an empty list and
+    the caller's gate is skipped.
+    """
+    return sorted({
+        c.upper()
+        for c in extract_function_candidates(raw_query)
+        if function_exists_in_graph(c, redis_client)
+    })
+
+
+def w155_cap_associated_with_named_fn(
+    cap_code: str,
+    named_funcs: List[str],
+    redis_client: Any,
+) -> bool:
+    """Return True if *cap_code* is computed/contained by any *named_funcs*.
+
+    W155. Uses the canonical registry CAP (``cap_code``) against the literal
+    index via :func:`resolve_bi_to_function`, and tests whether any of the
+    named corpus functions appears among that CAP's candidate functions.
+
+    Membership — NOT ``resolve is None`` — is the correct test: every anchor
+    registry CAP resolves to *some* function (e.g. CAP169 ->
+    ABL_CAPITAL_SOURCE_STANDARD_ACCT_HEAD_DATA_POP), so ``resolve is None``
+    would never catch the bluff. We require the *named* function to be one of
+    the CAP's literal-index candidates.
+
+    Fails open: a ``None`` redis client makes ``resolve_bi_to_function``
+    return ``None`` -> empty candidate set -> returns ``False`` here, but the
+    caller skips the gate before reaching this when ``named_funcs`` is empty;
+    when ``named_funcs`` is non-empty and redis is None the gate would fall
+    through. In practice ``named_funcs`` is itself empty under a None client
+    (see :func:`w155_named_functions_in_query`), so the gate is skipped.
+    """
+    if not named_funcs:
+        return False
+    resolved = resolve_bi_to_function(cap_code, redis_client)
+    cap_fns = {
+        (c.get("function") or "").upper()
+        for c in (resolved or {}).get("candidates", [])
+    }
+    return bool(set(named_funcs) & cap_fns)
+
+
 def apply_bi_routing(
     state: LogicState,
     raw_query: str,
