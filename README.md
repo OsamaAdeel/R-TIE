@@ -258,6 +258,48 @@ A clean-machine Windows walkthrough lives at [docs/WINDOWS_SETUP.md](docs/WINDOW
 
 ---
 
+## Indexing
+
+The semantic index (per-function descriptions + embeddings) is built and
+refreshed through `cli.py`, which operates on the loader-populated corpus in
+Redis.
+
+**Full re-index — `python cli.py index --force`**
+Re-generates the description and re-embeds **every** function, overwriting each
+vector doc in place (an in-place update, not a wipe-and-rebuild). Expect roughly
+5–6 hours for the full corpus.
+
+**Resume after interruption — `python cli.py index --resume`**
+If a run stops partway (Ctrl-C, network/Redis drop, crash), `--resume` skips
+every function already completed (`status=approved` with a matching
+`source_hash`) and re-does only the unfinished, changed, or `failed` ones, then
+reconciles the aggregate graph (`graph:full` / `graph:index`). It is safe to run
+at any point after an interruption: completion state lives in durable Redis
+keys, so an already-finished corpus resumes as a no-op.
+
+`--force` and `--resume` are **mutually exclusive** (passing both is rejected) —
+`--force` is the clean rebuild, `--resume` is the recovery path.
+
+**Before resuming**, confirm the Redis container is up:
+
+```bash
+docker ps --filter name=rtie-redis
+```
+
+Redis persists to the `redis_data` Docker volume, so the indexed corpus and
+per-function completion state survive a container restart.
+
+> Persistence uses append-only (AOF) durability on that volume, so completion
+> state is recovered from the last write rather than the last periodic snapshot.
+
+**Interrupt safety.** A function is marked `approved` only after its
+description, validation, and embedding all succeed, written in a single atomic
+operation. An interrupted run therefore leaves the in-progress function
+non-approved (or untouched) — never half-written — so `--resume` cleanly re-does
+exactly that function and nothing already finished.
+
+---
+
 ## Key environment variables
 
 Loaded from `.env.{ENVIRONMENT}` (`dev` by default → `.env.dev`); see `.env.example` for the full template.
