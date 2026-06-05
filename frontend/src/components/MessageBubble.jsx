@@ -27,6 +27,7 @@ export default function MessageBubble({ message, onRetry, onEdit }) {
         data,
         streaming: message.streaming,
         loading: message.loading,
+        cancelled: message.cancelled,
       })
     : null;
 
