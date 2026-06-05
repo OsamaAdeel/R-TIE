@@ -70,6 +70,12 @@ export async function streamQuery(
   if (model) body.model = model;
   if (schemaScope) body.schema_scope = schemaScope;
 
+  // Tracks whether a terminal SSE event (done/clarification/error) was already
+  // delivered, so the abort backstop doesn't clobber a completed response if
+  // the user aborts in the same tick it finishes. Declared outside the try so
+  // the catch can read it too.
+  let terminalDelivered = false;
+
   try {
     const res = await fetch(`${API_BASE}/v1/stream`, {
       method: 'POST',
@@ -122,12 +128,14 @@ export async function streamQuery(
               } else if (currentEvent === 'diagram') {
                 onDiagram?.(parsed);
               } else if (currentEvent === 'done') {
+                terminalDelivered = true;
                 if (parsed?.type === 'clarification') {
                   onClarification?.(parsed);
                 } else {
                   onDone?.(parsed);
                 }
               } else if (currentEvent === 'error') {
+                terminalDelivered = true;
                 onError?.(parsed.error || 'Unknown streaming error');
               }
             } catch {
@@ -145,11 +153,22 @@ export async function streamQuery(
     } finally {
       signal?.removeEventListener('abort', onSignalAbort);
     }
+
+    // Abort backstop. controller.abort() races two reactions: fetch erroring
+    // the body stream (rejects the in-flight read → handled in catch below)
+    // and our onSignalAbort calling reader.cancel() (resolves the read with
+    // {done:true} → the loop breaks *cleanly*, skipping the catch entirely).
+    // When cancel() wins that race no terminal callback fires, leaving the UI
+    // stuck on its loading/streaming state. Detect the clean-abort exit here
+    // and deliver onAbort so the composer + activity indicator reset.
+    if (signal?.aborted && !terminalDelivered) {
+      onAbort?.();
+    }
   } catch (err) {
     // User-initiated abort — surface as a distinct event so the UI can
     // keep the partial answer instead of treating it as a hard error.
     if (err?.name === 'AbortError' || signal?.aborted) {
-      onAbort?.();
+      if (!terminalDelivered) onAbort?.();
       return;
     }
     onError?.(err.message);
