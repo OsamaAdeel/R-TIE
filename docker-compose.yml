@@ -32,6 +32,16 @@ services:
     # for the maintainer publish workflow.
     image: ${RTIE_REDIS_IMAGE:-ghcr.io/toheedasghar/r-tie-redis-prewarmed:latest}
     container_name: rtie-redis
+    environment:
+      # Durability: enable AOF so an abrupt container drop no longer loses the
+      # writes made since the last RDB snapshot (the RDB-only default is what
+      # let the aggregate graph index degenerate mid-session). Passed via
+      # REDIS_ARGS — NOT a `command:` override — because the redis-stack
+      # entrypoint (/entrypoint.sh) loads the RediSearch/JSON modules first and
+      # then appends REDIS_ARGS; a `command:` would bypass it and drop the
+      # modules rtie:vec depends on. Pairs with the named redis_data volume
+      # below so the AOF survives down/up.
+      REDIS_ARGS: "--appendonly yes"
     ports:
       - "6379:6379"
       - "8001:8001"  # RedisInsight UI (optional, dev-only)
