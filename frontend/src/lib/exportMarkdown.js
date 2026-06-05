@@ -211,16 +211,35 @@ function truncate(s, n) {
   return t.length > n ? t.slice(0, n - 1) + '…' : t;
 }
 
-export function downloadSessionAsMarkdown(session) {
-  const content = exportSessionToMarkdown(session);
-  const safeTitle = (session?.title || 'rtie-trace')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60) || 'rtie-trace';
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const filename = `${safeTitle}-${stamp}.md`;
+// Serialize every conversation into a single Markdown document — the bulk
+// companion to the per-chat export, reusing the exact same per-session
+// serialization so the two stay faithful to each other.
+export function exportAllSessionsToMarkdown(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const exportedAt = new Date().toISOString();
+  const totalMessages = list.reduce((n, s) => n + ((s.messages || []).length), 0);
 
+  const head = [
+    '# R-TIE — all conversations',
+    '',
+    `- **Exported:** ${exportedAt}`,
+    `- **Conversations:** ${list.length}`,
+    `- **Messages (total):** ${totalMessages}`,
+    '',
+    '---',
+    '',
+  ];
+
+  // Each session keeps its own `# title` heading + metadata block. A blank
+  // line between sessions keeps the seam readable.
+  const bodies = list.map((s) => exportSessionToMarkdown(s));
+  return head.join('\n') + bodies.join('\n');
+}
+
+// Build an <a download> and click it. Shared by both export paths; no-op when
+// the DOM APIs are unavailable (e.g. a non-browser test environment).
+function triggerDownload(content, filename) {
+  if (typeof document === 'undefined' || typeof URL?.createObjectURL !== 'function') return;
   const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -230,4 +249,23 @@ export function downloadSessionAsMarkdown(session) {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function stamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+}
+
+export function downloadSessionAsMarkdown(session) {
+  const content = exportSessionToMarkdown(session);
+  const safeTitle = (session?.title || 'rtie-trace')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'rtie-trace';
+  triggerDownload(content, `${safeTitle}-${stamp()}.md`);
+}
+
+export function downloadAllSessionsAsMarkdown(sessions) {
+  const content = exportAllSessionsToMarkdown(sessions);
+  triggerDownload(content, `rtie-all-chats-${stamp()}.md`);
 }
