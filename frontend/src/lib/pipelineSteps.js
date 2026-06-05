@@ -16,7 +16,7 @@ const STEP_DEFS = [
 // signals. Active step's `liveDetail` is replaced with the live SSE
 // `stage.message` when present, so the in-progress thinking line tracks
 // what the backend is actually doing in real time.
-export function buildPipelineSteps({ stage, data, streaming, loading }) {
+export function buildPipelineSteps({ stage, data, streaming, loading, cancelled }) {
   const currentKey = stage?.stage;
   const liveMessage = stage?.message;
   const finished = !!data && !streaming && !loading;
@@ -30,6 +30,11 @@ export function buildPipelineSteps({ stage, data, streaming, loading }) {
       return { ...def, state: '' };
     }
     if (finished) return { ...def, state: 'done' };
+    // A cancelled response (Stop clicked) is terminal even without a final
+    // payload. Freeze the steps that had already completed and drop the
+    // in-progress one — otherwise its `active` spinner keeps animating
+    // forever, since `stage` still points at the interrupted step.
+    if (cancelled) return { ...def, state: i < activeIdx ? 'done' : '' };
     if (i < activeIdx) return { ...def, state: 'done' };
     if (i === activeIdx) {
       return { ...def, state: 'active', liveDetail: liveMessage || def.label };
