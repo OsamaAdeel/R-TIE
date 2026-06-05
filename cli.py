@@ -3,6 +3,7 @@
 Usage:
     python cli.py index                    Index loader-validated functions (default; safe)
     python cli.py index --force            Re-embed loader-validated functions (skip cache)
+    python cli.py index --resume           Resume an interrupted index + repair aggregates
     python cli.py index --from-disk        Walk db/modules/* on disk (W93b opt-in)
     python cli.py index --from-disk --force  Same, forcing re-embed
     python cli.py status                   Check index status
@@ -13,6 +14,18 @@ Notes:
     keys from Redis (same path the backend lifespan uses at startup) — it
     requires the loader to have run at least once. Start the backend via
     ``python run.py`` before first use.
+
+    ``--resume`` is the interrupted-run recovery path. Its per-function
+    half is the existing skip-on-unchanged pass (re-embeds only missing /
+    changed / previously-failed functions; ``approved`` docs with a
+    matching source hash are skipped), so it picks up exactly where an
+    interrupted full build stopped instead of restarting the 5-6 hr run.
+    It then reconciles the per-schema aggregates: if ``graph:full`` /
+    ``graph:index`` are missing or degenerate (the partial-aggregate state
+    an interruption can leave), it rebuilds them atomically from the
+    per-function graphs already in Redis. ``--resume`` does NOT re-parse
+    per-function graphs (those are loader-owned and survive Redis
+    restarts) and is mutually exclusive with ``--force``.
 
     ``--from-disk`` walks ``db/modules/*`` directly and embeds every .sql
     file, including functions the loader rejected. Pre-W93b default — kept
@@ -56,6 +69,7 @@ async def cmd_index(
     force: bool = False,
     from_disk: bool = False,
     only_failed: bool = False,
+    resume: bool = False,
 ):
     """Index functions for semantic search.
 
@@ -76,6 +90,16 @@ async def cmd_index(
     targeted retry of a known-failed cohort (e.g., 86 LengthFinishReason-
     Error failures from W122d's first attempt) without re-touching the
     approved corpus. Ignored when ``from_disk=True``.
+
+    ``resume=True`` — interrupted-run recovery. Runs the per-function
+    pass with ``force=False`` (the existing skip-on-unchanged check is
+    the resumability primitive: ``approved`` docs with a matching
+    source hash are skipped, so only missing / changed / failed
+    functions are re-embedded), then reconciles each schema's
+    ``graph:full`` / ``graph:index`` aggregates — rebuilding them
+    atomically from the per-function graphs in Redis when they are
+    missing or degenerate. Mutually exclusive with ``force`` and
+    ignored when ``from_disk=True``.
     """
     from src.agents.indexer import IndexerAgent
 
@@ -105,7 +129,7 @@ async def cmd_index(
                 print(f"  Indexed: {', '.join(info['indexed_functions'])}")
             if info.get("error_details"):
                 for e in info["error_details"]:
-                    print(f"  ERROR: {e['name']} — {e['error']}")
+                    print(f"  ERROR: {e['name']} - {e['error']}")
 
         await vs.close()
         return
@@ -118,13 +142,21 @@ async def cmd_index(
         port=int(os.getenv("REDIS_PORT", "6379")),
     )
 
-    if only_failed:
+    if resume:
+        print(
+            "Resuming index (--resume) - skip-on-unchanged per-function "
+            "pass, then aggregate reconcile..."
+        )
+    elif only_failed:
         print(
             "Indexing loader-validated functions, only_failed=True "
-            "(W122-recovery — targets status=failed docs only)..."
+            "(W122-recovery - targets status=failed docs only)..."
         )
     else:
         print("Indexing loader-validated functions (graph:<schema>:<fn>)...")
+    # --resume's per-function half IS the existing skip-on-unchanged pass:
+    # force=False so approved+matching-hash docs are skipped and only
+    # missing / changed / failed functions are re-embedded.
     result = await indexer.index_all_loaded(
         graph_redis_client=graph_redis,
         force=force,
@@ -134,18 +166,50 @@ async def cmd_index(
     per_schema = result.get("results") or {}
     if not per_schema:
         print(
-            "\n  No schemas discovered — no graph:<schema>:<fn> keys in Redis.\n"
+            "\n  No schemas discovered - no graph:<schema>:<fn> keys in Redis.\n"
             "  Run the backend at least once (`python run.py`) to load functions,\n"
             "  or use `python cli.py index --from-disk` to walk db/modules/* directly."
         )
     else:
         for schema, info in per_schema.items():
+            indexed = info.get("indexed", 0)
+            skipped = info.get("skipped", 0)
+            errors = info.get("errors", 0)
             print(
                 f"\n  Auto-index {schema}: "
-                f"{info.get('indexed', 0)} indexed, "
-                f"{info.get('skipped', 0)} skipped, "
-                f"{info.get('errors', 0)} errors"
+                f"{indexed} indexed, {skipped} skipped, {errors} errors"
             )
+            if resume:
+                # Reconciliation summary derived from the per-function
+                # pass: done = newly-indexed + already-done (skipped);
+                # remaining = still-failing (errors). No extra Redis scan.
+                considered = indexed + skipped + errors
+                done = indexed + skipped
+                print(
+                    f"    vec docs: {done}/{considered} done"
+                    + (f", {errors} still failing" if errors else "")
+                )
+
+    # --resume aggregate reconcile: detect + atomically rebuild any
+    # missing/degenerate graph:full / graph:index from the per-function
+    # graphs already in Redis. The common recovery case (per-fn work
+    # complete, aggregates were the casualty) is handled here.
+    if resume:
+        from src.parsing.schema_discovery import discovered_schemas
+        from src.parsing.aggregate_builder import reconcile_aggregates
+
+        print("\n  Reconciling aggregates (graph:full / graph:index)...")
+        for schema in discovered_schemas(graph_redis):
+            outcome = reconcile_aggregates(graph_redis, schema)
+            if outcome.get("action") == "rebuilt":
+                rb = outcome.get("rebuild") or {}
+                print(
+                    f"    {schema}: REBUILT - {outcome['reason']} "
+                    f"-> graph:full now {rb.get('function_count', 0)} functions, "
+                    f"{rb.get('node_count', 0)} nodes"
+                )
+            else:
+                print(f"    {schema}: ok - {outcome['reason']}")
 
     try:
         graph_redis.close()
@@ -278,7 +342,7 @@ async def cmd_ask(question: str):
             else:
                 print(f"    {fn_name}: not relevant (skipped)")
         except Exception as e:
-            print(f"    {fn_name}: ERROR — {e}")
+            print(f"    {fn_name}: ERROR - {e}")
 
     # Combine answers
     if per_function_answers:
@@ -315,7 +379,21 @@ async def main():
         force = "--force" in args
         from_disk = "--from-disk" in args
         only_failed = "--only-failed" in args
-        await cmd_index(force=force, from_disk=from_disk, only_failed=only_failed)
+        resume = "--resume" in args
+        if force and resume:
+            print(
+                "Error: --force and --resume are mutually exclusive.\n"
+                "  --force re-embeds every function (clean re-build).\n"
+                "  --resume skips already-done functions and repairs "
+                "aggregates (interrupted-run recovery)."
+            )
+            return
+        await cmd_index(
+            force=force,
+            from_disk=from_disk,
+            only_failed=only_failed,
+            resume=resume,
+        )
     elif cmd == "status":
         await cmd_status()
     elif cmd == "ask" and len(args) > 1:
