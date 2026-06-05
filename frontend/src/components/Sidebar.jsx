@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plus, MessageSquare, Star, Pencil, Trash2, Settings, MoreHorizontal, ChevronRight, ChevronLeft, Sun, Moon } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Plus, MessageSquare, Star, Pencil, Trash2, MoreHorizontal, ChevronRight, ChevronLeft } from 'lucide-react';
 import clsx from 'clsx';
 import BrandMark from './BrandMark';
+import MenuItem from './MenuItem';
+import SettingsMenu from './SettingsMenu';
+import Modal from './Modal';
+import ConfirmDialog from './ConfirmDialog';
+import { computeMenuPlacement } from '../lib/menuPlacement';
 
 // Backend /health returns each connector as 'ok' | 'error'. The design uses
 // four states (ok / degraded / down / unknown). 'error' maps to 'down'; we
@@ -34,6 +40,7 @@ export default function Sidebar({
   onDelete,
   onRename,
   onStar,
+  onDeleteAll,
   health,
   theme,
   onToggleTheme,
@@ -231,34 +238,20 @@ export default function Sidebar({
             <div className="text-ivory-faint text-[11px] truncate">Risk Engineering</div>
           </div>
         )}
-        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-        {!collapsed && (
-          <button
-            type="button"
-            title="Settings"
-            className="w-7 h-7 grid place-items-center rounded-md text-ivory-faint hover:text-ivory hover:bg-hover transition-colors"
-          >
-            <Settings size={14} />
-          </button>
-        )}
+        {/* Settings menu — consolidates the theme toggle (moved here from the
+            standalone footer icon), bulk export, About, and the destructive
+            "Delete all chats". Shown in both modes so the menu (and theme
+            toggle) stays reachable when the sidebar is collapsed. */}
+        <SettingsMenu
+          theme={theme}
+          onToggleTheme={onToggleTheme}
+          sessions={sessions}
+          onDeleteAll={onDeleteAll}
+          health={health}
+          collapsed={collapsed}
+        />
       </div>
     </aside>
-  );
-}
-
-function ThemeToggle({ theme, onToggle }) {
-  if (typeof onToggle !== 'function') return null;
-  const isDark = theme === 'dark';
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
-      title={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
-      className="w-7 h-7 grid place-items-center rounded-md text-ivory-faint hover:text-ivory hover:bg-hover transition-colors"
-    >
-      {isDark ? <Sun size={14} /> : <Moon size={14} />}
-    </button>
   );
 }
 
@@ -275,17 +268,47 @@ function SectionLabel({ icon, children }) {
 
 function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, onRename, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const wrapRef = useRef(null);
+  // Fixed viewport coords for the portaled menu (escapes the sidebar's
+  // overflow-y-auto clip); recomputed each open from the trigger's rect.
+  const [menuStyle, setMenuStyle] = useState(null);
+  const [renaming, setRenaming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const openMenu = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenuStyle(computeMenuPlacement({
+      buttonRect: r,
+      viewportH: window.innerHeight,
+      viewportW: window.innerWidth,
+    }));
+    setMenuOpen(true);
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
-    const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setMenuOpen(false); };
+    // The menu is portaled to <body>, so "outside" means outside BOTH the
+    // trigger and the menu itself.
+    const onDoc = (e) => {
+      if (btnRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setMenuOpen(false);
+    };
     const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    // The fixed menu would detach from its trigger if the list scrolls or the
+    // window resizes — just close it.
+    const onReflow = () => setMenuOpen(false);
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onReflow);
+    window.addEventListener('scroll', onReflow, true);
     return () => {
       document.removeEventListener('mousedown', onDoc);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onReflow);
+      window.removeEventListener('scroll', onReflow, true);
     };
   }, [menuOpen]);
 
@@ -293,15 +316,12 @@ function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, on
   const handleRename = (e) => {
     e.stopPropagation();
     setMenuOpen(false);
-    const next = window.prompt('Rename trace', session.title);
-    if (next == null) return;
-    onRename?.(session.id, next);
+    setRenaming(true);
   };
   const handleDelete = (e) => {
     e.stopPropagation();
     setMenuOpen(false);
-    if (!window.confirm('Delete this trace? This cannot be undone.')) return;
-    onDelete?.(session.id);
+    setDeleting(true);
   };
 
   if (collapsed) {
@@ -321,7 +341,6 @@ function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, on
 
   return (
     <div
-      ref={wrapRef}
       onClick={() => onSelect(session.id)}
       className={clsx(
         'group relative flex items-center gap-2 px-3 py-2 mx-1 my-0.5 rounded-md cursor-pointer transition-colors',
@@ -336,11 +355,12 @@ function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, on
       )}
       <span className="flex-1 truncate text-[13px]">{session.title}</span>
       <button
+        ref={btnRef}
         type="button"
         aria-label="Conversation options"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+        onClick={(e) => { e.stopPropagation(); menuOpen ? setMenuOpen(false) : openMenu(); }}
         className={clsx(
           'shrink-0 p-1 rounded text-ivory-faint hover:text-ivory hover:bg-hover-strong transition-opacity',
           menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
@@ -349,10 +369,14 @@ function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, on
         <MoreHorizontal size={14} />
       </button>
 
-      {menuOpen && (
+      {/* Portaled to <body> with fixed coords so the sidebar's overflow-y-auto
+          can't clip it; computeMenuPlacement flips it upward near the bottom. */}
+      {menuOpen && menuStyle && createPortal(
         <div
+          ref={menuRef}
           role="menu"
-          className="rtie-menu-shadow absolute right-2 top-9 z-20 min-w-[170px] rounded-lg border border-line-strong bg-panel py-1"
+          className="rtie-menu-shadow fixed z-50 rounded-lg border border-line-strong bg-panel py-1"
+          style={{ top: menuStyle.top, left: menuStyle.left, width: menuStyle.width }}
           onClick={(e) => e.stopPropagation()}
         >
           <MenuItem icon={<Star size={13} className={isStarred ? 'fill-gold text-gold' : ''} />} onClick={handleStar}>
@@ -361,27 +385,75 @@ function ConvRow({ session, isActive, isStarred, collapsed, onSelect, onStar, on
           <MenuItem icon={<Pencil size={13} />} onClick={handleRename}>Rename</MenuItem>
           <div className="my-1 h-px bg-line" />
           <MenuItem icon={<Trash2 size={13} />} onClick={handleDelete} danger>Delete</MenuItem>
-        </div>
+        </div>,
+        document.body,
+      )}
+
+      {renaming && (
+        <RenameModal
+          initial={session.title}
+          onCancel={() => setRenaming(false)}
+          onCommit={(next) => { setRenaming(false); onRename?.(session.id, next); }}
+        />
+      )}
+
+      {deleting && (
+        <ConfirmDialog
+          labelledBy="rtie-delete-trace-title"
+          title="Delete this trace?"
+          message="This cannot be undone."
+          confirmLabel="Delete"
+          onCancel={() => setDeleting(false)}
+          onConfirm={() => { setDeleting(false); onDelete?.(session.id); }}
+        />
       )}
     </div>
   );
 }
 
-function MenuItem({ icon, onClick, danger, children }) {
+// In-app conversation rename — replaces the native window.prompt(). Reuses the
+// shared Modal idiom (same as the delete-all-chats confirmation). Pre-fills the
+// current name, commits on OK / Enter, cancels on Escape / backdrop / Cancel.
+function RenameModal({ initial, onCancel, onCommit }) {
+  const [value, setValue] = useState(initial || '');
+
+  const submit = () => {
+    const next = value.trim();
+    if (!next || next === initial) { onCancel(); return; }
+    onCommit(next);
+  };
+
   return (
-    <button
-      role="menuitem"
-      onClick={onClick}
-      className={clsx(
-        'w-full flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium tracking-tight text-left transition-colors',
-        danger
-          ? 'text-burgundy hover:bg-burgundy/10'
-          : 'text-ivory hover:bg-hover'
-      )}
-      style={{ fontFamily: 'var(--font-sans)', fontFeatureSettings: "'cv11', 'ss01'" }}
-    >
-      <span className={clsx('shrink-0', danger ? 'text-burgundy/80' : 'text-ivory-faint')}>{icon}</span>
-      <span>{children}</span>
-    </button>
+    <Modal labelledBy="rtie-rename-title" onClose={onCancel}>
+      <h2 id="rtie-rename-title" className="text-[15px] font-semibold text-ivory">
+        Rename conversation
+      </h2>
+      <input
+        autoFocus
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+        placeholder="Conversation name"
+        className="mt-3 w-full bg-panel-2 border border-line-strong rounded-md px-3 py-2 text-[13px] text-ivory placeholder:text-ivory-faint focus:outline-none focus:border-line-gold"
+      />
+      <div className="mt-5 flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-3 py-1.5 rounded-md text-[12.5px] font-medium text-ivory-faint hover:text-ivory hover:bg-hover transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={submit}
+          className="px-3 py-1.5 rounded-md text-[12.5px] font-semibold text-ink bg-gold hover:bg-gold-dim transition-colors"
+        >
+          OK
+        </button>
+      </div>
+    </Modal>
   );
 }

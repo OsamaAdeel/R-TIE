@@ -15,8 +15,12 @@
 // ============================================================================
 import { useMemo, useState, useRef } from 'react';
 import clsx from 'clsx';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { computeLayout } from '../lib/layout.js';
+import { edgeFocus, isNodeDimmed, isEdgeFocused, isEdgeDimmed } from '../lib/traceFocus.js';
 import { fetchSource } from '../api/client';
+import { useTheme } from '../hooks/useTheme';
 import {
   Check, AlertTriangle, Database,
   FunctionSquare, Filter, GitBranch, Target, FileCode, ChevronRight, Loader2,
@@ -93,9 +97,12 @@ function bezier(sp, tp, horizontal) {
 // +/−/= operand label (edge.label, present on derivation-dag edges) rendered
 // at the edge midpoint — it never touches the solid/dashed decision.
 // ----------------------------------------------------------------------------
-function Edges({ nodes, edges, forceSolid, width = 1240, height = 780 }) {
+function Edges({ nodes, edges, forceSolid, focus = null, onHoverEdge, width = 1240, height = 780 }) {
   const byId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
 
+  // The <svg> stays pointer-events:none so it never blocks the HTML node
+  // clicks layered above it; each edge's transparent hit-path re-enables
+  // pointer-events on its own stroke so hover-focus can fire (Item 3).
   return (
     <svg className="absolute inset-0 pointer-events-none" width={width} height={height} aria-hidden>
       <defs>
@@ -141,12 +148,28 @@ function Edges({ nodes, edges, forceSolid, width = 1240, height = 780 }) {
 
         const mid = { x: (sp.x + tp.x) / 2, y: (sp.y + tp.y) / 2 };
 
+        // Hover-focus (Item 3): emphasis is opacity + a small width bump only —
+        // it never touches the solid/dashed or colour decisions above.
+        const focused = isEdgeFocused(focus, edge.id);
+        const dimmed = isEdgeDimmed(focus, edge.id);
+        const baseWidth = style.solid ? 2.4 : 1.8;
+
         return (
-          <g key={edge.id}>
+          <g key={edge.id} opacity={dimmed ? 0.18 : 1}>
+            {/* invisible fat hit-path: re-enables pointer events on the stroke
+                (the parent <svg> is pointer-events:none) so the thin visible
+                edge is easy to hover. Stays hittable even while dimmed. */}
+            <path
+              d={d} fill="none" stroke="transparent" strokeWidth={14}
+              strokeLinecap="round"
+              style={{ pointerEvents: 'stroke' }}
+              onMouseEnter={() => onHoverEdge?.(edge.id)}
+              onMouseLeave={() => onHoverEdge?.(null)}
+            />
             <path
               d={d} fill="none"
               stroke={VAR(color)}
-              strokeWidth={style.solid ? 2.4 : 1.8}
+              strokeWidth={focused ? baseWidth + 1 : baseWidth}
               strokeDasharray={style.dasharray}
               strokeLinecap="round"
               markerEnd={`url(#arrow-${color})`}
@@ -314,6 +337,41 @@ function LayoutFrames({ groups }) {
 }
 
 // ----------------------------------------------------------------------------
+// SQL EXCERPT RENDER (W151 polish, Item 4) — formats the cited PL/SQL with the
+// same theme-aware Prism highlighter the answer body uses (Answer.jsx), so the
+// excerpt reads as code rather than a flat <pre>. This is FORMAT ONLY: the text
+// shown is the exact bounded cited range the payload/fetch already returned —
+// it changes how the source looks, never what source is shown or how it's
+// fetched. When line numbers are known (the fetched full range) the gutter
+// shows the real source line numbers; the inline excerpt blob has none.
+// ----------------------------------------------------------------------------
+function SqlBlock({ code, startLine = null }) {
+  const { theme } = useTheme();
+  const prismStyle = theme === 'dark' ? oneDark : oneLight;
+  return (
+    <SyntaxHighlighter
+      language="sql"
+      style={prismStyle}
+      wrapLongLines
+      showLineNumbers={startLine != null}
+      startingLineNumber={startLine || 1}
+      lineNumberStyle={{ minWidth: '3em', opacity: 0.45, userSelect: 'none' }}
+      customStyle={{
+        margin: 0,
+        padding: '4px 12px 10px',
+        background: 'transparent',
+        fontSize: '11.5px',
+        fontFamily: 'var(--font-mono)',
+        lineHeight: '1.55',
+      }}
+      codeTagProps={{ style: { background: 'transparent', fontFamily: 'var(--font-mono)' } }}
+    >
+      {code}
+    </SyntaxHighlighter>
+  );
+}
+
+// ----------------------------------------------------------------------------
 // CITATION EXCERPT (Q3 + Phase 5) — click a node to expand its bounded
 // citation.text (already in the payload) below the canvas. When the excerpt hit
 // the embed cap (citation.truncated), a "Load full cited range" action fetches
@@ -351,9 +409,11 @@ function CitationPanel({ node, onClose, sourceCache }) {
   };
 
   const loaded = state.status === 'loaded' ? state.data : null;
-  const fullText = loaded
-    ? loaded.lines.map((l) => `${String(l.line).padStart(5)}  ${l.text}`).join('\n')
-    : null;
+  // The fetched full range carries real per-line numbers; hand the SQL block
+  // the raw line text and let its gutter render those numbers (same content as
+  // before, now highlighted instead of a hand-built " 12345  text" prefix).
+  const loadedCode = loaded ? loaded.lines.map((l) => l.text).join('\n') : null;
+  const loadedStart = loaded && loaded.lines.length ? loaded.lines[0].line : null;
 
   return (
     <div className="mt-2 rounded-[10px] border border-line bg-panel-2/60">
@@ -371,9 +431,9 @@ function CitationPanel({ node, onClose, sourceCache }) {
       </div>
 
       {loaded ? (
-        <pre className="px-3 pb-2 text-[11.5px] font-mono text-ivory-dim whitespace-pre-wrap break-words leading-relaxed">{fullText}</pre>
+        <div className="px-1.5 pb-1.5"><SqlBlock code={loadedCode} startLine={loadedStart} /></div>
       ) : text ? (
-        <pre className="px-3 pb-2 text-[11.5px] font-mono text-ivory-dim whitespace-pre-wrap break-words leading-relaxed">{text}</pre>
+        <div className="px-1.5 pb-1.5"><SqlBlock code={text} /></div>
       ) : (
         <div className="px-3 pb-2 text-[11.5px] text-ivory-faint italic">
           No source excerpt in the payload for this element.
@@ -422,6 +482,10 @@ function CitationPanel({ node, onClose, sourceCache }) {
 // ----------------------------------------------------------------------------
 export default function CitedTraceDiagram({ data }) {
   const [selectedId, setSelectedId] = useState(null);
+  // W151 polish (Item 3): the edge the pointer is currently over. Drives the
+  // hover-focus emphasis (that edge + its two endpoint nodes) with everything
+  // else dimmed. Pure client state — no new data, no layout recompute.
+  const [hoveredEdgeId, setHoveredEdgeId] = useState(null);
   // Phase 5: cache fetched /v1/source ranges across panel open/close so
   // re-expanding the same node doesn't refetch. Lives for the component's life.
   const sourceCache = useRef(new Map());
@@ -453,6 +517,9 @@ export default function CitedTraceDiagram({ data }) {
     [positioned, selectedId],
   );
 
+  // Resolve the hovered edge into {edgeId, nodeIds} for the focus emphasis.
+  const focus = useMemo(() => edgeFocus(edges, hoveredEdgeId), [edges, hoveredEdgeId]);
+
   if (!nodes.length) return null;
 
   const kindLabel = data?.trace_kind === 'derivation-dag' ? 'Derivation' : 'Fan-in';
@@ -464,16 +531,20 @@ export default function CitedTraceDiagram({ data }) {
         <span>Trace diagram · {kindLabel} →</span>
         <span className="font-mono text-gold normal-case tracking-normal">{data?.target}</span>
       </div>
-      {/* canvas — fixed to the computed bounds, scrolls horizontally if wide */}
-      <div className="overflow-x-auto rounded-[12px] border border-line bg-panel/40">
+      {/* canvas — borderless (W151 polish, Item 2); fixed to the computed
+          bounds and scrolls horizontally if wide so it never breaks the chat
+          column. */}
+      <div className="overflow-x-auto rounded-[12px] bg-panel/40">
         <div className="relative" style={{ height: layout.bounds.h, width: layout.bounds.w }}>
           <LayoutFrames groups={layout.groups} />
           <Edges nodes={positioned} edges={edges} forceSolid={false}
+            focus={focus} onHoverEdge={setHoveredEdgeId}
             width={layout.bounds.w} height={layout.bounds.h} />
           {positioned.map((n) => (
             <Node
               key={n.id}
               node={n}
+              dimmed={isNodeDimmed(focus, n.id)}
               selected={n.id === selectedId}
               onSelect={(id) => setSelectedId((cur) => (cur === id ? null : id))}
             />
