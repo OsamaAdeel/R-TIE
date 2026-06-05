@@ -2927,25 +2927,56 @@ Output JSON schema:
 
 
 SEMANTIC_EXPLANATION_PROMPT = """You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
-You receive source code from one or more PL/SQL functions and must explain the BUSINESS MEANING and DATA FLOW — not the syntax.
+You receive the user's question plus source code from one or more PL/SQL
+functions. Your job is to ANSWER THE QUESTION, grounded in that source —
+explaining BUSINESS MEANING and DATA FLOW, never SQL syntax.
 
-RULES:
-1. Never explain what SQL syntax does (do not explain NVL, CASE, TO_NUMBER, DECODE).
-   Instead explain what the VALUE represents and why it changes.
+ANSWER AT THE DEPTH THE QUESTION IMPLIES
+Shape your answer to what was actually asked — like an analyst who understood
+the question, not a fixed template:
+- Identification / lookup ("what's the name of the function for X", "which
+  function does Y") -> answer briefly: the function name and a one-line
+  statement of its purpose. Do NOT produce a step-by-step walkthrough.
+- Focused question ("what does the first MERGE do", "where does the threshold
+  come from", "what gates this") -> answer that specific point and the lines
+  that establish it. Do NOT tour the whole function.
+- Full explanation ("how does X work", "explain X", "walk me through X") ->
+  produce the full step-by-step walkthrough described below.
+When the implied depth is ambiguous, prefer the more concise answer and note
+that fuller detail is available on request.
 
-2. For every step, answer these questions:
+GROUNDING — REQUIRED AT EVERY DEPTH (non-negotiable)
+Every claim, at every length, cites the function name and the specific line(s)
+it rests on. A one-line identification answer cites the function and lines it
+was resolved from exactly as a full walkthrough cites each step. Never assert a
+name, value, formula, or behaviour without a citation; if the source does not
+support a claim, say so rather than guessing. Brevity reduces the NUMBER of
+claims, never the grounding of each — a shorter answer is not a less-cited one.
+
+EXPLAIN MEANING, NOT SYNTAX
+Never explain what SQL syntax does (NVL, CASE, TO_NUMBER, DECODE). Explain what
+the VALUE represents, where it came from, and why it changes.
+
+THE FULL WALKTHROUGH (use this shape ONLY when the question asks for a full
+explanation)
+Work through the logic step by step. For each step, answer:
    - What is the value at this point?
    - Where did it come from (which table, which column)?
    - Why is it being changed?
    - What does the result mean in business terms?
+For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
+explain the formula in plain English, name the source tables and what data they
+contribute, and show the arithmetic clearly — e.g. "DBS GL balance × deduction
+ratio". For a value copied unchanged between tables, state clearly: "The value
+is passed through without modification." End with a SHORT SUMMARY (4 sentences
+max): where the value originates, what transforms it, what the final value
+represents, and any execution conditions explicitly present in the source (omit
+that last line entirely if the source has no calendar/date or other gating
+predicate — do not manufacture one).
 
-3. For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
-   - Explain the formula in plain English
-   - Name the source tables and what data they contribute
-   - Show the arithmetic clearly: e.g. "DBS GL balance × deduction ratio"
-
-4. Report execution conditions ONLY when the source contains an explicit guard
-   predicate for them. Surface a real gate prominently; never invent one.
+EXECUTION CONDITIONS — REPORT ONLY WHAT THE SOURCE PROVES (applies at every depth)
+Report execution conditions ONLY when the source contains an explicit guard
+predicate for them. Surface a real gate prominently; never invent one.
    - A calendar/date gate exists ONLY when the source has an explicit month or
      date predicate — for example EXTRACT(MONTH FROM ...) = 12, a MONTH = 12 or
      'DECEMBER' comparison, or a hardcoded date literal used as a run guard.
@@ -2953,29 +2984,21 @@ RULES:
      function (do not bury it at the end) and cite the gating line by function
      name and line number.
    - When NO such predicate is present, do NOT state any calendar, month,
-     quarter-end, year-end, or specific-date condition, and do NOT invent a
-     run date. Do not assume the function runs only in December, only at
-     year-end, or only on a fixed date. If the source has no gate, say it has
-     no calendar/date gating rather than guessing one.
+     quarter-end, year-end, or specific-date condition, and do NOT invent a run
+     date. Do not assume the function runs only in December, only at year-end,
+     or only on a fixed date. If the source has no gate, say it has no
+     calendar/date gating rather than guessing one.
 
-5. For steps where a value is copied unchanged between tables:
-   State clearly: "The value is passed through without modification."
-
-6. Cite every claim with function name and line numbers.
-
-7. End with a SHORT SUMMARY (4 sentences max) that states:
-   - Where the value originates
-   - What transforms it
-   - What the final value represents
-   - Any execution conditions explicitly present in the source (omit this line
-     entirely if the source has no calendar/date or other gating predicate —
-     do not manufacture one)
-
-FORMAT:
-- Use ## for main heading, ### for each function/step
-- Include ```sql code blocks with the relevant PL/SQL
-- Put line references in section headers: ### Step 1: Initial Insert (Lines 203-223)
-- Do NOT repeat line references separately below code blocks
+FORMAT
+- Use markdown. For a full walkthrough: ## for the main heading, ### for each
+  function/step, and put line references in the section headers (e.g.
+  ### Step 1: Initial Insert (Lines 203-223)). Include ```sql code blocks with
+  the relevant PL/SQL; do NOT repeat the line references separately below the
+  code block.
+- For a brief or focused answer, a short paragraph (or a few sentences) is
+  appropriate — still naming the function and citing the line(s) inline (e.g.
+  "(FN_G_TEST_CSTM, Lines 12-19)"). Do NOT pad a short answer into the full
+  template.
 """
 
 
@@ -3345,11 +3368,14 @@ class LogicExplainer:
         if llm_payload and state.get("graph_available"):
             logger.info("explain_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
-                f"{llm_payload}\n\n"
-                "Answer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer when it asks for a fact or an identification; a full "
+                f"walkthrough only when it asks how something works. Ground every claim, "
+                f"at any length, in the analysis below, citing the function name and "
+                f"specific line numbers.\n\n"
+                f"Structured analysis produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}"
             )
         else:
             logger.info("explain_semantic: falling back to raw source")
@@ -3367,11 +3393,15 @@ class LogicExplainer:
                 function_sections.append(section)
 
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer (a name and its one-line purpose) when it asks for a "
+                f"fact or an identification; a full step-by-step walkthrough only when "
+                f"it asks how something works. Ground every claim, at any length, in "
+                f"the source below, citing the function name and specific line numbers.\n\n"
+                f"Source material to answer from ({len(multi_source)} function(s) "
+                f"retrieved for this question):\n\n"
                 + "\n".join(function_sections)
-                + "\n\nAnswer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
             )
 
         # Use non-JSON mode for markdown responses
@@ -3463,11 +3493,14 @@ class LogicExplainer:
         if llm_payload and state.get("graph_available"):
             logger.info("stream_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
-                f"{llm_payload}\n\n"
-                "Answer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer when it asks for a fact or an identification; a full "
+                f"walkthrough only when it asks how something works. Ground every claim, "
+                f"at any length, in the analysis below, citing the function name and "
+                f"specific line numbers.\n\n"
+                f"Structured analysis produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}"
             )
         else:
             logger.info("stream_semantic: falling back to raw source")
@@ -3499,11 +3532,15 @@ class LogicExplainer:
                 }
 
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following {kept_count} functions were found via semantic search:\n\n"
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer (a name and its one-line purpose) when it asks for a "
+                f"fact or an identification; a full step-by-step walkthrough only when "
+                f"it asks how something works. Ground every claim, at any length, in "
+                f"the source below, citing the function name and specific line numbers.\n\n"
+                f"Source material to answer from ({kept_count} function(s) retrieved "
+                f"for this question):\n\n"
                 + "\n".join(function_sections)
-                + "\n\nAnswer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
             )
 
         llm = create_llm(
