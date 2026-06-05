@@ -26,6 +26,15 @@ from starlette.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Load .env BEFORE importing modules that read environment at import time.
+# src.llm_factory freezes the per-call-site model map (_RESOLVED_SITE_MODELS)
+# from RTIE_MODEL_OVERRIDES at module-import time; if load_dotenv runs after
+# that import (it used to, ~20 lines below), the override is missing and every
+# site silently falls back to SITE_MODEL_DEFAULTS (gpt-4o-mini) — which the
+# claude_cli provider then sends to the Claude CLI as an invalid model. The
+# late load_dotenv() below is now redundant but harmless (override=False).
+load_dotenv(f".env.{os.getenv('ENVIRONMENT', 'dev')}")
+
 from src.agents.orchestrator import (
     Orchestrator,
     detect_business_identifiers,
@@ -97,7 +106,12 @@ from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
 from src.monitoring.health import HealthChecker
 from src.middleware.correlation_id import CorrelationIdMiddleware, get_correlation_id
-from src.llm_factory import list_available_models, get_default_provider, get_default_model
+from src.llm_factory import (
+    get_default_model,
+    get_default_provider,
+    list_available_models,
+    resolve_embedding_config,
+)
 from src.llm_errors import (
     LLMSanitizedError,
     build_declined_response,
@@ -307,13 +321,26 @@ async def lifespan(app: FastAPI):
         cache_client=_cache_client,
     )
 
+    # Dynamic provider resolution via llm_factory.get_default_provider —
+    # reads DEFAULT_LLM_PROVIDER env, falls back to API-key auto-detect,
+    # last-resort claude_cli. settings.yaml's description_provider is used
+    # only when NO env config is present (fresh-clone happy path).
+    _has_env_llm_config = bool(
+        os.getenv("DEFAULT_LLM_PROVIDER")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("ANTHROPIC_API_KEY")
+    )
     _indexer = IndexerAgent(
         vector_store=_vector_store,
         embedding_model=os.getenv(
             "EMBEDDING_MODEL",
             embedding_cfg.get("model", "text-embedding-3-small"),
         ),
-        llm_provider=embedding_cfg.get("description_provider", "openai"),
+        llm_provider=(
+            get_default_provider()
+            if _has_env_llm_config
+            else embedding_cfg.get("description_provider", "openai")
+        ),
         llm_model=embedding_cfg.get("description_model", "gpt-4o"),
         temperature=llm_cfg["temperature"],
         max_tokens=llm_cfg["max_tokens"],
@@ -1339,11 +1366,20 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
             _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
             _ssl_ctx.load_default_certs()
-            embeddings = OpenAIEmbeddings(
-                model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-                http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
-                http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
-            )
+            # Env-driven embedding backend — see llm_factory.resolve_embedding_config.
+            # Same plumbing as src/agents/indexer.py and src/pipeline/logic_graph.py.
+            _emb_cfg = resolve_embedding_config()
+            _emb_kwargs: dict = {
+                "model": _emb_cfg["model"],
+                "http_client": _httpx.Client(verify=_ssl_ctx, timeout=60),
+                "http_async_client": _httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+            }
+            if _emb_cfg["base_url"]:
+                _emb_kwargs["base_url"] = _emb_cfg["base_url"]
+                _emb_kwargs["api_key"] = _emb_cfg["api_key"]
+                _emb_kwargs["check_embedding_ctx_length"] = False
+                _emb_kwargs["tiktoken_enabled"] = False
+            embeddings = OpenAIEmbeddings(**_emb_kwargs)
             # W80: prefer the clean anchor (W76 / BI routing); fall back to
             # raw_query — never the classifier blob, which used to be stamped
             # into object_name by classify_query and poisoned the embedding.

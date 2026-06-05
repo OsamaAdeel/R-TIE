@@ -162,11 +162,21 @@ def build_logic_graph(
         _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
         _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
         _ssl_ctx.load_default_certs()
-        embeddings = OpenAIEmbeddings(
-            model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-            http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
-            http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
-        )
+        # Env-driven embedding backend — see llm_factory.resolve_embedding_config.
+        # Query-time embeddings must match the indexer's vector space.
+        from src.llm_factory import resolve_embedding_config as _resolve_emb
+        _emb_cfg = _resolve_emb()
+        _emb_kwargs: dict = {
+            "model": _emb_cfg["model"],
+            "http_client": _httpx.Client(verify=_ssl_ctx, timeout=60),
+            "http_async_client": _httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+        }
+        if _emb_cfg["base_url"]:
+            _emb_kwargs["base_url"] = _emb_cfg["base_url"]
+            _emb_kwargs["api_key"] = _emb_cfg["api_key"]
+            _emb_kwargs["check_embedding_ctx_length"] = False
+            _emb_kwargs["tiktoken_enabled"] = False
+        embeddings = OpenAIEmbeddings(**_emb_kwargs)
         query_embedding = await embeddings.aembed_query(search_query)
 
         # W80b: per-query-type top-K — see src/agents/retrieval_config.py

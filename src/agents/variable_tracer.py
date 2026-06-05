@@ -487,7 +487,7 @@ class VariableTracer:
             return [target_variable.upper()]
 
         llm = create_llm(
-            provider=provider or "openai",
+            provider=provider,
             model=model,
             site="variable_tracer.resolve_variables",
             temperature=0,
@@ -893,7 +893,7 @@ class VariableTracer:
 
         # Use non-JSON mode for markdown responses
         llm = create_llm(
-            provider=provider or "openai",
+            provider=provider,
             model=model,
             site="variable_tracer.explain_chain",
             temperature=self._temperature,
@@ -961,7 +961,7 @@ class VariableTracer:
         Yields markdown chunks for SSE streaming.
         """
         llm = create_llm(
-            provider=provider or "openai",
+            provider=provider,
             model=model,
             site="variable_tracer.stream_chain",
             temperature=self._temperature,
@@ -1092,7 +1092,7 @@ class VariableTracer:
         )
 
         llm = create_llm(
-            provider=provider or "openai",
+            provider=provider,
             model=model,
             site="variable_tracer.stream_ungrounded",
             temperature=self._temperature,
@@ -1199,7 +1199,7 @@ class VariableTracer:
         )
 
         llm = create_llm(
-            provider=provider or "openai",
+            provider=provider,
             model=model,
             site="variable_tracer.stream_partial",
             temperature=self._temperature,

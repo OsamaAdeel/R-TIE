@@ -78,13 +78,16 @@ async def cmd_index(
     approved corpus. Ignored when ``from_disk=True``.
     """
     from src.agents.indexer import IndexerAgent
+    from src.llm_factory import get_default_provider, resolve_embedding_config
 
     vs, _ = await get_clients()
 
+    # Same resolver path as the backend lifespan (src/main.py).
+    _emb_cfg = resolve_embedding_config()
     indexer = IndexerAgent(
         vector_store=vs,
-        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-        llm_provider="openai",
+        embedding_model=_emb_cfg["model"],
+        llm_provider=get_default_provider(),
         llm_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     )
 
