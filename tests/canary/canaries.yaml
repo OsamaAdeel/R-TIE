@@ -46,14 +46,21 @@ canaries:
     expected:
       query_type: COLUMN_LOGIC
       schema: OFSMDM
-      # W148: badge is UNVERIFIED because the 35-function retrieval for this
-      # query trips W108-TRUNCATED (the source-concat cap drops lower-ranked
-      # candidates), NOT because of a fabrication catch. Pre-W148 the answer
-      # padded/fabricated a gate that W57 flagged GROUNDING-HIGH; the prompt
-      # fix removed the fabrication, so FN_LOAD_OPS_RISK_DATA's REAL December
-      # gate (EXTRACT(MONTH ...) = 12) is now surfaced and grounded. The
-      # W108-TRUNCATED downgrade is a separate, pre-existing retrieval
-      # characteristic, not W148.
+      # Badge stays UNVERIFIED, but for a NARROWER reason after W160. This is a
+      # single-function "How does <Fn> work?" query, so W160 gives it the
+      # FUNCTION_LOGIC retrieval profile (top_k=5, rerank skipped) — multi_source
+      # drops ~35 -> ~10 and W108-TRUNCATED no longer fires (asserted below).
+      # However FN_LOAD_OPS_RISK_DATA's body reads from a SOURCE TABLE named
+      # ABL_OPS_RISK_DATA, which the explainer cites in prose ("inserts data
+      # from ABL_OPS_RISK_DATA"); the ABL_ prefix is not in W57's table-prefix
+      # filter, so it is mis-flagged GROUNDING-HIGH ("cited function ... not in
+      # retrieved sources") and forces UNVERIFIED. That is a SEPARATE,
+      # pre-existing W57 grounding issue (present identically on the pre-W160
+      # baseline, just masked there behind W108-TRUNCATED), explicitly OUT OF
+      # W160's retrieval-collapse scope — tracked as a follow-up. W160's win is
+      # provable and pinned here: W108-TRUNCATED is gone. (W148 history: the
+      # prompt fix removed an earlier fabricated gate; FN_LOAD_OPS_RISK_DATA's
+      # REAL December gate — EXTRACT(MONTH ...) = 12 — is still surfaced.)
       badge: UNVERIFIED
     assertions:
       - kind: done_field_neq
@@ -69,9 +76,42 @@ canaries:
         value: UNGROUNDED_IDENTIFIERS
       - kind: warnings_not_contain
         value: PARTIAL_SOURCE
+      # W160 INVARIANT: the single-function collapse must keep retrieval under
+      # the W108 source-concat budget. A W108-TRUNCATED warning here means the
+      # gate stopped firing and the wide column-writer profile leaked back in.
+      - kind: warnings_not_contain
+        value: W108-TRUNCATED
       - kind: min_citations
         value: 1
-    protects: "Canonical COLUMN_LOGIC happy path for a function with a REAL calendar gate — graph payload, hierarchy header, citations intact, and FN_LOAD_OPS_RISK_DATA's genuine December (month=12) gate surfaced and grounded post-W148. Badge is UNVERIFIED via W108-TRUNCATED on the 35-function retrieval, not via a fabrication catch. (W57's fabrication-catch path is exercised by C09's safety invariant and C12.)"
+    protects: "Single-function COLUMN_LOGIC happy path with a REAL calendar gate — graph payload, citations intact, FN_LOAD_OPS_RISK_DATA's genuine December (month=12) gate surfaced. Post-W160 this query takes the single-function retrieval collapse (top_k=5, no rerank): multi_source ~35 -> ~10 and W108-TRUNCATED no longer fires (pinned). Badge remains UNVERIFIED via a SEPARATE pre-existing W57 issue — the ABL_-prefixed source table ABL_OPS_RISK_DATA is mis-flagged GROUNDING-HIGH (out of W160 scope; follow-up). Drops if the collapse regresses (W108-TRUNCATED returns) or the December gate stops surfacing. (W57's fabrication-catch path is exercised by C09 and C12.)"
+
+  - id: C19
+    tier: 1
+    query: "how does FN_G_TEST_CSTM work"
+    expected:
+      # W160: the canonical over-retrieval case the fix targets. A single
+      # named function classified COLUMN_LOGIC; without the collapse the
+      # ~27-function retrieval tripped W108-TRUNCATED and forced UNVERIFIED
+      # (941 citations, diagnosed read-only). The collapse gives it the
+      # FUNCTION_LOGIC profile (top_k=5, rerank skipped) -> VERIFIED.
+      query_type: COLUMN_LOGIC
+      # No schema pin: the classifier routes schema=OFSMDM (default) but
+      # FN_G_TEST_CSTM's body is owned by OFSERM; the resolved schema is not
+      # what this canary protects. (Same convergent-route tolerance as C12.)
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_neq
+        path: type
+        value: function_not_found
+      # The fix's core invariant: collapsed retrieval stays under the W108
+      # source-concat budget, so no truncation downgrade.
+      - kind: warnings_not_contain
+        value: W108-TRUNCATED
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: min_citations
+        value: 1
+    protects: "W160 single-function retrieval collapse. 'how does FN_G_TEST_CSTM work' is a single named function that classifies COLUMN_LOGIC; pre-W160 the wide column-writer profile pulled ~27 neighbours, tripped W108-TRUNCATED and forced UNVERIFIED. Drops if the single-function gate stops firing (collapse regressed) and the wide profile leaks back in."
 
   - id: C02
     tier: 1
