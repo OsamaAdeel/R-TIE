@@ -882,6 +882,48 @@ def _w57_passes_function_name_filters(cand: str) -> bool:
     return True
 
 
+def _w57_cited_name_is_known_table(
+    name_upper: str,
+    redis_client: Any,
+    cache: Optional[Dict[str, bool]] = None,
+) -> bool:
+    """W163: True when *name_upper* is a real table in the indexed graph.
+
+    A cited identifier that survives :func:`_w57_passes_function_name_filters`
+    but is not in the retrieved function set would otherwise be flagged
+    ``GROUNDING-HIGH: cited function ... not in retrieved sources`` as a
+    fabricated function. Some such names are real SOURCE/TARGET TABLES that the
+    explainer legitimately cites in prose or headings (e.g. ABL_OPS_RISK_DATA,
+    the source table read by FN_LOAD_OPS_RISK_DATA). We recognize those by
+    IDENTITY — does any indexed function reference the name as ``target_table``
+    or ``source_tables`` — via :func:`schemas_for_table`, NOT by prefix.
+
+    Prefix-listing is the wrong axis here: the ``ABL_`` prefix names both real
+    tables (ABL_OPS_RISK_DATA) AND real functions (ABL_CAP_MITIGANT_DATA_POP,
+    ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR, …), so adding ``ABL_`` to the
+    table-prefix allow-list would wave a fabricated ``ABL_``-prefixed function
+    straight through W57. Identity lookup keeps the fabrication catch intact: a
+    hallucinated name (ABL_-prefixed or not) is in no graph as a table, so it
+    still fires GROUNDING-HIGH.
+
+    Returns False when *redis_client* is None (unit / pre-startup paths) so the
+    pre-W163 behavior is preserved wherever the graph is not reachable — the
+    false-positive cure only applies on the live path, never opening a new hole.
+    """
+    if redis_client is None or not name_upper:
+        return False
+    if cache is not None and name_upper in cache:
+        return cache[name_upper]
+    try:
+        from src.parsing.schema_discovery import schemas_for_table
+        result = bool(schemas_for_table(name_upper, redis_client))
+    except Exception:
+        result = False
+    if cache is not None:
+        cache[name_upper] = result
+    return result
+
+
 # Check 1.3 threshold: a single (start,end) range cited more than this
 # many times signals line-by-line padding rather than per-claim binding.
 # Empirically: legitimate answers cite a range 1-3 times; fabricated
@@ -1827,6 +1869,7 @@ def _w57_check_per_claim_binding(
     markdown: str,
     multi_source: Dict[str, Any],
     functions_analyzed: List[str],
+    redis_client: Any = None,
 ) -> List[str]:
     """W57 Check 1: per-claim citation binding.
 
@@ -1854,6 +1897,9 @@ def _w57_check_per_claim_binding(
     warnings: List[str] = []
     sources_upper = {fn.upper(): _source_line_count(multi_source.get(fn))
                      for fn in multi_source}
+    # W163: per-call memo for the table-identity guard so a name cited in
+    # multiple framings (heading + prose) costs at most one graph scan.
+    known_table_cache: Dict[str, bool] = {}
 
     # 1.0a (W78) + 1.0b (W78a): cited function names in prose, headings, and
     # responsibility framings. Both passes reuse the W58 filter via
@@ -1876,6 +1922,11 @@ def _w57_check_per_claim_binding(
             continue
         if cu in seen_cited_fn:
             continue
+        # W163: a cited name that resolves to a real TABLE by graph identity
+        # (not by prefix) is a legitimate table reference, not a fabricated
+        # function — skip it so genuine fabrications still fire below.
+        if _w57_cited_name_is_known_table(cu, redis_client, known_table_cache):
+            continue
         seen_cited_fn.add(cu)
         warnings.append(
             f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
@@ -1893,6 +1944,11 @@ def _w57_check_per_claim_binding(
             continue
         if cu in seen_cited_fn:
             continue
+        # W163: a cited name that resolves to a real TABLE by graph identity
+        # (not by prefix) is a legitimate table reference, not a fabricated
+        # function — skip it so genuine fabrications still fire below.
+        if _w57_cited_name_is_known_table(cu, redis_client, known_table_cache):
+            continue
         seen_cited_fn.add(cu)
         warnings.append(
             f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
@@ -1906,6 +1962,13 @@ def _w57_check_per_claim_binding(
         end = int(match.group(3)) if match.group(3) else start
         fn_upper = fn_name.upper()
         if fn_upper not in sources_upper:
+            # W163: skip real tables cited with a line range (identity, not
+            # prefix); a fabricated name is in no graph as a table and falls
+            # through to the warning.
+            if _w57_cited_name_is_known_table(
+                fn_upper, redis_client, known_table_cache
+            ):
+                continue
             warnings.append(
                 f"GROUNDING-HIGH: cited function '{fn_name}' not in retrieved "
                 f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
@@ -2803,7 +2866,7 @@ def w57_enforce_grounding(
 
     warnings: List[str] = []
     warnings.extend(_w57_check_per_claim_binding(
-        markdown, multi_source, functions_analyzed
+        markdown, multi_source, functions_analyzed, redis_client=redis_client,
     ))
     warnings.extend(_w57_check_citation_count_cap(markdown))
     warnings.extend(_w57_check_anchoring(
