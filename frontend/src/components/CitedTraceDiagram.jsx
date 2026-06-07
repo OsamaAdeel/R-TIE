@@ -19,7 +19,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { computeLayout } from '../lib/layout.js';
 import { edgeFocus, isNodeDimmed, isEdgeFocused, isEdgeDimmed } from '../lib/traceFocus.js';
-import { formatLineLabel } from '../lib/citationLabel.js';
+import { formatLineLabel, formatExpressionArms } from '../lib/citationLabel.js';
 import { fetchSource } from '../api/client';
 import { useTheme } from '../hooks/useTheme';
 import {
@@ -383,7 +383,7 @@ function SqlBlock({ code, startLine = null }) {
 // ----------------------------------------------------------------------------
 function CitationPanel({ node, onClose, sourceCache }) {
   const cit = node.citation || {};
-  const { function: fn, lines, text, truncated, grounding } = cit;
+  const { function: fn, lines, text, truncated, grounding, expression } = cit;
   const schema = node.schema;
   const lineLabel = formatLineLabel(fn, lines);
   const cacheKey = `${schema}:${fn}:${lines?.[0]}-${lines?.[1]}`;
@@ -430,6 +430,37 @@ function CitationPanel({ node, onClose, sourceCache }) {
           Close
         </button>
       </div>
+
+      {/* W162 Tier 2a: the per-column expression is the HEADLINE for a megaline
+          write — "writes <col> ← <expr>". The raw cited line stays below as the
+          fallback/expand. Display enrichment only; grounding is the pill above. */}
+      {expression?.length > 0 && (
+        <div className="space-y-1.5 px-1.5 pb-1.5">
+          {expression.map((ex, i) => {
+            const armLabel = formatExpressionArms(ex.arms);
+            return (
+              <div key={`${ex.column}-${i}`}>
+                <div className="flex items-center gap-1.5 px-1.5 pb-0.5 text-[11px]">
+                  <span className="font-mono font-semibold text-emerald">writes</span>
+                  <span className="font-mono text-ivory">{ex.column}</span>
+                  <span className="text-ivory-faint">←</span>
+                  {armLabel && (
+                    <span className="ml-0.5 rounded bg-panel-2 px-1 font-mono text-[10px] text-ivory-faint">
+                      {armLabel}
+                    </span>
+                  )}
+                </div>
+                <SqlBlock code={ex.expression} />
+              </div>
+            );
+          })}
+          {(text || loaded) && (
+            <div className="px-1.5 pt-0.5 text-[10.5px] text-ivory-faint italic">
+              Full cited statement:
+            </div>
+          )}
+        </div>
+      )}
 
       {loaded ? (
         <div className="px-1.5 pb-1.5"><SqlBlock code={loadedCode} startLine={loadedStart} /></div>
