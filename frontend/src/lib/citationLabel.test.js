@@ -1,6 +1,7 @@
 // W162 Tier 1 — citation line-label formatting.
+// W162 Tier 2a — expression arm-label formatting.
 import { describe, it, expect } from 'vitest';
-import { formatLineLabel } from './citationLabel.js';
+import { formatLineLabel, formatExpressionArms } from './citationLabel.js';
 
 describe('formatLineLabel', () => {
   it('collapses an equal span to singular "Line N" (megaline)', () => {
@@ -17,5 +18,24 @@ describe('formatLineLabel', () => {
     expect(formatLineLabel('FN_X', [0, 0])).toBe('FN_X');
     expect(formatLineLabel('FN_X', null)).toBe('FN_X');
     expect(formatLineLabel('FN_X', undefined)).toBe('FN_X');
+  });
+});
+
+describe('formatExpressionArms', () => {
+  it('returns null for the plain main/USING projection (no badge)', () => {
+    expect(formatExpressionArms(['main'])).toBeNull();
+    expect(formatExpressionArms(['main', 'when_matched'])).toBe('when_matched');
+  });
+
+  it('joins MERGE arm-specific arms, dropping main', () => {
+    expect(formatExpressionArms(['when_matched'])).toBe('when_matched');
+    expect(formatExpressionArms(['when_not_matched'])).toBe('when_not_matched');
+    expect(formatExpressionArms(['when_matched', 'when_not_matched'])).toBe('when_matched / when_not_matched');
+  });
+
+  it('returns null for missing/empty arms', () => {
+    expect(formatExpressionArms(null)).toBeNull();
+    expect(formatExpressionArms(undefined)).toBeNull();
+    expect(formatExpressionArms([])).toBeNull();
   });
 });

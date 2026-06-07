@@ -348,11 +348,17 @@ def _assemble_fan_in(
     edges: List[Dict[str, Any]] = []
     node_ids = set()
 
-    def _add_node(node_id, label, kind, function, lines, schema):
+    def _add_node(node_id, label, kind, function, lines, schema, expression=None):
         if node_id in node_ids:
             return
         cit, real = _resolve_citation(function, lines, multi_source)
         cit["grounding"] = _node_grounding(function, real, multi_source)
+        # W162 Tier 2a: attach the per-column expression as a display enrichment
+        # AFTER grounding is stamped. It is NOT routed through _resolve_citation
+        # and NEVER influences has_real_span / grounding — text/lines/grounding
+        # stay pointed at the real megaline line; this is an additive view.
+        if expression:
+            cit["expression"] = expression
         node: Dict[str, Any] = {
             "id": node_id,
             "label": label or node_id,
@@ -380,6 +386,7 @@ def _assemble_fan_in(
             function,
             lines,
             _schema_of(function, multi_source),
+            expression=step.get("target_expression"),
         )
 
         # Outgoing edge: to declared successor, else to the target sink.
@@ -757,6 +764,61 @@ def _node_writes_column(node: Dict[str, Any], target_upper: str) -> bool:
     return False
 
 
+def _expressions_for_column(node: Dict[str, Any], target_upper: str) -> List[Dict[str, Any]]:
+    """W162 Tier 2a — the per-column RHS expression(s) a write node assigns to
+    *target_upper*, for DISPLAY ENRICHMENT only.
+
+    Mirrors the :func:`_column_in_maps` / :func:`_node_writes_column` traversal
+    (INSERT ``mapping[col]``; UPDATE/MERGE ``assignments [(col, expr)]``; MERGE
+    ``when_matched`` / ``when_not_matched`` arm maps) but returns the RHS
+    expression text rather than a bool. Returns a list of
+    ``{"column", "expression", "arms"}`` — identical expressions appearing under
+    more than one arm are merged into one entry with the arms collected (so a
+    standard MERGE whose USING projection and WHEN-MATCHED SET carry the same
+    expression shows ONCE, while genuinely different arm expressions surface
+    separately, arm-labeled). Empty list when the node assigns no expression to
+    the column (e.g. SCALAR_COMPUTE, or a column written only structurally).
+
+    TRUST: never consulted by grounding. The caller copies the result onto the
+    citation AFTER the grounding stamp; it never flows through _resolve_citation,
+    has_real_span, or _node_grounding/_edge_grounding.
+    """
+    raw: List[tuple] = []  # (column, expression, arm)
+
+    def _scan(cm: Any, arm: str) -> None:
+        if not isinstance(cm, dict):
+            return
+        mapping = cm.get("mapping")
+        if isinstance(mapping, dict):
+            for col, val in mapping.items():
+                if str(col).strip().upper() == target_upper:
+                    raw.append((str(col), str(val), arm))
+        for pair in (cm.get("assignments") or []):
+            try:
+                col, expr = pair[0], pair[1]
+            except (TypeError, IndexError, KeyError):
+                continue
+            if str(col).strip().upper() == target_upper:
+                raw.append((str(col), str(expr), arm))
+
+    _scan(node.get("column_maps"), "main")
+    if (node.get("type") or "").upper() == "MERGE":
+        for arm in ("when_matched", "when_not_matched"):
+            _scan((node.get(arm) or {}).get("column_maps"), arm)
+
+    # Merge identical (column, expression) across arms; preserve first-seen order.
+    merged: Dict[tuple, List[str]] = {}
+    order: List[tuple] = []
+    for col, expr, arm in raw:
+        key = (col, expr)
+        if key not in merged:
+            merged[key] = []
+            order.append(key)
+        if arm not in merged[key]:
+            merged[key].append(arm)
+    return [{"column": c, "expression": e, "arms": merged[(c, e)]} for (c, e) in order]
+
+
 def fan_in_steps_from_graph(
     fetched_nodes: List[Dict[str, Any]],
     target_column: str,
@@ -866,6 +928,10 @@ def fan_in_steps_from_graph(
             writer_nodes.append({
                 "node_id": node_id, "function": fn, "type": ntype,
                 "line_start": ls, "line_end": le,
+                # W162 Tier 2a: capture the per-column expression HERE, while the
+                # full node (with column_maps) is in scope — it is dropped from
+                # the step otherwise. Display enrichment only.
+                "target_expression": _expressions_for_column(node, target_upper),
             })
         else:
             if not in_cohort:
@@ -886,7 +952,7 @@ def fan_in_steps_from_graph(
 
     steps: List[Dict[str, Any]] = []
     for w in writer_nodes:
-        steps.append({
+        step = {
             "node_id": w["node_id"],
             "function": w["function"],
             "kind": "derived-column",
@@ -895,7 +961,12 @@ def fan_in_steps_from_graph(
             "label": w["function"],
             "successor": target_column,
             "edge_kind": "writes",
-        })
+        }
+        # W162 Tier 2a: carry the per-column expression onto the step (only when
+        # present) so _assemble_fan_in can surface it as a citation enrichment.
+        if w.get("target_expression"):
+            step["target_expression"] = w["target_expression"]
+        steps.append(step)
     for r in read_nodes:
         fw = first_writer.get(r["function"])
         if not fw or fw == r["node_id"]:
