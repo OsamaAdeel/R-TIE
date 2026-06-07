@@ -924,6 +924,62 @@ def _w57_cited_name_is_known_table(
     return result
 
 
+def _w57_collapsed_megaline_lines(
+    multi_source: Dict[str, Any],
+    redis_client: Any,
+) -> set:
+    """W162 Tier 2b: line numbers hosting a CONFIRMED collapsed megaline.
+
+    A megaline is a single physical source line that hosts an ENTIRE
+    statement — the ~5k-char OFSAA one-liners W162 characterised (e.g. the
+    ``CS_*`` writers of FCT_STANDARD_ACCT_HEAD). In the parsed graph such a
+    statement is one node whose ``line_start == line_end``. This returns the
+    set of those line numbers across every function in ``multi_source``, by
+    IDENTITY (the node's real span is ``[N, N]``), so check 1.3 can recognise
+    that a legitimately one-line statement can only ever be cited at that one
+    line and so a repeated citation of it is per-step grounding, NOT padding.
+
+    The identity gate is what preserves 1.3's real catch: a NORMAL multi-line
+    statement's node spans ``[a, b]`` with ``b > a``, so an interior line cited
+    repeatedly is in NO ``[N, N]`` node here and still fires the padding
+    warning. Only a line that is genuinely its own complete statement is
+    spared — never "a line cited a lot".
+
+    Returns an empty set when *redis_client* is None (unit / pre-startup
+    paths) or no graph is reachable, so the pre-Tier-2b behaviour is preserved
+    wherever the graph cannot be loaded — the relaxation only ever applies on
+    the live path and never opens a hole. Cost is paid lazily by the caller:
+    only invoked when a repeat has already breached the padding threshold.
+    """
+    if redis_client is None or not multi_source:
+        return set()
+    try:
+        from src.parsing.store import get_function_graph
+    except Exception:
+        return set()
+    collapsed: set = set()
+    for fn, entry in multi_source.items():
+        if not isinstance(entry, dict):
+            continue
+        schema = entry.get("schema")
+        if not schema:
+            continue
+        try:
+            graph = get_function_graph(redis_client, schema, fn)
+        except Exception:
+            graph = None
+        if not isinstance(graph, dict):
+            continue
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            ls = node.get("line_start")
+            le = node.get("line_end")
+            if isinstance(ls, int) and isinstance(le, int) and ls == le and ls > 0:
+                collapsed.add(ls)
+    return collapsed
+
+
 # Check 1.3 threshold: a single (start,end) range cited more than this
 # many times signals line-by-line padding rather than per-claim binding.
 # Empirically: legitimate answers cite a range 1-3 times; fabricated
@@ -1986,14 +2042,36 @@ def _w57_check_per_claim_binding(
     # when no function name is bound).
     from collections import Counter
     range_counts = Counter(_w57_extract_ranges(markdown))
+    # W162 Tier 2b: collapsed-megaline line set, computed lazily — only paid
+    # for once a repeat has actually breached the threshold, and only the
+    # single-physical-line ([N,N]) repeats consult it.
+    collapsed_lines: Optional[set] = None
     for (start, end), count in range_counts.items():
-        if count > _W57_RANGE_REPEAT_THRESHOLD:
-            label = f"Lines {start}-{end}" if end != start else f"Line {start}"
-            warnings.append(
-                f"GROUNDING-LOW: {label} cited {count} times "
-                f"(threshold {_W57_RANGE_REPEAT_THRESHOLD}); likely "
-                f"line-by-line padding rather than per-claim binding"
-            )
+        if count <= _W57_RANGE_REPEAT_THRESHOLD:
+            continue
+        # W162 Tier 2b: a single physical line that genuinely hosts an entire
+        # statement (a CONFIRMED collapsed [N,N] megaline) can only be cited at
+        # that one line, so a repeated citation of it is legitimate per-step
+        # grounding, not padding. Gate on IDENTITY (the line is a real [N,N]
+        # node in an analyzed function), NEVER on "cited a lot": a multi-line
+        # statement's interior line repeated still has no [N,N] node and still
+        # fires below, so 1.3's padding catch on normal functions is preserved.
+        # Only single-line ([start == end]) citations can be megalines; a
+        # repeated multi-line range is never a one-physical-line statement and
+        # always falls through to the warning.
+        if start == end:
+            if collapsed_lines is None:
+                collapsed_lines = _w57_collapsed_megaline_lines(
+                    multi_source, redis_client
+                )
+            if start in collapsed_lines:
+                continue
+        label = f"Lines {start}-{end}" if end != start else f"Line {start}"
+        warnings.append(
+            f"GROUNDING-LOW: {label} cited {count} times "
+            f"(threshold {_W57_RANGE_REPEAT_THRESHOLD}); likely "
+            f"line-by-line padding rather than per-claim binding"
+        )
     return warnings
 
 
