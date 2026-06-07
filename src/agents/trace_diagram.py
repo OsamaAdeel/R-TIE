@@ -55,6 +55,17 @@ DECLINED = "DECLINED"
 # citation truncated.
 TEXT_LINE_CAP = 80
 
+# W162 Tier 1: a single OFSAA megaline (~5k chars on ONE physical line) never
+# trips TEXT_LINE_CAP (it is 1 line), so without a character bound the whole
+# statement dumps inline in the citation panel. Cap the embedded excerpt by
+# characters too — ~2,000 chars is ample for a normal multi-line excerpt yet
+# well under a megaline — so the citation is marked truncated and the existing
+# "Load full cited range" affordance (W151 Phase 5) engages instead. Both caps
+# apply: truncate if lines > TEXT_LINE_CAP OR chars > TEXT_CHAR_CAP. Presentation
+# only — does NOT touch has_real_span / grounding / which lines the citation
+# points at.
+TEXT_CHAR_CAP = 2000
+
 # node_type / operation → node kind (caller-supplied "kind" always wins).
 _NODE_KIND_BY_OP = {
     "INSERT": "derived-column",
@@ -144,6 +155,13 @@ def _resolve_citation(
             if isinstance(ln, int) and start <= ln <= end:
                 matched.append(line)
 
+    # "real resolved span" per rules 1 & 2: a sane [start,end] that actually
+    # landed on >= 1 line of the resolved source_code. A [0,0] / unresolved /
+    # not-in-multi_source span is NOT real. Computed BEFORE any cap so a
+    # truncated excerpt never weakens grounding — the span is real regardless
+    # of how much excerpt text we choose to embed.
+    has_real_span = bool(matched) and start > 0 and end >= start
+
     truncated = False
     if len(matched) > TEXT_LINE_CAP:
         matched = matched[:TEXT_LINE_CAP]
@@ -151,10 +169,12 @@ def _resolve_citation(
 
     text = "\n".join(str(m.get("text", "")).rstrip("\n") for m in matched)
 
-    # "real resolved span" per rules 1 & 2: a sane [start,end] that actually
-    # landed on >= 1 line of the resolved source_code. A [0,0] / unresolved /
-    # not-in-multi_source span is NOT real.
-    has_real_span = bool(matched) and start > 0 and end >= start
+    # W162 Tier 1: a megaline is one physical line that the line cap can't bound.
+    # Cap the embedded excerpt by characters and mark it truncated so the
+    # "Load full cited range" path engages instead of dumping the wall inline.
+    if len(text) > TEXT_CHAR_CAP:
+        text = text[:TEXT_CHAR_CAP]
+        truncated = True
 
     citation: Dict[str, Any] = {
         "function": function,

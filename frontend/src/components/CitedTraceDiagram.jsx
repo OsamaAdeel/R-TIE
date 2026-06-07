@@ -19,6 +19,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { computeLayout } from '../lib/layout.js';
 import { edgeFocus, isNodeDimmed, isEdgeFocused, isEdgeDimmed } from '../lib/traceFocus.js';
+import { formatLineLabel } from '../lib/citationLabel.js';
 import { fetchSource } from '../api/client';
 import { useTheme } from '../hooks/useTheme';
 import {
@@ -230,7 +231,7 @@ function Node({ node, dimmed, selected, onSelect }) {
   const ghost = node.kind === 'absent-filter';
   const Icon = KIND_ICON[node.kind] || Database;
   const { function: fn, lines } = node.citation || {};
-  const lineLabel = lines && (lines[0] || lines[1]) ? `${fn} [${lines[0]}–${lines[1]}]` : fn;
+  const lineLabel = formatLineLabel(fn, lines);
 
   return (
     <div
@@ -384,7 +385,7 @@ function CitationPanel({ node, onClose, sourceCache }) {
   const cit = node.citation || {};
   const { function: fn, lines, text, truncated, grounding } = cit;
   const schema = node.schema;
-  const lineLabel = lines && (lines[0] || lines[1]) ? `${fn} [${lines[0]}–${lines[1]}]` : fn;
+  const lineLabel = formatLineLabel(fn, lines);
   const cacheKey = `${schema}:${fn}:${lines?.[0]}-${lines?.[1]}`;
   const canFetch = !!(truncated && fn && schema && lines && lines[0] && lines[1]);
 

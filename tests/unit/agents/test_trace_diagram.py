@@ -203,6 +203,38 @@ def test_citation_truncates_and_marks_overflow():
     assert len(cit["text"].splitlines()) == 80  # TEXT_LINE_CAP
 
 
+def test_megaline_char_cap_truncates_but_keeps_real_span_and_grounding():
+    # W162 Tier 1: a real OFSAA megaline is ONE physical line of ~5k chars, so
+    # the line cap (TEXT_LINE_CAP) never fires. The CHARACTER cap must mark the
+    # citation truncated (so "Load full cited range" engages) while leaving the
+    # span [24,24], its VERIFIED grounding, and the real-span determination
+    # untouched — presentation only.
+    from src.agents.trace_diagram import TEXT_CHAR_CAP
+    megaline = "MERGE INTO FCT_STANDARD_ACCT_HEAD TT USING (" + "X" * 6000 + ");"
+    ms = _ms("CS_CAPITAL_RATIO", {24: megaline})
+    steps = [{"node_id": "W", "function": "CS_CAPITAL_RATIO",
+              "line_start": 24, "line_end": 24}]
+    d = build_trace_diagram(target="T", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    cit = _node(d, "W")["citation"]
+    assert cit.get("truncated") is True              # char cap fired
+    assert len(cit["text"]) == TEXT_CHAR_CAP         # embedded excerpt bounded
+    assert cit["lines"] == [24, 24]                  # span unchanged — still the megaline
+    assert cit["grounding"] == "VERIFIED"            # real span preserved, not weakened
+
+
+def test_short_single_line_not_truncated():
+    # A genuine one-line DML well under the char cap stays inline (not truncated):
+    # the char cap must not over-fire on short single-line statements.
+    ms = _ms("FN_X", {30: "UPDATE FSI_CAP_MITIGANTS SET F='N' WHERE N_RUN_SKEY=L;"})
+    steps = [{"node_id": "W", "function": "FN_X", "line_start": 30, "line_end": 30}]
+    d = build_trace_diagram(target="T", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    cit = _node(d, "W")["citation"]
+    assert cit.get("truncated") is not True
+    assert cit["grounding"] == "VERIFIED"
+
+
 # ---------------------------------------------------------------------------
 # Both shapes assemble
 # ---------------------------------------------------------------------------
