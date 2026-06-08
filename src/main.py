@@ -70,6 +70,7 @@ from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
 from src.agents.trace_diagram import (
+    attested_writers_for_target,
     build_trace_diagram,
     diagram_from_bi_routing,
     fan_in_steps_from_tagged_lines,
@@ -1974,6 +1975,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # ignored what the LLM actually produced.
             multi_source = state.get("multi_source", {}) or {}
             functions_analyzed = list(multi_source.keys())
+            # W169: per-function attested writer spans for the traced column,
+            # read from the SAME structured fan-in locals the diagram is built
+            # from (vt_graph first, vt_tagged fallback) and in the same
+            # precedence. Empty on non-VARIABLE_TRACE paths (both locals None)
+            # → the scope-drift gate in Check 3a no-ops and the legacy
+            # frequency rule stands. Computed here, before the grounding call,
+            # where both locals are in scope.
+            w169_attested_writers = attested_writers_for_target(
+                state.get("target_variable", "") or "",
+                vt_graph,
+                vt_tagged,
+                multi_source,
+            )
             with stage_timer("grounding_evaluate", correlation_id):
                 grounding = evaluate_grounding(
                     raw_query=request.query,
@@ -1982,6 +1996,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     functions_analyzed=functions_analyzed,
                     query_type=state.get("query_type", ""),
                     redis_client=_graph_redis,
+                    attested_writers=w169_attested_writers,
                     # W76b: forward the orchestrator's anchor so the
                     # NAMED_FUNCTION_NOT_RETRIEVED check + post-hoc
                     # Caveats appender consult it instead of re-
