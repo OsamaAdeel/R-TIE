@@ -10,6 +10,7 @@ from src.agents.trace_diagram import (
     diagram_from_bi_routing,
     fan_in_steps_from_tagged_lines,
     fan_in_steps_from_graph,
+    _expressions_for_column,
 )
 
 
@@ -201,6 +202,38 @@ def test_citation_truncates_and_marks_overflow():
     cit = _node(d, "W")["citation"]
     assert cit.get("truncated") is True
     assert len(cit["text"].splitlines()) == 80  # TEXT_LINE_CAP
+
+
+def test_megaline_char_cap_truncates_but_keeps_real_span_and_grounding():
+    # W162 Tier 1: a real OFSAA megaline is ONE physical line of ~5k chars, so
+    # the line cap (TEXT_LINE_CAP) never fires. The CHARACTER cap must mark the
+    # citation truncated (so "Load full cited range" engages) while leaving the
+    # span [24,24], its VERIFIED grounding, and the real-span determination
+    # untouched — presentation only.
+    from src.agents.trace_diagram import TEXT_CHAR_CAP
+    megaline = "MERGE INTO FCT_STANDARD_ACCT_HEAD TT USING (" + "X" * 6000 + ");"
+    ms = _ms("CS_CAPITAL_RATIO", {24: megaline})
+    steps = [{"node_id": "W", "function": "CS_CAPITAL_RATIO",
+              "line_start": 24, "line_end": 24}]
+    d = build_trace_diagram(target="T", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    cit = _node(d, "W")["citation"]
+    assert cit.get("truncated") is True              # char cap fired
+    assert len(cit["text"]) == TEXT_CHAR_CAP         # embedded excerpt bounded
+    assert cit["lines"] == [24, 24]                  # span unchanged — still the megaline
+    assert cit["grounding"] == "VERIFIED"            # real span preserved, not weakened
+
+
+def test_short_single_line_not_truncated():
+    # A genuine one-line DML well under the char cap stays inline (not truncated):
+    # the char cap must not over-fire on short single-line statements.
+    ms = _ms("FN_X", {30: "UPDATE FSI_CAP_MITIGANTS SET F='N' WHERE N_RUN_SKEY=L;"})
+    steps = [{"node_id": "W", "function": "FN_X", "line_start": 30, "line_end": 30}]
+    d = build_trace_diagram(target="T", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    cit = _node(d, "W")["citation"]
+    assert cit.get("truncated") is not True
+    assert cit["grounding"] == "VERIFIED"
 
 
 # ---------------------------------------------------------------------------
@@ -656,3 +689,121 @@ def test_graph_fanin_end_to_end_solid_under_verified_body():
     writes = [e for e in d["edges"] if e["kind"] == "writes"]
     assert len(writes) == 2 and all(e["grounding"] == "VERIFIED" for e in writes)
     assert _node(d, "TGT")["kind"] == "target-column"
+
+
+# ---------------------------------------------------------------------------
+# W162 Tier 2a — per-column expression enrichment on diagram citations
+# (display-only; the grounding-unchanged assertion is the non-negotiable gate)
+# ---------------------------------------------------------------------------
+def test_expr_for_column_insert_mapping():
+    node = {"type": "INSERT", "column_maps": {"mapping": {"TGT": "COALESCE(SRC.X, 0)"}}}
+    out = _expressions_for_column(node, "TGT")
+    assert out == [{"column": "TGT", "expression": "COALESCE(SRC.X, 0)", "arms": ["main"]}]
+
+
+def test_expr_for_column_update_assignment():
+    node = {"type": "UPDATE", "column_maps": {"assignments": [("TGT", "A + B")]}}
+    out = _expressions_for_column(node, "TGT")
+    assert out == [{"column": "TGT", "expression": "A + B", "arms": ["main"]}]
+
+
+def test_expr_for_column_bare_literal_shown_as_is():
+    # the probe's B class — a bare literal/col-ref is trivially readable.
+    node = {"type": "INSERT", "column_maps": {"mapping": {"V_RECORD_TYPE": "'CCP_EXPOSURE'"}}}
+    out = _expressions_for_column(node, "V_RECORD_TYPE")
+    assert out == [{"column": "V_RECORD_TYPE", "expression": "'CCP_EXPOSURE'", "arms": ["main"]}]
+
+
+def test_expr_for_column_m_class_token_shown_raw():
+    # the 5.2% M class — token-bearing CASE skeleton is surfaced RAW this PR
+    # (resolution is Tier 2a-resolved; we do NOT wire derivations.py here).
+    raw = "CASE  WHEN  COND_1351898494840_10=10 THEN EXP_1351898494840_10 ELSE EXP_1351898494840_11 END"
+    node = {"type": "MERGE", "column_maps": {"assignments": [("N_STD_ACCT_HEAD_AMT", raw)]}}
+    out = _expressions_for_column(node, "N_STD_ACCT_HEAD_AMT")
+    assert out == [{"column": "N_STD_ACCT_HEAD_AMT", "expression": raw, "arms": ["main"]}]
+
+
+def test_expr_for_column_merge_both_arms_distinct_surfaced_labeled():
+    # both arms write the column with DIFFERENT expressions → two entries, each
+    # arm-labeled (we never silently pick one).
+    node = {
+        "type": "MERGE",
+        "column_maps": {"mapping": {}},
+        "when_matched": {"column_maps": {"assignments": [("TGT", "upd_expr")]}},
+        "when_not_matched": {"column_maps": {"assignments": [("TGT", "ins_expr")]}},
+    }
+    out = _expressions_for_column(node, "TGT")
+    assert out == [
+        {"column": "TGT", "expression": "upd_expr", "arms": ["when_matched"]},
+        {"column": "TGT", "expression": "ins_expr", "arms": ["when_not_matched"]},
+    ]
+
+
+def test_expr_for_column_merge_identical_across_arms_merged():
+    # the common OFSAA shape: USING projection (main) and WHEN-MATCHED SET carry
+    # the SAME expression → ONE entry, arms collected (no noisy duplicate).
+    node = {
+        "type": "MERGE",
+        "column_maps": {"assignments": [("TGT", "same_expr")]},
+        "when_matched": {"column_maps": {"assignments": [("TGT", "same_expr")]}},
+    }
+    out = _expressions_for_column(node, "TGT")
+    assert out == [{"column": "TGT", "expression": "same_expr", "arms": ["main", "when_matched"]}]
+
+
+def test_expr_for_column_none_when_not_assigned():
+    # SCALAR_COMPUTE / structurally-only / wrong column → empty.
+    assert _expressions_for_column({"type": "SCALAR_COMPUTE", "output_variable": "TGT"}, "TGT") == []
+    assert _expressions_for_column({"type": "INSERT", "column_maps": {"mapping": {"OTHER": "x"}}}, "TGT") == []
+
+
+def test_graph_fanin_carries_target_expression_onto_step():
+    nodes = [_gn("FN_INS", "n1", "INSERT", 40, 58,
+                 column_maps={"mapping": {"TGT": "COALESCE(SRC.X, 0)"}})]
+    res = fan_in_steps_from_graph(nodes, "TGT")
+    s = res["steps"][0]
+    assert s["target_expression"] == [
+        {"column": "TGT", "expression": "COALESCE(SRC.X, 0)", "arms": ["main"]}
+    ]
+
+
+def test_fanin_citation_surfaces_expression_and_grounding_unchanged():
+    # THE TRUST GATE. The expression rides on the writer node's citation as an
+    # additive field; text/lines/grounding stay pointed at the real line and are
+    # IDENTICAL to the same fan-in built from steps WITHOUT the expression.
+    ms = _ms("FN_INS", {40: "INSERT INTO T (TGT) SELECT COALESCE(SRC.X,0)"})
+    nodes = [_gn("FN_INS", "n1", "INSERT", 40, 40,
+                 column_maps={"mapping": {"TGT": "COALESCE(SRC.X, 0)"}})]
+    steps_with = fan_in_steps_from_graph(nodes, "TGT")["steps"]
+    d_with = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                                 grounding=VERIFIED_BODY, fan_in_steps=steps_with)
+
+    # same steps with the enrichment stripped — the grounding inputs are unchanged.
+    steps_without = [{k: v for k, v in s.items() if k != "target_expression"}
+                     for s in steps_with]
+    d_without = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                                    grounding=VERIFIED_BODY, fan_in_steps=steps_without)
+
+    w_with = _node(d_with, "FN_INS:n1")["citation"]
+    w_without = _node(d_without, "FN_INS:n1")["citation"]
+    # expression present only when carried; everything trust-bearing is identical.
+    assert w_with.get("expression") == [
+        {"column": "TGT", "expression": "COALESCE(SRC.X, 0)", "arms": ["main"]}
+    ]
+    assert "expression" not in w_without
+    assert w_with["grounding"] == w_without["grounding"] == "VERIFIED"
+    assert w_with["lines"] == w_without["lines"]
+    assert w_with["text"] == w_without["text"]
+    assert d_with["diagram_grounding"] == d_without["diagram_grounding"]
+
+
+def test_tagged_lines_fanin_has_no_expression():
+    # the Phase-3.5 tagged-lines path carries no column_maps → no expression set.
+    tagged = [{"function": "FN_A", "line": 40, "text": "INSERT INTO T ...",
+               "operation": "INSERT", "commented": False}]
+    steps = fan_in_steps_from_tagged_lines(tagged, "TGT")
+    assert all("target_expression" not in s for s in steps)
+    ms = _ms("FN_A", {40: "INSERT INTO T ..."})
+    d = build_trace_diagram(target="TGT", trace_kind="fan-in", multi_source=ms,
+                            grounding=VERIFIED_BODY, fan_in_steps=steps)
+    assert all("expression" not in n["citation"] for n in d["nodes"])

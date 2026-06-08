@@ -882,6 +882,104 @@ def _w57_passes_function_name_filters(cand: str) -> bool:
     return True
 
 
+def _w57_cited_name_is_known_table(
+    name_upper: str,
+    redis_client: Any,
+    cache: Optional[Dict[str, bool]] = None,
+) -> bool:
+    """W163: True when *name_upper* is a real table in the indexed graph.
+
+    A cited identifier that survives :func:`_w57_passes_function_name_filters`
+    but is not in the retrieved function set would otherwise be flagged
+    ``GROUNDING-HIGH: cited function ... not in retrieved sources`` as a
+    fabricated function. Some such names are real SOURCE/TARGET TABLES that the
+    explainer legitimately cites in prose or headings (e.g. ABL_OPS_RISK_DATA,
+    the source table read by FN_LOAD_OPS_RISK_DATA). We recognize those by
+    IDENTITY — does any indexed function reference the name as ``target_table``
+    or ``source_tables`` — via :func:`schemas_for_table`, NOT by prefix.
+
+    Prefix-listing is the wrong axis here: the ``ABL_`` prefix names both real
+    tables (ABL_OPS_RISK_DATA) AND real functions (ABL_CAP_MITIGANT_DATA_POP,
+    ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR, …), so adding ``ABL_`` to the
+    table-prefix allow-list would wave a fabricated ``ABL_``-prefixed function
+    straight through W57. Identity lookup keeps the fabrication catch intact: a
+    hallucinated name (ABL_-prefixed or not) is in no graph as a table, so it
+    still fires GROUNDING-HIGH.
+
+    Returns False when *redis_client* is None (unit / pre-startup paths) so the
+    pre-W163 behavior is preserved wherever the graph is not reachable — the
+    false-positive cure only applies on the live path, never opening a new hole.
+    """
+    if redis_client is None or not name_upper:
+        return False
+    if cache is not None and name_upper in cache:
+        return cache[name_upper]
+    try:
+        from src.parsing.schema_discovery import schemas_for_table
+        result = bool(schemas_for_table(name_upper, redis_client))
+    except Exception:
+        result = False
+    if cache is not None:
+        cache[name_upper] = result
+    return result
+
+
+def _w57_collapsed_megaline_lines(
+    multi_source: Dict[str, Any],
+    redis_client: Any,
+) -> set:
+    """W162 Tier 2b: line numbers hosting a CONFIRMED collapsed megaline.
+
+    A megaline is a single physical source line that hosts an ENTIRE
+    statement — the ~5k-char OFSAA one-liners W162 characterised (e.g. the
+    ``CS_*`` writers of FCT_STANDARD_ACCT_HEAD). In the parsed graph such a
+    statement is one node whose ``line_start == line_end``. This returns the
+    set of those line numbers across every function in ``multi_source``, by
+    IDENTITY (the node's real span is ``[N, N]``), so check 1.3 can recognise
+    that a legitimately one-line statement can only ever be cited at that one
+    line and so a repeated citation of it is per-step grounding, NOT padding.
+
+    The identity gate is what preserves 1.3's real catch: a NORMAL multi-line
+    statement's node spans ``[a, b]`` with ``b > a``, so an interior line cited
+    repeatedly is in NO ``[N, N]`` node here and still fires the padding
+    warning. Only a line that is genuinely its own complete statement is
+    spared — never "a line cited a lot".
+
+    Returns an empty set when *redis_client* is None (unit / pre-startup
+    paths) or no graph is reachable, so the pre-Tier-2b behaviour is preserved
+    wherever the graph cannot be loaded — the relaxation only ever applies on
+    the live path and never opens a hole. Cost is paid lazily by the caller:
+    only invoked when a repeat has already breached the padding threshold.
+    """
+    if redis_client is None or not multi_source:
+        return set()
+    try:
+        from src.parsing.store import get_function_graph
+    except Exception:
+        return set()
+    collapsed: set = set()
+    for fn, entry in multi_source.items():
+        if not isinstance(entry, dict):
+            continue
+        schema = entry.get("schema")
+        if not schema:
+            continue
+        try:
+            graph = get_function_graph(redis_client, schema, fn)
+        except Exception:
+            graph = None
+        if not isinstance(graph, dict):
+            continue
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            ls = node.get("line_start")
+            le = node.get("line_end")
+            if isinstance(ls, int) and isinstance(le, int) and ls == le and ls > 0:
+                collapsed.add(ls)
+    return collapsed
+
+
 # Check 1.3 threshold: a single (start,end) range cited more than this
 # many times signals line-by-line padding rather than per-claim binding.
 # Empirically: legitimate answers cite a range 1-3 times; fabricated
@@ -1827,6 +1925,7 @@ def _w57_check_per_claim_binding(
     markdown: str,
     multi_source: Dict[str, Any],
     functions_analyzed: List[str],
+    redis_client: Any = None,
 ) -> List[str]:
     """W57 Check 1: per-claim citation binding.
 
@@ -1854,6 +1953,9 @@ def _w57_check_per_claim_binding(
     warnings: List[str] = []
     sources_upper = {fn.upper(): _source_line_count(multi_source.get(fn))
                      for fn in multi_source}
+    # W163: per-call memo for the table-identity guard so a name cited in
+    # multiple framings (heading + prose) costs at most one graph scan.
+    known_table_cache: Dict[str, bool] = {}
 
     # 1.0a (W78) + 1.0b (W78a): cited function names in prose, headings, and
     # responsibility framings. Both passes reuse the W58 filter via
@@ -1876,6 +1978,11 @@ def _w57_check_per_claim_binding(
             continue
         if cu in seen_cited_fn:
             continue
+        # W163: a cited name that resolves to a real TABLE by graph identity
+        # (not by prefix) is a legitimate table reference, not a fabricated
+        # function — skip it so genuine fabrications still fire below.
+        if _w57_cited_name_is_known_table(cu, redis_client, known_table_cache):
+            continue
         seen_cited_fn.add(cu)
         warnings.append(
             f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
@@ -1893,6 +2000,11 @@ def _w57_check_per_claim_binding(
             continue
         if cu in seen_cited_fn:
             continue
+        # W163: a cited name that resolves to a real TABLE by graph identity
+        # (not by prefix) is a legitimate table reference, not a fabricated
+        # function — skip it so genuine fabrications still fire below.
+        if _w57_cited_name_is_known_table(cu, redis_client, known_table_cache):
+            continue
         seen_cited_fn.add(cu)
         warnings.append(
             f"GROUNDING-HIGH: cited function '{cand}' not in retrieved "
@@ -1906,6 +2018,13 @@ def _w57_check_per_claim_binding(
         end = int(match.group(3)) if match.group(3) else start
         fn_upper = fn_name.upper()
         if fn_upper not in sources_upper:
+            # W163: skip real tables cited with a line range (identity, not
+            # prefix); a fabricated name is in no graph as a table and falls
+            # through to the warning.
+            if _w57_cited_name_is_known_table(
+                fn_upper, redis_client, known_table_cache
+            ):
+                continue
             warnings.append(
                 f"GROUNDING-HIGH: cited function '{fn_name}' not in retrieved "
                 f"sources (analyzed: {sorted(sources_upper.keys())[:5]})"
@@ -1923,14 +2042,36 @@ def _w57_check_per_claim_binding(
     # when no function name is bound).
     from collections import Counter
     range_counts = Counter(_w57_extract_ranges(markdown))
+    # W162 Tier 2b: collapsed-megaline line set, computed lazily — only paid
+    # for once a repeat has actually breached the threshold, and only the
+    # single-physical-line ([N,N]) repeats consult it.
+    collapsed_lines: Optional[set] = None
     for (start, end), count in range_counts.items():
-        if count > _W57_RANGE_REPEAT_THRESHOLD:
-            label = f"Lines {start}-{end}" if end != start else f"Line {start}"
-            warnings.append(
-                f"GROUNDING-LOW: {label} cited {count} times "
-                f"(threshold {_W57_RANGE_REPEAT_THRESHOLD}); likely "
-                f"line-by-line padding rather than per-claim binding"
-            )
+        if count <= _W57_RANGE_REPEAT_THRESHOLD:
+            continue
+        # W162 Tier 2b: a single physical line that genuinely hosts an entire
+        # statement (a CONFIRMED collapsed [N,N] megaline) can only be cited at
+        # that one line, so a repeated citation of it is legitimate per-step
+        # grounding, not padding. Gate on IDENTITY (the line is a real [N,N]
+        # node in an analyzed function), NEVER on "cited a lot": a multi-line
+        # statement's interior line repeated still has no [N,N] node and still
+        # fires below, so 1.3's padding catch on normal functions is preserved.
+        # Only single-line ([start == end]) citations can be megalines; a
+        # repeated multi-line range is never a one-physical-line statement and
+        # always falls through to the warning.
+        if start == end:
+            if collapsed_lines is None:
+                collapsed_lines = _w57_collapsed_megaline_lines(
+                    multi_source, redis_client
+                )
+            if start in collapsed_lines:
+                continue
+        label = f"Lines {start}-{end}" if end != start else f"Line {start}"
+        warnings.append(
+            f"GROUNDING-LOW: {label} cited {count} times "
+            f"(threshold {_W57_RANGE_REPEAT_THRESHOLD}); likely "
+            f"line-by-line padding rather than per-claim binding"
+        )
     return warnings
 
 
@@ -2803,7 +2944,7 @@ def w57_enforce_grounding(
 
     warnings: List[str] = []
     warnings.extend(_w57_check_per_claim_binding(
-        markdown, multi_source, functions_analyzed
+        markdown, multi_source, functions_analyzed, redis_client=redis_client,
     ))
     warnings.extend(_w57_check_citation_count_cap(markdown))
     warnings.extend(_w57_check_anchoring(
@@ -2927,25 +3068,56 @@ Output JSON schema:
 
 
 SEMANTIC_EXPLANATION_PROMPT = """You are an expert in Oracle OFSAA FSAPPS regulatory capital calculations.
-You receive source code from one or more PL/SQL functions and must explain the BUSINESS MEANING and DATA FLOW — not the syntax.
+You receive the user's question plus source code from one or more PL/SQL
+functions. Your job is to ANSWER THE QUESTION, grounded in that source —
+explaining BUSINESS MEANING and DATA FLOW, never SQL syntax.
 
-RULES:
-1. Never explain what SQL syntax does (do not explain NVL, CASE, TO_NUMBER, DECODE).
-   Instead explain what the VALUE represents and why it changes.
+ANSWER AT THE DEPTH THE QUESTION IMPLIES
+Shape your answer to what was actually asked — like an analyst who understood
+the question, not a fixed template:
+- Identification / lookup ("what's the name of the function for X", "which
+  function does Y") -> answer briefly: the function name and a one-line
+  statement of its purpose. Do NOT produce a step-by-step walkthrough.
+- Focused question ("what does the first MERGE do", "where does the threshold
+  come from", "what gates this") -> answer that specific point and the lines
+  that establish it. Do NOT tour the whole function.
+- Full explanation ("how does X work", "explain X", "walk me through X") ->
+  produce the full step-by-step walkthrough described below.
+When the implied depth is ambiguous, prefer the more concise answer and note
+that fuller detail is available on request.
 
-2. For every step, answer these questions:
+GROUNDING — REQUIRED AT EVERY DEPTH (non-negotiable)
+Every claim, at every length, cites the function name and the specific line(s)
+it rests on. A one-line identification answer cites the function and lines it
+was resolved from exactly as a full walkthrough cites each step. Never assert a
+name, value, formula, or behaviour without a citation; if the source does not
+support a claim, say so rather than guessing. Brevity reduces the NUMBER of
+claims, never the grounding of each — a shorter answer is not a less-cited one.
+
+EXPLAIN MEANING, NOT SYNTAX
+Never explain what SQL syntax does (NVL, CASE, TO_NUMBER, DECODE). Explain what
+the VALUE represents, where it came from, and why it changes.
+
+THE FULL WALKTHROUGH (use this shape ONLY when the question asks for a full
+explanation)
+Work through the logic step by step. For each step, answer:
    - What is the value at this point?
    - Where did it come from (which table, which column)?
    - Why is it being changed?
    - What does the result mean in business terms?
+For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
+explain the formula in plain English, name the source tables and what data they
+contribute, and show the arithmetic clearly — e.g. "DBS GL balance × deduction
+ratio". For a value copied unchanged between tables, state clearly: "The value
+is passed through without modification." End with a SHORT SUMMARY (4 sentences
+max): where the value originates, what transforms it, what the final value
+represents, and any execution conditions explicitly present in the source (omit
+that last line entirely if the source has no calendar/date or other gating
+predicate — do not manufacture one).
 
-3. For intermediate variables (local PL/SQL variables like TOT1, CBA_DEDUCTION):
-   - Explain the formula in plain English
-   - Name the source tables and what data they contribute
-   - Show the arithmetic clearly: e.g. "DBS GL balance × deduction ratio"
-
-4. Report execution conditions ONLY when the source contains an explicit guard
-   predicate for them. Surface a real gate prominently; never invent one.
+EXECUTION CONDITIONS — REPORT ONLY WHAT THE SOURCE PROVES (applies at every depth)
+Report execution conditions ONLY when the source contains an explicit guard
+predicate for them. Surface a real gate prominently; never invent one.
    - A calendar/date gate exists ONLY when the source has an explicit month or
      date predicate — for example EXTRACT(MONTH FROM ...) = 12, a MONTH = 12 or
      'DECEMBER' comparison, or a hardcoded date literal used as a run guard.
@@ -2953,29 +3125,21 @@ RULES:
      function (do not bury it at the end) and cite the gating line by function
      name and line number.
    - When NO such predicate is present, do NOT state any calendar, month,
-     quarter-end, year-end, or specific-date condition, and do NOT invent a
-     run date. Do not assume the function runs only in December, only at
-     year-end, or only on a fixed date. If the source has no gate, say it has
-     no calendar/date gating rather than guessing one.
+     quarter-end, year-end, or specific-date condition, and do NOT invent a run
+     date. Do not assume the function runs only in December, only at year-end,
+     or only on a fixed date. If the source has no gate, say it has no
+     calendar/date gating rather than guessing one.
 
-5. For steps where a value is copied unchanged between tables:
-   State clearly: "The value is passed through without modification."
-
-6. Cite every claim with function name and line numbers.
-
-7. End with a SHORT SUMMARY (4 sentences max) that states:
-   - Where the value originates
-   - What transforms it
-   - What the final value represents
-   - Any execution conditions explicitly present in the source (omit this line
-     entirely if the source has no calendar/date or other gating predicate —
-     do not manufacture one)
-
-FORMAT:
-- Use ## for main heading, ### for each function/step
-- Include ```sql code blocks with the relevant PL/SQL
-- Put line references in section headers: ### Step 1: Initial Insert (Lines 203-223)
-- Do NOT repeat line references separately below code blocks
+FORMAT
+- Use markdown. For a full walkthrough: ## for the main heading, ### for each
+  function/step, and put line references in the section headers (e.g.
+  ### Step 1: Initial Insert (Lines 203-223)). Include ```sql code blocks with
+  the relevant PL/SQL; do NOT repeat the line references separately below the
+  code block.
+- For a brief or focused answer, a short paragraph (or a few sentences) is
+  appropriate — still naming the function and citing the line(s) inline (e.g.
+  "(FN_G_TEST_CSTM, Lines 12-19)"). Do NOT pad a short answer into the full
+  template.
 """
 
 
@@ -3345,11 +3509,14 @@ class LogicExplainer:
         if llm_payload and state.get("graph_available"):
             logger.info("explain_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
-                f"{llm_payload}\n\n"
-                "Answer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer when it asks for a fact or an identification; a full "
+                f"walkthrough only when it asks how something works. Ground every claim, "
+                f"at any length, in the analysis below, citing the function name and "
+                f"specific line numbers.\n\n"
+                f"Structured analysis produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}"
             )
         else:
             logger.info("explain_semantic: falling back to raw source")
@@ -3367,11 +3534,15 @@ class LogicExplainer:
                 function_sections.append(section)
 
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following {len(multi_source)} functions were found via semantic search:\n\n"
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer (a name and its one-line purpose) when it asks for a "
+                f"fact or an identification; a full step-by-step walkthrough only when "
+                f"it asks how something works. Ground every claim, at any length, in "
+                f"the source below, citing the function name and specific line numbers.\n\n"
+                f"Source material to answer from ({len(multi_source)} function(s) "
+                f"retrieved for this question):\n\n"
                 + "\n".join(function_sections)
-                + "\n\nAnswer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
             )
 
         # Use non-JSON mode for markdown responses
@@ -3463,11 +3634,14 @@ class LogicExplainer:
         if llm_payload and state.get("graph_available"):
             logger.info("stream_semantic: using graph pipeline payload (%d chars)", len(llm_payload))
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following structured analysis was produced from the parsed PL/SQL graph:\n\n"
-                f"{llm_payload}\n\n"
-                "Answer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer when it asks for a fact or an identification; a full "
+                f"walkthrough only when it asks how something works. Ground every claim, "
+                f"at any length, in the analysis below, citing the function name and "
+                f"specific line numbers.\n\n"
+                f"Structured analysis produced from the parsed PL/SQL graph:\n\n"
+                f"{llm_payload}"
             )
         else:
             logger.info("stream_semantic: falling back to raw source")
@@ -3499,11 +3673,15 @@ class LogicExplainer:
                 }
 
             user_prompt = (
-                f"User Question: {query}\n\n"
-                f"The following {kept_count} functions were found via semantic search:\n\n"
+                f"Question to answer: {query}\n\n"
+                f"Answer this question directly, at the depth it implies — a brief, "
+                f"direct answer (a name and its one-line purpose) when it asks for a "
+                f"fact or an identification; a full step-by-step walkthrough only when "
+                f"it asks how something works. Ground every claim, at any length, in "
+                f"the source below, citing the function name and specific line numbers.\n\n"
+                f"Source material to answer from ({kept_count} function(s) retrieved "
+                f"for this question):\n\n"
                 + "\n".join(function_sections)
-                + "\n\nAnswer the user's question with a detailed markdown explanation. "
-                "Cite specific function names and line numbers for every claim."
             )
 
         llm = create_llm(

@@ -1391,11 +1391,36 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # a strong OFSERM hit (global top-K would let it). Scoped
             # mode passes the schema through to the vector store as a
             # TAG pre-filter on the KNN clause.
+            # W160: a COLUMN_LOGIC query that has resolved to ONE explicit named
+            # function ("How does <Fn> work?") gets the FUNCTION_LOGIC retrieval
+            # profile (top_k=5, no rerank below) instead of the wide
+            # column-writer profile. Without this the ~27-neighbour pile
+            # overflows the W108 source-concat budget (forced UNVERIFIED) and
+            # destabilises the badge via out-of-set GROUNDING-HIGH. The named
+            # function is still force-injected downstream by W95 / W147 and
+            # promoted to position 0 by W97, so the lower top_k can't lose it.
+            # The gate EXCLUDES VARIABLE_TRACE and column-trace queries (W159
+            # fan-in: target_variable naming a distinct column) and resolved
+            # column-writer queries (C04 / C12). See
+            # _resolve_single_function_collapse.
+            single_fn_collapse = _resolve_single_function_collapse(
+                state, _graph_redis
+            )
             # W80b: per-query-type top-K — FUNCTION_LOGIC stays at 5
             # (anchored upstream), VARIABLE_TRACE / COLUMN_LOGIC raise
             # to capture multi-stage chains and dense column-writer
             # sets. See src/agents/retrieval_config.py.
-            top_k = resolve_top_k(state.get("query_type"))
+            top_k = (
+                _W160_COLLAPSE_TOP_K
+                if single_fn_collapse
+                else resolve_top_k(state.get("query_type"))
+            )
+            if single_fn_collapse:
+                logger.info(
+                    "[W160_COLLAPSE] single-function anchor — top_k=%d, "
+                    "rerank skipped (query_type=%s) | correlation_id=%s",
+                    top_k, state.get("query_type"), correlation_id,
+                )
             with stage_timer(
                 "vector_search", correlation_id,
                 schema_scope=schema_scope, top_k=top_k,
@@ -1433,12 +1458,21 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # seed/expanded/rank_change counts for canary measurement.
             # Must run BEFORE ensure_anchor_in_search_results so W95's
             # position-0 injection isn't displaced by the rerank.
-            apply_w80c_rerank(
-                state,
-                redis_client=_graph_redis,
-                correlation_id=correlation_id,
-                schema_scope=schema_scope,
-            )
+            # W160: skip the rerank entirely when collapsing to a single
+            # named function — its 1-hop graph expansion would re-widen the
+            # set we just narrowed via top_k. The anchor still reaches
+            # position 0 via W95 / W147 / W97 below.
+            if single_fn_collapse:
+                state["graph_rerank_stats"] = {  # type: ignore[typeddict-item]
+                    "status": "skipped_single_fn_collapse"
+                }
+            else:
+                apply_w80c_rerank(
+                    state,
+                    redis_client=_graph_redis,
+                    correlation_id=correlation_id,
+                    schema_scope=schema_scope,
+                )
 
             # W95: anchor resolution (W76 / BI routing) must be reflected
             # in downstream retrieval, not just embedding bias. When the
@@ -2506,6 +2540,110 @@ async def _run_scoped_vector_search(
 
 
 _W80C_RERANK_QUERY_TYPES: frozenset[str] = frozenset({"VARIABLE_TRACE", "COLUMN_LOGIC"})
+
+# W160 — retrieval profile a single-function "explain X" query collapses TO.
+# Mirrors W80B_TOP_K_BY_QUERY_TYPE["FUNCTION_LOGIC"] = 5 (the "one function is
+# the answer; extras only add narrative-LLM noise" profile in
+# src/agents/retrieval_config.py). We are giving such a query the
+# FUNCTION_LOGIC retrieval profile it should have had, without touching the
+# classifier.
+_W160_COLLAPSE_TOP_K: int = 5
+
+
+def _resolve_single_function_collapse(
+    state: Dict[str, Any], redis_client: Any
+) -> bool:
+    """W160 — decide whether to collapse COLUMN_LOGIC wide retrieval to the
+    FUNCTION_LOGIC profile for a query that has resolved to ONE explicit named
+    PL/SQL function.
+
+    "How does <Fn> work?" / "Explain <Fn>" classifies as COLUMN_LOGIC, which
+    carries the WIDE retrieval profile (top_k=15 + ``apply_w80c_rerank``
+    keep_top=35) designed for "a column has many writers." But such a query
+    names a single function — the answer is one function's body. The wide
+    profile drags ~27 neighbours into ``multi_source``, overflowing the W108
+    source-concat budget (forced UNVERIFIED, deterministic) and giving the LLM
+    more surface to cite an out-of-set name (flaky GROUNDING-HIGH). W160 is
+    pre-existing (diagnosed read-only; the implied-depth prompt only exposed it
+    at full corpus) and is fixed here at the RETRIEVAL layer — no classifier,
+    prompt, W108-cap, or badge change.
+
+    Returns True only when ALL hold:
+
+      1. ``query_type == "COLUMN_LOGIC"``. This EXCLUDES the VARIABLE_TRACE
+         fan-in path so its input set is never starved — e.g. "How is CAP169
+         calculated in FN_G_TEST_CSTM" classifies as VARIABLE_TRACE (W159
+         protection — explicit and load-bearing).
+
+      2. No column-provenance writers were resolved. "What writes N_EOP_BAL?" /
+         "What writes N_STD_ACCT_HEAD_AMT?" set ``column_provenance.writers`` and
+         legitimately need the wide writer set (C04 / C12 discriminator); never
+         collapse them. (These also yield zero function candidates below, since
+         ``extract_function_candidates`` drops N_-prefixed column tokens — this
+         is defence-in-depth on top of that.)
+
+      3. Exactly one HIGH-confidence explicit single-function target is
+         resolvable PRE-FETCH:
+           * a W76 ``"In <Fn>, ..."`` prefix anchor (``state["w76_anchor"]``),
+             OR
+           * exactly one graph-verified name from
+             ``extract_function_candidates(raw_query)`` — the
+             multi_source-independent twin of
+             :func:`determine_primary_anchor` layer-4 (``raw_query_scan``),
+             available here BEFORE ``fetch_multi_logic`` populates multi_source.
+         "Exactly one" so a two-function comparison keeps the wide profile.
+         The medium-confidence ``bi_routing`` (CAP-code) path is DELIBERATELY
+         excluded from this PR — BI-routed COLUMN_LOGIC queries may want chain
+         breadth and are outside the diagnosed/validated set; collapsing them is
+         a possible follow-up, not validated here.
+
+      4. ``target_variable`` (if set) names the SAME function, not a distinct
+         column. A genuine column trace classified COLUMN_LOGIC sets
+         ``target_variable`` to the COLUMN it traces — exclude that (extra W159
+         protection). But the LLM classifier is observed to non-deterministically
+         echo the *function name itself* into ``target_variable`` for "explain
+         how <Fn> works" (correlation_ids on 2026-06-05 showed
+         target_variable=FN_G_TEST_CSTM on one run and None on the next for the
+         identical query). A bare ``not target_variable`` check would therefore
+         make the collapse itself flaky — the precise condition is "no column
+         distinct from the resolved function."
+
+    The named function is never lost despite the lower top_k: W95
+    (``ensure_anchor_in_search_results``) and W147
+    (``ensure_named_functions_in_search_results``) force-inject it post-search
+    and W97 (``promote_anchor_to_front``) lifts it to position 0.
+    """
+    # 1. COLUMN_LOGIC only; never VARIABLE_TRACE (W159 fan-in guard).
+    if state.get("query_type") != "COLUMN_LOGIC":
+        return False
+    # 2. Never collapse a resolved column-writer query (C04 / C12 discriminator).
+    provenance = state.get("column_provenance") or {}
+    if isinstance(provenance, dict) and provenance.get("writers"):
+        return False
+    # 3. Resolve the single HIGH-confidence explicit function PRE-FETCH.
+    w76 = state.get("w76_anchor") or {}
+    w76_fn = (w76.get("function") or "").strip()
+    if w76_fn:
+        single_fn = w76_fn
+    else:
+        if redis_client is None:
+            return False
+        raw_query = state.get("raw_query") or ""
+        if not raw_query:
+            return False
+        candidates = extract_function_candidates(raw_query)
+        verified = [
+            c for c in candidates if function_exists_in_graph(c, redis_client)
+        ]
+        if len(verified) != 1:
+            return False
+        single_fn = verified[0]
+    # 4. W159 fan-in guard: exclude a genuine column trace (target_variable is a
+    #    distinct column), but tolerate the classifier echoing the function name.
+    target_var = (state.get("target_variable") or "").strip()
+    if target_var and target_var.upper() != single_fn.upper():
+        return False
+    return True
 
 
 def apply_w80c_rerank(

@@ -31,9 +31,15 @@ const HEIGHT_BY_KIND = {
 };
 
 // --- dagre tuning -----------------------------------------------------------
+// W151 polish: widened the spacing budget so dense fan-ins (degree-12+) get
+// room instead of cramming. In LR, NODESEP is the within-rank (vertical) gap —
+// the lever that decongests a tall source rank — and RANKSEP is the between-
+// rank (horizontal) gap, which widens the canvas. Both are pure geometry; the
+// canvas grows and the container scrolls (overflow-x-auto) so the chat column
+// is never broken.
 const RANKDIR = 'LR';      // converge to the target sink on the right
-const NODESEP = 40;        // gap between nodes in the same rank
-const RANKSEP = 90;        // gap between ranks (depth)
+const NODESEP = 56;        // gap between nodes in the same rank (vertical in LR)
+const RANKSEP = 120;       // gap between ranks (depth; horizontal in LR)
 const MARGIN = 24;
 
 // --- group-frame padding ----------------------------------------------------

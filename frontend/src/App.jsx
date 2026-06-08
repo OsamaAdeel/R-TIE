@@ -22,6 +22,7 @@ export default function App() {
     setActiveId,
     addSession,
     deleteSession,
+    clearAllSessions,
     addMessage,
     updateLastMessage,
     renameSession,
@@ -68,6 +69,14 @@ export default function App() {
       return next;
     });
   }, [deleteSession]);
+
+  // "Delete all chats" — wipe the conversation store (resets to one empty
+  // chat) and clear the now-orphaned starred ids. Only invoked after the
+  // SettingsMenu's explicit Confirm. Theme + sidebar prefs are left intact.
+  const handleDeleteAll = useCallback(() => {
+    clearAllSessions();
+    setStarredIds(new Set());
+  }, [clearAllSessions]);
 
   const handleSend = useCallback(
     async (text, options = {}) => {
@@ -227,6 +236,7 @@ export default function App() {
         onDelete={handleDelete}
         onRename={renameSession}
         onStar={toggleStar}
+        onDeleteAll={handleDeleteAll}
         health={health}
         theme={theme}
         onToggleTheme={toggleTheme}

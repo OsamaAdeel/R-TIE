@@ -46,15 +46,27 @@ canaries:
     expected:
       query_type: COLUMN_LOGIC
       schema: OFSMDM
-      # W148: badge is UNVERIFIED because the 35-function retrieval for this
-      # query trips W108-TRUNCATED (the source-concat cap drops lower-ranked
-      # candidates), NOT because of a fabrication catch. Pre-W148 the answer
-      # padded/fabricated a gate that W57 flagged GROUNDING-HIGH; the prompt
-      # fix removed the fabrication, so FN_LOAD_OPS_RISK_DATA's REAL December
-      # gate (EXTRACT(MONTH ...) = 12) is now surfaced and grounded. The
-      # W108-TRUNCATED downgrade is a separate, pre-existing retrieval
-      # characteristic, not W148.
-      badge: UNVERIFIED
+      # Badge is VERIFIED after W163. Two fixes had to land for this:
+      #  - W160 gave this single-function "How does <Fn> work?" query the
+      #    FUNCTION_LOGIC retrieval profile (top_k=5, rerank skipped) — multi_source
+      #    drops ~35 -> ~10 and W108-TRUNCATED no longer fires (asserted below).
+      #  - W163 fixed the residual UNVERIFIED cause: FN_LOAD_OPS_RISK_DATA's body
+      #    reads from a SOURCE TABLE named ABL_OPS_RISK_DATA, which the explainer
+      #    cites in a "### Step 4: Data Insertion from ABL_OPS_RISK_DATA" heading
+      #    (W78a heading Pattern A). Pre-W163 the ABL_ name survived W57's
+      #    function-name filter (ABL_ is not a table prefix — and CANNOT be one,
+      #    since ABL_ also prefixes real functions) and was mis-flagged
+      #    GROUNDING-HIGH ("cited function ... not in retrieved sources"), forcing
+      #    UNVERIFIED. W163 recognizes ABL_OPS_RISK_DATA as a real table by graph
+      #    IDENTITY (schemas_for_table) and clears it; a fabricated function name
+      #    (ABL_-prefixed or not) is in no graph as a table and still fires
+      #    (catch exercised by C09/C12 and tests/unit/agents/test_w163_*).
+      # Empirically confirmed VERIFIED, 0 warnings, confidence 0.95 on the live
+      # stream (scratch/w163_c01_after.txt). The W160 win stays pinned below
+      # (W108-TRUNCATED gone). W148 history: the prompt fix removed an earlier
+      # fabricated gate; the REAL December gate (EXTRACT(MONTH ...) = 12) is still
+      # surfaced.
+      badge: VERIFIED
     assertions:
       - kind: done_field_neq
         path: type
@@ -69,9 +81,49 @@ canaries:
         value: UNGROUNDED_IDENTIFIERS
       - kind: warnings_not_contain
         value: PARTIAL_SOURCE
+      # W160 INVARIANT: the single-function collapse must keep retrieval under
+      # the W108 source-concat budget. A W108-TRUNCATED warning here means the
+      # gate stopped firing and the wide column-writer profile leaked back in.
+      - kind: warnings_not_contain
+        value: W108-TRUNCATED
+      # W163 INVARIANT: the real source table ABL_OPS_RISK_DATA, cited in prose
+      # and a heading, must NOT be mis-flagged as a fabricated function. A
+      # GROUNDING-HIGH naming ABL_OPS_RISK_DATA means the table-identity guard
+      # regressed. (Pinned narrowly to the table name, not all of GROUNDING-HIGH,
+      # so a legitimate December-residual catch on a bad run is not forbidden.)
+      - kind: warnings_not_contain
+        value: ABL_OPS_RISK_DATA
       - kind: min_citations
         value: 1
-    protects: "Canonical COLUMN_LOGIC happy path for a function with a REAL calendar gate — graph payload, hierarchy header, citations intact, and FN_LOAD_OPS_RISK_DATA's genuine December (month=12) gate surfaced and grounded post-W148. Badge is UNVERIFIED via W108-TRUNCATED on the 35-function retrieval, not via a fabrication catch. (W57's fabrication-catch path is exercised by C09's safety invariant and C12.)"
+    protects: "Single-function COLUMN_LOGIC happy path with a REAL calendar gate — graph payload, citations intact, FN_LOAD_OPS_RISK_DATA's genuine December (month=12) gate surfaced, badge VERIFIED. Two invariants pinned: W160's single-function retrieval collapse (W108-TRUNCATED gone) and W163's table-identity recognition (the ABL_-prefixed source table ABL_OPS_RISK_DATA cited in prose/heading is no longer mis-flagged GROUNDING-HIGH). Drops if the collapse regresses (W108-TRUNCATED returns), the December gate stops surfacing, or the ABL_OPS_RISK_DATA false-positive returns. (W57's fabrication-catch path is exercised by C09 and C12.)"
+
+  - id: C19
+    tier: 1
+    query: "how does FN_G_TEST_CSTM work"
+    expected:
+      # W160: the canonical over-retrieval case the fix targets. A single
+      # named function classified COLUMN_LOGIC; without the collapse the
+      # ~27-function retrieval tripped W108-TRUNCATED and forced UNVERIFIED
+      # (941 citations, diagnosed read-only). The collapse gives it the
+      # FUNCTION_LOGIC profile (top_k=5, rerank skipped) -> VERIFIED.
+      query_type: COLUMN_LOGIC
+      # No schema pin: the classifier routes schema=OFSMDM (default) but
+      # FN_G_TEST_CSTM's body is owned by OFSERM; the resolved schema is not
+      # what this canary protects. (Same convergent-route tolerance as C12.)
+      badge: VERIFIED
+    assertions:
+      - kind: done_field_neq
+        path: type
+        value: function_not_found
+      # The fix's core invariant: collapsed retrieval stays under the W108
+      # source-concat budget, so no truncation downgrade.
+      - kind: warnings_not_contain
+        value: W108-TRUNCATED
+      - kind: warnings_not_contain
+        value: UNGROUNDED_IDENTIFIERS
+      - kind: min_citations
+        value: 1
+    protects: "W160 single-function retrieval collapse. 'how does FN_G_TEST_CSTM work' is a single named function that classifies COLUMN_LOGIC; pre-W160 the wide column-writer profile pulled ~27 neighbours, tripped W108-TRUNCATED and forced UNVERIFIED. Drops if the single-function gate stops firing (collapse regressed) and the wide profile leaks back in."
 
   - id: C02
     tier: 1
