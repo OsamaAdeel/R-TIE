@@ -21,6 +21,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.schema_discovery import fallback_to_default_schema
 
 logger = get_logger(__name__, concern="app")
@@ -321,6 +322,28 @@ def evaluate_grounding(
             logger.warning(
                 "W57 enforcement raised an exception; falling back to "
                 "pre-W57 grounding verdict: %s", exc,
+            )
+
+    # W168: attribution-consistency gate. Standalone (NOT inside
+    # w57_enforce_grounding) so query_type is in scope without churning that
+    # signature. Caps the badge when the routing anchor is absent from the
+    # prose subject — the answer describes a different function than the one
+    # the pipeline resolved. Appended to `warnings` BEFORE blocking_warnings
+    # is computed below, so its GROUNDING-…-HIGH prefix flips the badge to
+    # UNVERIFIED via the same machinery as W85. Source-gated to explicit
+    # anchors + VARIABLE_TRACE-excluded inside the check.
+    if query_type in _REQUIRES_CITATIONS:
+        try:
+            warnings.extend(_w168_check_attribution_mismatch(
+                markdown=markdown,
+                query_type=query_type,
+                w70_anchor=w70_anchor,
+                w76_anchor=w76_anchor,
+            ))
+        except Exception as exc:
+            logger.warning(
+                "W168 attribution check raised an exception; continuing "
+                "without it: %s", exc,
             )
 
     # A warning blocks (forces UNVERIFIED) unless it's a W57 LOW-severity
@@ -880,6 +903,174 @@ def _w57_passes_function_name_filters(cand: str) -> bool:
     if cu in _PROCESS_SUBPROCESS_NAMES:
         return False
     return True
+
+
+# W168 anchor-source allow-list: sources that represent a DELIBERATE
+# resolution of "which function did the user mean" (anchor_resolution.py).
+# A prose-vs-anchor disagreement on one of these is a true attribution bug.
+# The weak ``semantic_top1`` source (highest-cosine guess on wide retrieval)
+# is deliberately EXCLUDED — there the anchor was never authoritative (W160),
+# so the comparison is unreliable; W150's near-twin hedge and the Phase-2
+# decline gate own that regime. This is an explicit ALLOW-list (not a
+# deny-list of ``{semantic_top1}``) so any FUTURE anchor source defaults to
+# safe-suppress rather than firing untested — the same identity discipline
+# W164 applies with column-first precedence.
+_W168_EXPLICIT_ANCHOR_SOURCES = frozenset({
+    "classifier_object",
+    "bi_routing",
+    "raw_query_scan",
+})
+
+
+def _w168_extract_prose_function_names(markdown: str) -> set:
+    """Return the normalized set of function names the prose cites.
+
+    Reuses the three W57 per-claim-binding extractors (prose framing,
+    headings/responsibility, parenthesised line-citations) and the same
+    W58 filter, so W168 and Check 1 agree on "what the body cites". Each
+    surviving candidate is canonicalised via
+    :meth:`SchemaAwareKeyspace.normalize_function_name` (UPPER, ws->_) — the
+    same identity normalisation the anchor side uses, so the set-membership
+    comparison is schema-aware, not shape-based. Candidates that raise
+    ``ValueError`` on normalisation (empty/whitespace) are skipped.
+    """
+    names: set = set()
+
+    def _add(cand: Optional[str]) -> None:
+        if not cand or not _w57_passes_function_name_filters(cand):
+            return
+        try:
+            names.add(SchemaAwareKeyspace.normalize_function_name(cand))
+        except ValueError:
+            return
+
+    for m in _W57_PROSE_FUNCTION_REF_RE.finditer(markdown):
+        _add(m.group(1) or m.group(2))
+    for m in _W57_HEADING_AND_RESPONSIBILITY_REF_RE.finditer(markdown):
+        _add(m.group("heading_name") or m.group("resp_name"))
+    for m in _W57_FUNC_CITATION_RE.finditer(markdown):
+        _add(m.group(1))
+    return names
+
+
+def _w168_check_attribution_mismatch(
+    markdown: str,
+    query_type: str,
+    w70_anchor: Optional[Dict[str, Any]] = None,
+    w76_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W168: cap the badge when the routing anchor is absent from the prose
+    subject — i.e. the answer describes a DIFFERENT function than the one
+    the pipeline resolved.
+
+    Routing anchor (``state["w70_anchor"]`` cascade, ``w76_anchor`` prefix
+    fallback) and prose subject (the cited function set) are both in scope
+    at badge time but were never compared. This is the missing third pair
+    next to W57 Check 3a (asked-vs-prose) and W85 (anchor-vs-asked); it
+    fills the described-not-named gap where the user named no function so
+    both of those no-op, yet the explainer still drifted off the anchor.
+
+    Fires iff ALL hold:
+      1. ``query_type != "VARIABLE_TRACE"`` — the column fan-in (W159)
+         legitimately spans many writer functions, none equal to the single
+         anchor; belt-and-suspenders alongside the source gate.
+      2. An anchor resolves (w70 function, else w76 function).
+      3. The anchor ``source`` is EXPLICIT (``w76_*`` /
+         ``_W168_EXPLICIT_ANCHOR_SOURCES``). ``semantic_top1`` and unknown
+         sources are suppressed.
+      4. The prose cites at least one function (else W135 / per-claim-binding
+         own the no-subject case).
+      5. The normalized anchor is neither in the prose function SET nor a
+         substring of the normalized body (the substring belt: the
+         structured extractors only catch heading/framing/parenthesised
+         cites, so an informally-named anchor must not false-fire — a
+         false-positive on a trust gate is worse than a missed drift that
+         Phase 2 backstops).
+
+    DISJOINT FROM W166: W168 catches ``anchor ∉ prose`` (the prose drifted
+    AWAY from the routed function). W166 is the opposite — the anchor is
+    itself the wrong near-twin but the prose FAITHFULLY describes that wrong
+    anchor (``anchor ∈ prose``), so W168 never fires on it; that is the
+    Phase-2 near-twin abstain / W150 territory. Suppressing on
+    ``semantic_top1`` therefore sacrifices zero W166 coverage.
+
+    SCOPE (validated live, 91bec4e + W168). CATCHES anchor-ABSENT /
+    "silent-swap" drift: the routed function name appears NOWHERE in the
+    prose — proven on "How is CAP973 calculated?", whose ``bi_routing``
+    anchor CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT never appears
+    while the prose describes REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP.
+    Does NOT catch "framing-drift": where the prose names the anchor as
+    framing context ("In the function FN_G_TEST_CSTM, ... updated in the
+    ABL_INV_ASSET_CLASS_RECLASS function") so ``anchor ∈ prose`` and the
+    set-membership predicate (kept lenient on purpose so Q39 two-function
+    comparisons stay VERIFIED) does not fire. The adversarial Q12/Q16/Q48
+    ("how is N_BASEL_ASSET_CLASS_SKEY updated in FN_G_TEST_CSTM") are
+    framing-drift and are NOT caught here — tracked as a separate follow-up
+    (W169), and additionally route VARIABLE_TRACE which gate 1 excludes.
+
+    Returns at most one ``GROUNDING-ATTRIBUTION-MISMATCH-HIGH`` warning,
+    which flips the badge to UNVERIFIED via the existing blocking-warning
+    filter in :func:`evaluate_grounding` (same machinery as W85).
+    """
+    # Gate 1: VARIABLE_TRACE fan-in exclusion (W159 must-not-regress).
+    if query_type == "VARIABLE_TRACE":
+        return []
+
+    # Gate 2: resolve anchor. w70 cascade carries the authoritative
+    # ``source``; a bare w76 anchor is an explicit "In <Fn>" prefix.
+    anchor_fn = ""
+    anchor_source = ""
+    if isinstance(w70_anchor, dict):
+        anchor_fn = (w70_anchor.get("function") or "").strip()
+        anchor_source = (w70_anchor.get("source") or "").strip()
+    if not anchor_fn and isinstance(w76_anchor, dict):
+        anchor_fn = (w76_anchor.get("function") or "").strip()
+        anchor_source = (w76_anchor.get("source") or "w76_prefix").strip()
+    if not anchor_fn:
+        return []
+
+    # Gate 3: explicit-source allow-list. semantic_top1 / unknown -> suppress.
+    is_explicit = (
+        anchor_source.startswith("w76_")
+        or anchor_source in _W168_EXPLICIT_ANCHOR_SOURCES
+    )
+    if not is_explicit:
+        return []
+
+    try:
+        norm_anchor = SchemaAwareKeyspace.normalize_function_name(anchor_fn)
+    except ValueError:
+        return []
+
+    # Gate 4: prose must attribute to at least one function.
+    prose_fns = _w168_extract_prose_function_names(markdown)
+    if not prose_fns:
+        return []
+
+    # Gate 5a: anchor is among the prose subjects (incl. Q39 multi-fn
+    # comparison where the anchor is one of several named functions).
+    if norm_anchor in prose_fns:
+        return []
+
+    # Gate 5b: substring belt — anchor mentioned anywhere in the body
+    # (even informally, outside the structured framings) => not a drift.
+    # Normalise BOTH sides (ASCII-dash fold + uppercase).
+    body_norm = _w57_ascii_normalize(markdown).upper()
+    if norm_anchor in body_norm:
+        return []
+
+    # Report the dominant cited function as the subject the answer
+    # actually describes.
+    counts = sorted(
+        ((fn, body_norm.count(fn)) for fn in prose_fns),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    prose_lead = counts[0][0]
+
+    return [
+        f"GROUNDING-ATTRIBUTION-MISMATCH-HIGH: answer describes "
+        f"'{prose_lead}' but query resolved to '{anchor_fn}'"
+    ]
 
 
 def _w57_cited_name_is_known_table(
