@@ -1837,6 +1837,59 @@ def w88_regression_w33_canary():
     return passed, extra
 
 
+@test("W169 — framing-drift gate flips Q12 to UNVERIFIED with scope-drift warning")
+def w169_q12_scope_drift():
+    """Q12: a VARIABLE_TRACE query scoped to FN_G_TEST_CSTM whose prose
+    attributes N_BASEL_ASSET_CLASS_SKEY's write to a DIFFERENT function
+    (ABL_INV_ASSET_CLASS_RECLASS / FN_COR_RW_U2_CSTM). Post-W169 the
+    scope-drift predicate must flip the badge to UNVERIFIED and emit
+    GROUNDING-ANCHOR-SCOPE-DRIFT-HIGH.
+
+    NOTE (W169 diagnostic Probe 1 §6): the underlying LLM prose is
+    non-deterministic. In the overwhelming majority of runs the prose cites
+    the drifted function's line range ("Lines 32-125") or names it in an
+    extractable form, so the gate fires. A rare run that cites NO usable
+    line range AND names the outside function only as "the X step" (the
+    SUB-A extraction gap) can still slip — that residual is W170's surface,
+    not a W169 failure. If this row flakes, confirm the prose form before
+    treating it as a regression.
+    """
+    r = run_query("how is N_BASEL_ASSET_CLASS_SKEY updated in FN_G_TEST_CSTM")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    scope_drift = any("GROUNDING-ANCHOR-SCOPE-DRIFT" in w for w in warnings)
+    passed = d.get("badge") != "VERIFIED" and scope_drift
+    return passed, summarize_done(d)
+
+
+@test("W169 regression — C19 'how does FN_G_TEST_CSTM work' stays VERIFIED")
+def w169_c19_function_logic_unaffected():
+    """FUNCTION_LOGIC: no traced column → no attested-writer signal →
+    W169 no-ops. Must remain VERIFIED (byte-unaffected by the gate)."""
+    r = run_query("how does FN_G_TEST_CSTM work")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    passed = (
+        d.get("badge") == "VERIFIED"
+        and not any("SCOPE-DRIFT" in w for w in warnings)
+    )
+    return passed, summarize_done(d)
+
+
+@test("W169 regression — C12 fan-in 'What writes N_STD_ACCT_HEAD_AMT?' stays VERIFIED")
+def w169_c12_fanin_unaffected():
+    """W159 fan-in: no named scope (asked empty) → W169's condition (i)
+    fails → no-op. Legitimate multi-writer prose must stay VERIFIED."""
+    r = run_query("What writes N_STD_ACCT_HEAD_AMT?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    passed = (
+        d.get("badge") == "VERIFIED"
+        and not any("SCOPE-DRIFT" in w for w in warnings)
+    )
+    return passed, summarize_done(d)
+
+
 def main():
     results = []
     for name, fn in TESTS:

@@ -183,6 +183,7 @@ def evaluate_grounding(
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
     w70_anchor: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> Dict[str, Any]:
     """Evaluate whether a streamed explanation is grounded in retrieved source.
 
@@ -314,6 +315,7 @@ def evaluate_grounding(
                 redis_client=redis_client,
                 w76_anchor=w76_anchor,
                 w70_anchor=w70_anchor,
+                attested_writers=attested_writers,
             )
             warnings.extend(w57_warnings)
         except Exception as exc:
@@ -2308,11 +2310,126 @@ def _w57_check_citation_count_cap(markdown: str) -> List[str]:
     return []
 
 
+def _w169_cited_line_ranges(markdown: str) -> List[Tuple[int, int]]:
+    """W169: every ``(start, end)`` line range the prose cites, via the same
+    :data:`_LINE_REF_RE` the citation extractor uses. ``"Line 47"`` →
+    ``(47, 47)``; ``"Lines 32-125"`` → ``(32, 125)``. Degenerate matches
+    (reversed, or spans > 500 lines) are dropped, mirroring
+    :func:`_extract_line_citations`."""
+    out: List[Tuple[int, int]] = []
+    for m in _LINE_REF_RE.finditer(markdown or ""):
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else start
+        if end < start or end - start > 500:
+            continue
+        out.append((start, end))
+    return out
+
+
+def _w169_attribution_drift(
+    asked: List[str],
+    attested_writers: Dict[str, List[Tuple[int, int]]],
+    markdown: str,
+    multi_source: Dict[str, Any],
+) -> Optional[str]:
+    """W169: VARIABLE_TRACE framing-drift / scope-violation predicate.
+
+    Replaces Check 3a's frequency-dominance heuristic on the VARIABLE_TRACE
+    path (where the structured *attested_writers* signal exists). The
+    frequency rule is degenerate in the sparse-citation regime where
+    framing-drift lives — Q12 cites the named scope and the drifted function
+    once each, a 1–1 tie the 2× ratio cannot see (W169 diagnostic Probe 1
+    §1). This predicate keys on SCOPE, not frequency.
+
+    Fires (returns a ``GROUNDING-…-HIGH`` warning) iff ALL hold:
+      (i)   the query named a scope set (*asked* non-empty);
+      (ii)  EVERY named-scope function is itself an attested writer of the
+            traced column (present in *attested_writers*) — a query that
+            named a NON-writer is not penalized here (a different case);
+      (iii) the prose's substantive write-attribution resolves, by STRUCTURE
+            (never raw body-substring frequency), to a function OUTSIDE the
+            named set:
+              1. line-range → owning writer: a cited ``(start, end)`` that is
+                 NOT contained in any named-scope writer span but IS
+                 contained in some outside-scope writer span → that outside
+                 function;
+              2. else prose-name fallback
+                 (:func:`_w168_extract_prose_function_names`): a cited
+                 function name outside the named set that IS an attested
+                 writer.
+
+    Returns ``None`` (fail-safe silence) when no outside-scope attributed
+    writer is found. Pure: no LLM, no Redis, no side effects.
+
+    Confirmed FP-safe against legitimate two-function comparisons (W169
+    Probe 2 §2): there both discussed functions are in the query's named
+    set, so (iii) is false and the gate stays silent. *multi_source* is
+    accepted for caller-contract parity (the attested-writer set it feeds is
+    already cohort-scoped).
+    """
+    if not asked or not attested_writers:
+        return None
+    named = {a.strip().upper() for a in asked if a and a.strip()}
+    if not named:
+        return None
+    # (ii) every named scope function must itself be an attested writer.
+    if not all(n in attested_writers for n in named):
+        return None
+
+    def _contains(cs: int, ce: int, spans: List[Tuple[int, int]]) -> bool:
+        for ls, le in spans:
+            if ls is None or le is None:
+                continue
+            if ls <= cs and ce <= le:
+                return True
+        return False
+
+    outside_owner: Optional[str] = None
+
+    # (iii) priority 1 — line-range ownership against attested writer spans.
+    for cs, ce in _w169_cited_line_ranges(markdown):
+        # A range that belongs to a named-scope writer is on-scope: skip it.
+        if any(_contains(cs, ce, attested_writers.get(n, [])) for n in named):
+            continue
+        for fn, spans in attested_writers.items():
+            if fn in named:
+                continue
+            if _contains(cs, ce, spans):
+                outside_owner = fn
+                break
+        if outside_owner:
+            break
+
+    # (iii) priority 2 — prose-name fallback (structured extractor, not
+    # frequency). Only an outside-set name that is itself an attested writer.
+    if outside_owner is None:
+        for fn in _w168_extract_prose_function_names(markdown):
+            fu = fn.strip().upper()
+            if fu not in named and fu in attested_writers:
+                outside_owner = fu
+                break
+
+    if outside_owner is None:
+        return None
+
+    scope_label = (
+        sorted(named)[0] if len(named) == 1 else ", ".join(sorted(named))
+    )
+    return (
+        f"GROUNDING-ANCHOR-SCOPE-DRIFT-HIGH: user scoped the question to "
+        f"'{scope_label}' (an attested writer of the traced column) but the "
+        f"response attributes the write to '{outside_owner}', a different "
+        f"function outside that scope"
+    )
+
+
 def _w57_check_anchoring(
     raw_query: str,
     functions_analyzed: List[str],
     markdown: str,
     w76_anchor: Optional[Dict[str, Any]] = None,
+    multi_source: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> List[str]:
     """W57 Check 3a: when the user named a specific function, the response
     must address it.
@@ -2346,10 +2463,29 @@ def _w57_check_anchoring(
     if len(analyzed_upper) <= 1:
         return []
 
-    # Multi-function answer: the asked-about function should not be
-    # dominated by another analyzed function in the body. Compute body
-    # mention counts and flag if any other function appears
-    # _W57_PRIMARY_DOMINANCE_RATIO× more often than the asked-about one.
+    # W169 route-split: when the structured attested-writer signal is
+    # present (the VARIABLE_TRACE path — graph-first / tagged-fallback,
+    # supplied by main.py), the scope-drift predicate REPLACES the frequency
+    # heuristic below. It fires when the prose attributes the substantive
+    # write to a function OUTSIDE the named scope while the named scope is
+    # itself an attested writer. Frequency is degenerate in the sparse-
+    # citation regime where framing-drift lives (Probe 1 §1).
+    if attested_writers:
+        drift = _w169_attribution_drift(
+            asked, attested_writers, markdown, multi_source or {},
+        )
+        return [drift] if drift else []
+
+    # Non-VARIABLE_TRACE (no attested-writer signal: FUNCTION_LOGIC /
+    # COLUMN_LOGIC have no vt_tagged/vt_graph). The legacy frequency rule
+    # stands here — W169's structural predicate cannot apply without the
+    # signal, and the frequency dominance check still guards the Run-3 C2
+    # benchmark (asked about X, prose dominated by a different function).
+    #
+    # The asked-about function should not be dominated by another analyzed
+    # function in the body. Compute body mention counts and flag if any
+    # other function appears _W57_PRIMARY_DOMINANCE_RATIO× more often than
+    # the asked-about one.
     asked_primary = asked[0].upper()
     body_upper = markdown.upper()
     asked_count = body_upper.count(asked_primary)
@@ -3093,6 +3229,7 @@ def w57_enforce_grounding(
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
     w70_anchor: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> List[str]:
     """Run all six W57 grounding checks. Returns combined warnings list.
 
@@ -3141,6 +3278,8 @@ def w57_enforce_grounding(
     warnings.extend(_w57_check_anchoring(
         raw_query, functions_analyzed, markdown,
         w76_anchor=w76_anchor,
+        multi_source=multi_source,
+        attested_writers=attested_writers,
     ))
     warnings.extend(_w57_check_chain_coherence(markdown, multi_source))
     warnings.extend(_w57_check_hierarchy_body_consistency(
