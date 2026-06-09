@@ -1227,3 +1227,11 @@ Logged as the W169 successor on the hypothesis that framing-drift would recur on
 **Validation (post-final-re-pin).** Re-ran ≥10 live runs spanning both outcomes; all four pinned invariants held on every run regardless of whether the pass-through flourish fired. See the run table in the implementation report.
 
 **Lesson.** A canary must pin the invariant it protects, not a metric that floats with generator non-determinism — and "structural" is not automatic: `min_citations` counts prose-parsed line-refs, not retrieval, so it floated exactly like the badge. Verify each candidate invariant across BOTH outcomes before declaring it stable.
+
+---
+
+## W166. Weak-anchor wrong-function fabrication — NOT A CURRENT DEFECT (watch item)
+
+Logged CRITICAL from the FN_G_TEST_CSTM adversarial eval: a described subject ("g test function") was expected to mis-resolve to a wrong near-twin (TLX_OPS_ADJ_MISDATE) and borrow its December gate as FN_G_TEST_CSTM's. Diagnostic @ 10eabff (6 runs each across 5 variants) found NO repro. Every described/typo variant fails safe via the W87 UNRECOGNIZED_TERM abstain gate ([orchestrator.py:1923-2003](src/agents/orchestrator.py#L1923-L2003)) — UNVERIFIED·0.2, no anchor reached, no calendar claim. The named control resolves correctly to a VERIFIED December negative. The hazard is real in principle (TLX_OPS_ADJ_MISDATE exists with a genuine December gate at :47/:156; FN_G_TEST_CSTM has none) — but resolution never reaches the wrong twin, so containment holds. Load-bearing guard is W87 (the W165 bug-ticket family), with W164's binding pre-check and W169's prose closure as adjacent reinforcement.
+
+Deferred condition (W166-b): no gate today binds a month/quarter claim to a predicate in the resolved function. Moot while abstain holds. REVISIT only if anchor selection ever starts resolving described-names confidently again — then build calendar-claim-vs-source grounding. Residual live oddity is the W165 leading-interrogative quirk (benign, fails safe).
