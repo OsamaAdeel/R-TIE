@@ -2670,6 +2670,40 @@ def resolve_graph_binding(
             candidates, search_term,
         )
         return "function", search_term, g_schema
+    # W172: function-existence rescue. Both target_var AND obj_name are empty
+    # here (no classifier target_variable echo, no W76 / bi_routing
+    # object_name), so without this the binding would pass the WHOLE raw_query
+    # to the variable index — a guaranteed miss — even when raw_query plainly
+    # NAMES a real graph function ("How does FN_LOAD_OPS_RISK_DATA work?"). The
+    # LLM classifier deterministically withholds FN_-shaped names from
+    # target_variable (it reads "the PL/SQL function FN_..." as a function, not
+    # a variable-to-trace) and flickers run-to-run (see the W160 note above), so
+    # the function identity must be recovered here, NOT relied upon from the
+    # classifier. Reuses the SAME machinery as the W164 function-identity branch
+    # and the obj_name branch above: extract candidates, then an EXACT graph-key
+    # existence probe. NEVER fuzzy — find_similar_function_names is deliberately
+    # not used; a near-miss must fall through, never force-bind a wrong function
+    # (W166 wrong-anchor containment). On an exact hit, normalize to the
+    # canonical key form and repoint g_schema via schema_for_function (this also
+    # closes the FN_G_TEST_CSTM OFSMDM->OFSERM mis-label the (else) lookup would
+    # otherwise compound). On no candidate or a non-exact candidate, fall
+    # through to the unchanged whole-query-variable default — xyzzy and genuine
+    # column queries (extract drops N_/V_/F_ tokens) stay safe.
+    rescue_candidates = extract_function_candidates(raw_query)
+    if rescue_candidates and function_exists_in_graph(
+        rescue_candidates[0], redis_client
+    ):
+        rescue_fn = rescue_candidates[0]
+        fn_name = SchemaAwareKeyspace.normalize_function_name(rescue_fn)
+        fn_schema = schema_for_function(rescue_fn, redis_client)
+        if fn_schema:
+            g_schema = fn_schema
+        logger.info(
+            "[W172] function-existence rescue: bound %r as FUNCTION "
+            "(branch=raw-query-rescue, resolved=%r schema=%r)",
+            rescue_fn, fn_name, g_schema,
+        )
+        return "function", fn_name, g_schema
     return "variable", raw_query, g_schema
 
 

@@ -11,6 +11,7 @@ localhost:6379. Run directly: `python tests/integration/test_live_stream.py`.
 Not picked up by pytest automatically — this is a manual smoke harness.
 """
 import json
+import os
 import sys
 import uuid
 
@@ -1880,6 +1881,116 @@ def w169_c19_function_logic_unaffected():
 def w169_c12_fanin_unaffected():
     """W159 fan-in: no named scope (asked empty) → W169's condition (i)
     fails → no-op. Legitimate multi-writer prose must stay VERIFIED."""
+    r = run_query("What writes N_STD_ACCT_HEAD_AMT?")
+    d = r["done"] or {}
+    warnings = d.get("warnings") or []
+    passed = (
+        d.get("badge") == "VERIFIED"
+        and not any("SCOPE-DRIFT" in w for w in warnings)
+    )
+    return passed, summarize_done(d)
+
+
+_APP_LOG = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "app.log")
+
+
+def branch_for_query(query: str) -> str:
+    """Return which generation branch the backend took for the most recent
+    run of *query*, read from the server log (the only place the fork is
+    observable). main.py logs the raw query on BOTH paths:
+
+      * "Using graph pipeline for query: <q>"               -> "graph"
+      * "Graph returned no nodes, falling back to raw source for query: <q>"
+                                                             -> "raw"
+
+    Scans the log tail backwards and returns the first match for *query*.
+    Returns "unknown" if neither line is found (e.g. log rotated)."""
+    try:
+        with open(_APP_LOG, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return "unknown"
+    needle = f"for query: {query}"
+    for line in reversed(lines):
+        if needle not in line:
+            continue
+        if "Using graph pipeline" in line:
+            return "graph"
+        if "falling back to raw source" in line:
+            return "raw"
+    return "unknown"
+
+
+@test("W172 — FN_LOAD_OPS_RISK_DATA now takes the GRAPH branch (was raw-source)")
+def w172_fn_load_ops_risk_takes_graph():
+    """The rescue case: 'How does FN_LOAD_OPS_RISK_DATA work?' carries no
+    classifier target_variable and no W76/bi_routing object_name, so pre-W172
+    it fell to the (else) -> whole-query-variable -> 0 nodes -> raw-source.
+    Post-W172 the function-existence rescue binds it as a function and the
+    graph branch runs. Pin the BRANCH (deterministic) via the log; badge
+    stays VERIFIED."""
+    q = "How does FN_LOAD_OPS_RISK_DATA work?"
+    r = run_query(q)
+    d = r["done"] or {}
+    branch = branch_for_query(q)
+    passed = branch == "graph" and d.get("badge") == "VERIFIED"
+    return passed, f"branch={branch} | {summarize_done(d)}"
+
+
+@test("W172 — FN_G_TEST_CSTM takes GRAPH branch AND schema repoints to OFSERM")
+def w172_fn_g_test_takes_graph_schema_ofserm():
+    """Folded-in schema fix: FN_G_TEST_CSTM mis-classifies OFSMDM but is
+    OFSERM. Post-W172 the rescue binds it as a function and schema_for_function
+    repoints g_schema to OFSERM. Pin the BRANCH and the SCHEMA repoint (both
+    deterministic) — NOT the badge: this query carries the W171 pass-through
+    residual (~6-24%) so the badge can flicker UNVERIFIED on a degenerate
+    prose run. Schema + branch are the durable W172 outcomes."""
+    q = "how does FN_G_TEST_CSTM work"
+    r = run_query(q)
+    d = r["done"] or {}
+    branch = branch_for_query(q)
+    schema = (d.get("schema") or "").upper()
+    cited = [s.upper() for s in (d.get("cited_schemas") or [])]
+    schema_ok = schema == "OFSERM" or "OFSERM" in cited
+    passed = branch == "graph" and schema_ok
+    return passed, f"branch={branch} schema={schema} cited={cited} | {summarize_done(d)}"
+
+
+@test("W172 regression — CS_Deferred_Tax still GRAPH via W164 (unchanged)")
+def w172_cs_deferred_tax_unchanged():
+    """CS_Deferred_Tax_... gets its name echoed into target_variable, so it
+    takes the W164 function-identity branch — never the W172 rescue. Must
+    stay graph + OFSERM, byte-unaffected."""
+    q = "How does CS_Deferred_Tax_Asset_Net_of_DTL_Calculation work?"
+    r = run_query(q)
+    d = r["done"] or {}
+    branch = branch_for_query(q)
+    schema = (d.get("schema") or "").upper()
+    cited = [s.upper() for s in (d.get("cited_schemas") or [])]
+    schema_ok = schema == "OFSERM" or "OFSERM" in cited
+    passed = branch == "graph" and schema_ok
+    return passed, f"branch={branch} schema={schema} cited={cited} | {summarize_done(d)}"
+
+
+@test("W172 FP guard — unknown function still falls to raw-source / decline")
+def w172_unknown_function_still_declines():
+    """The rescue must NOT fire on a non-graph name: extract_function_candidates
+    returns nothing usable / function_exists_in_graph is False, so the binding
+    falls through to whole-query-variable -> raw-source, preserving the W45
+    honest-decline. 'SOME_FAKE_FN_THAT_DOES_NOT_EXIST' is pre-checked to a
+    function_not_found DECLINE before generation; assert it still does."""
+    r = run_query("Explain the function SOME_FAKE_FN_THAT_DOES_NOT_EXIST")
+    d = r["done"] or {}
+    passed = d.get("badge") == "DECLINED" or d.get("type") == "function_not_found"
+    return passed, summarize_done(d)
+
+
+@test("W172 FP guard — genuine variable trace unchanged (binds variable)")
+def w172_variable_trace_unchanged():
+    """'What writes N_STD_ACCT_HEAD_AMT?' is a column trace: target_variable is
+    the column, so it takes case (a) -> variable (the W159 fan-in input).
+    extract drops N_-prefixed tokens anyway. Must stay VERIFIED multi-writer
+    fan-in, never mis-rescued to a function."""
     r = run_query("What writes N_STD_ACCT_HEAD_AMT?")
     d = r["done"] or {}
     warnings = d.get("warnings") or []
