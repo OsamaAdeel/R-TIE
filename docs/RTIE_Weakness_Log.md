@@ -1235,3 +1235,36 @@ Logged as the W169 successor on the hypothesis that framing-drift would recur on
 Logged CRITICAL from the FN_G_TEST_CSTM adversarial eval: a described subject ("g test function") was expected to mis-resolve to a wrong near-twin (TLX_OPS_ADJ_MISDATE) and borrow its December gate as FN_G_TEST_CSTM's. Diagnostic @ 10eabff (6 runs each across 5 variants) found NO repro. Every described/typo variant fails safe via the W87 UNRECOGNIZED_TERM abstain gate ([orchestrator.py:1923-2003](src/agents/orchestrator.py#L1923-L2003)) — UNVERIFIED·0.2, no anchor reached, no calendar claim. The named control resolves correctly to a VERIFIED December negative. The hazard is real in principle (TLX_OPS_ADJ_MISDATE exists with a genuine December gate at :47/:156; FN_G_TEST_CSTM has none) — but resolution never reaches the wrong twin, so containment holds. Load-bearing guard is W87 (the W165 bug-ticket family), with W164's binding pre-check and W169's prose closure as adjacent reinforcement.
 
 Deferred condition (W166-b): no gate today binds a month/quarter claim to a predicate in the resolved function. Moot while abstain holds. REVISIT only if anchor selection ever starts resolving described-names confidently again — then build calendar-claim-vs-source grounding. Residual live oddity is the W165 leading-interrogative quirk (benign, fails safe).
+
+---
+
+## W165. Leading interrogative captured into W87 entity span — OPEN — LOW / usability-only (reclassified)
+
+**Status:** OPEN, reclassified from HIGH-frequency/FAILS-SAFE to **LOW / usability-only**. Confirmed live @ `88a54cb` (the W166-closeout merge; one merge ahead of the diagnostic frame's stated `10eabff`). Diagnostic was READ-ONLY; no fix written. **Does not compete with the response-accuracy arc** — there is no trust value here.
+
+**Surface.** From the FN_G_TEST_CSTM adversarial eval: on a *described* (not named) query, a sentence-initial interrogative/auxiliary verb is pulled into the entity span that W87 looks up. Live, deterministic across 3 runs each:
+- `Does G TEST Function only run in December` → extracted term `"Does G TEST Function"` (the leading `Does` heads the captured span).
+- `Does g test function only run in December` → extracted term `"Does"`.
+Both abstain `unrecognized_term` · UNVERIFIED · 0.2.
+
+**Mechanism.** [`_extract_unrecognized_term`](src/agents/orchestrator.py#L1768-L1816), the W87 fallback term-extractor. The multiword cap-run regex `\b(?:[A-Z][A-Za-z0-9_]*)(?:\s+[A-Z][A-Za-z0-9_]*)+\b` has **no stopword filter** → it captures `"Does G TEST Function"` whole. The single-token path *does* filter against [`_W87_QUERY_STOPWORDS`](src/agents/orchestrator.py#L1706-L1724), but that set holds interrogative pronouns (`WHAT/HOW/WHY/…`) and W127 calendar terms — **not** auxiliary verbs (`DOES/DO/IS/ARE/CAN/WILL`), so `DOES` survives and `DECEMBER` is correctly dropped.
+
+**Fuzzy/described-only — leading interrogatives never break resolvable *named* queries.** Confirmed live: `How does FN_G_TEST_CSTM work` and `What does FN_LOAD_OPS_RISK_DATA do` both → **VERIFIED / validated:true**. Named queries short-circuit the W87 gate at clause (b) — `extract_function_candidates` catches the underscore'd name before the term-extractor is ever reached ([main.py:1298](src/main.py#L1298), gate logic [orchestrator.py:1855-1920](src/agents/orchestrator.py#L1855-L1920)). The extractor only runs when no underscore'd token exists, i.e. the described case.
+
+**The abstain on described queries is CORRECT.** `"G Test Function"` has no corpus match with or without the interrogative — `unrecognized_term` · UNVERIFIED is the right outcome, not a defect. Stripping the interrogative would not change it.
+
+**Corrected root cause (supersedes the eval's framing).** The eval's "found then discarded FN_G_TEST_CSTM" is driven by **noun-phrase noise, NOT the interrogative.** `find_similar_function_names` seeds `difflib.get_close_matches(target.upper(), …, cutoff=0.5)` ([orchestrator.py:855-893](src/agents/orchestrator.py#L855-L893)). Live against the real corpus (FN_G_TEST_CSTM confirmed present in OFSERM):
+| seed | `find_similar_function_names` |
+|---|---|
+| `Does G TEST Function` | `[]` |
+| `G TEST Function` (interrogative stripped) | **`[]`** |
+| `G TEST` | `['FN_G_TEST_CSTM']` |
+| `g test` | `['FN_G_TEST_CSTM']` |
+
+Stripping `"Does"` does **NOT** recover the suggestion — `"G TEST Function"` still returns `[]` (difflib ratio 0.483 vs the 0.5 cutoff; the common-noun **"Function"** is the dominant drag). Only reducing all the way to `"G TEST"` surfaces it.
+
+**Zero trust cost.** The extracted span feeds only (a) the abstain message body and (b) the **non-authoritative** `similar_functions` seed (explicitly labelled "retrieved by name-similarity only; NOT the answer"). It **never becomes an answered anchor** — it cannot push toward a confident-wrong result. There is no safety budget for a fix to spend.
+
+**W166 non-determinism was a classifier artifact, not a regex one.** W166 reported `_extract_unrecognized_term` flip-flopping (`Does`/`g test`/`g test function`/`Does G TEST Function`) on the same query. That variation came from priority-1 `target_variable` (the LLM classifier's output, which varies run-to-run). When the classifier returns no usable `target_variable`, the **deterministic regex fallback** owns the result — extraction was stable 3/3 on every variant live. The interrogative-pollution surface is real and stable; the flip-flop was upstream.
+
+**If ever fixed (no design here).** Term extraction is a **single chokepoint** — `_extract_unrecognized_term` has one caller chain, runs *after* classification, and the classifier receives the raw query independently, so **a strip there has no routing dependence** (Q3: stripping cannot flip COLUMN_LOGIC routing). But an interrogative-only strip is **cosmetic** — it cleans the abstain message and does not recover recall. Real recall recovery (surfacing the right near-twin suggestion) needs broader noun-phrase reduction ("function"/"calculation"/aux-verbs), a larger change whose only payoff is a better *suggestion list* on an already-correct abstain. Usability only.
