@@ -21,6 +21,7 @@ from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
 from src.middleware.correlation_id import get_correlation_id
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.schema_discovery import fallback_to_default_schema
 
 logger = get_logger(__name__, concern="app")
@@ -182,6 +183,7 @@ def evaluate_grounding(
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
     w70_anchor: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> Dict[str, Any]:
     """Evaluate whether a streamed explanation is grounded in retrieved source.
 
@@ -313,6 +315,7 @@ def evaluate_grounding(
                 redis_client=redis_client,
                 w76_anchor=w76_anchor,
                 w70_anchor=w70_anchor,
+                attested_writers=attested_writers,
             )
             warnings.extend(w57_warnings)
         except Exception as exc:
@@ -321,6 +324,28 @@ def evaluate_grounding(
             logger.warning(
                 "W57 enforcement raised an exception; falling back to "
                 "pre-W57 grounding verdict: %s", exc,
+            )
+
+    # W168: attribution-consistency gate. Standalone (NOT inside
+    # w57_enforce_grounding) so query_type is in scope without churning that
+    # signature. Caps the badge when the routing anchor is absent from the
+    # prose subject — the answer describes a different function than the one
+    # the pipeline resolved. Appended to `warnings` BEFORE blocking_warnings
+    # is computed below, so its GROUNDING-…-HIGH prefix flips the badge to
+    # UNVERIFIED via the same machinery as W85. Source-gated to explicit
+    # anchors + VARIABLE_TRACE-excluded inside the check.
+    if query_type in _REQUIRES_CITATIONS:
+        try:
+            warnings.extend(_w168_check_attribution_mismatch(
+                markdown=markdown,
+                query_type=query_type,
+                w70_anchor=w70_anchor,
+                w76_anchor=w76_anchor,
+            ))
+        except Exception as exc:
+            logger.warning(
+                "W168 attribution check raised an exception; continuing "
+                "without it: %s", exc,
             )
 
     # A warning blocks (forces UNVERIFIED) unless it's a W57 LOW-severity
@@ -880,6 +905,174 @@ def _w57_passes_function_name_filters(cand: str) -> bool:
     if cu in _PROCESS_SUBPROCESS_NAMES:
         return False
     return True
+
+
+# W168 anchor-source allow-list: sources that represent a DELIBERATE
+# resolution of "which function did the user mean" (anchor_resolution.py).
+# A prose-vs-anchor disagreement on one of these is a true attribution bug.
+# The weak ``semantic_top1`` source (highest-cosine guess on wide retrieval)
+# is deliberately EXCLUDED — there the anchor was never authoritative (W160),
+# so the comparison is unreliable; W150's near-twin hedge and the Phase-2
+# decline gate own that regime. This is an explicit ALLOW-list (not a
+# deny-list of ``{semantic_top1}``) so any FUTURE anchor source defaults to
+# safe-suppress rather than firing untested — the same identity discipline
+# W164 applies with column-first precedence.
+_W168_EXPLICIT_ANCHOR_SOURCES = frozenset({
+    "classifier_object",
+    "bi_routing",
+    "raw_query_scan",
+})
+
+
+def _w168_extract_prose_function_names(markdown: str) -> set:
+    """Return the normalized set of function names the prose cites.
+
+    Reuses the three W57 per-claim-binding extractors (prose framing,
+    headings/responsibility, parenthesised line-citations) and the same
+    W58 filter, so W168 and Check 1 agree on "what the body cites". Each
+    surviving candidate is canonicalised via
+    :meth:`SchemaAwareKeyspace.normalize_function_name` (UPPER, ws->_) — the
+    same identity normalisation the anchor side uses, so the set-membership
+    comparison is schema-aware, not shape-based. Candidates that raise
+    ``ValueError`` on normalisation (empty/whitespace) are skipped.
+    """
+    names: set = set()
+
+    def _add(cand: Optional[str]) -> None:
+        if not cand or not _w57_passes_function_name_filters(cand):
+            return
+        try:
+            names.add(SchemaAwareKeyspace.normalize_function_name(cand))
+        except ValueError:
+            return
+
+    for m in _W57_PROSE_FUNCTION_REF_RE.finditer(markdown):
+        _add(m.group(1) or m.group(2))
+    for m in _W57_HEADING_AND_RESPONSIBILITY_REF_RE.finditer(markdown):
+        _add(m.group("heading_name") or m.group("resp_name"))
+    for m in _W57_FUNC_CITATION_RE.finditer(markdown):
+        _add(m.group(1))
+    return names
+
+
+def _w168_check_attribution_mismatch(
+    markdown: str,
+    query_type: str,
+    w70_anchor: Optional[Dict[str, Any]] = None,
+    w76_anchor: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """W168: cap the badge when the routing anchor is absent from the prose
+    subject — i.e. the answer describes a DIFFERENT function than the one
+    the pipeline resolved.
+
+    Routing anchor (``state["w70_anchor"]`` cascade, ``w76_anchor`` prefix
+    fallback) and prose subject (the cited function set) are both in scope
+    at badge time but were never compared. This is the missing third pair
+    next to W57 Check 3a (asked-vs-prose) and W85 (anchor-vs-asked); it
+    fills the described-not-named gap where the user named no function so
+    both of those no-op, yet the explainer still drifted off the anchor.
+
+    Fires iff ALL hold:
+      1. ``query_type != "VARIABLE_TRACE"`` — the column fan-in (W159)
+         legitimately spans many writer functions, none equal to the single
+         anchor; belt-and-suspenders alongside the source gate.
+      2. An anchor resolves (w70 function, else w76 function).
+      3. The anchor ``source`` is EXPLICIT (``w76_*`` /
+         ``_W168_EXPLICIT_ANCHOR_SOURCES``). ``semantic_top1`` and unknown
+         sources are suppressed.
+      4. The prose cites at least one function (else W135 / per-claim-binding
+         own the no-subject case).
+      5. The normalized anchor is neither in the prose function SET nor a
+         substring of the normalized body (the substring belt: the
+         structured extractors only catch heading/framing/parenthesised
+         cites, so an informally-named anchor must not false-fire — a
+         false-positive on a trust gate is worse than a missed drift that
+         Phase 2 backstops).
+
+    DISJOINT FROM W166: W168 catches ``anchor ∉ prose`` (the prose drifted
+    AWAY from the routed function). W166 is the opposite — the anchor is
+    itself the wrong near-twin but the prose FAITHFULLY describes that wrong
+    anchor (``anchor ∈ prose``), so W168 never fires on it; that is the
+    Phase-2 near-twin abstain / W150 territory. Suppressing on
+    ``semantic_top1`` therefore sacrifices zero W166 coverage.
+
+    SCOPE (validated live, 91bec4e + W168). CATCHES anchor-ABSENT /
+    "silent-swap" drift: the routed function name appears NOWHERE in the
+    prose — proven on "How is CAP973 calculated?", whose ``bi_routing``
+    anchor CS_REGULATORY_ADJUSTMENTS_PHASE_IN_DEDUCTION_AMOUNT never appears
+    while the prose describes REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP.
+    Does NOT catch "framing-drift": where the prose names the anchor as
+    framing context ("In the function FN_G_TEST_CSTM, ... updated in the
+    ABL_INV_ASSET_CLASS_RECLASS function") so ``anchor ∈ prose`` and the
+    set-membership predicate (kept lenient on purpose so Q39 two-function
+    comparisons stay VERIFIED) does not fire. The adversarial Q12/Q16/Q48
+    ("how is N_BASEL_ASSET_CLASS_SKEY updated in FN_G_TEST_CSTM") are
+    framing-drift and are NOT caught here — tracked as a separate follow-up
+    (W169), and additionally route VARIABLE_TRACE which gate 1 excludes.
+
+    Returns at most one ``GROUNDING-ATTRIBUTION-MISMATCH-HIGH`` warning,
+    which flips the badge to UNVERIFIED via the existing blocking-warning
+    filter in :func:`evaluate_grounding` (same machinery as W85).
+    """
+    # Gate 1: VARIABLE_TRACE fan-in exclusion (W159 must-not-regress).
+    if query_type == "VARIABLE_TRACE":
+        return []
+
+    # Gate 2: resolve anchor. w70 cascade carries the authoritative
+    # ``source``; a bare w76 anchor is an explicit "In <Fn>" prefix.
+    anchor_fn = ""
+    anchor_source = ""
+    if isinstance(w70_anchor, dict):
+        anchor_fn = (w70_anchor.get("function") or "").strip()
+        anchor_source = (w70_anchor.get("source") or "").strip()
+    if not anchor_fn and isinstance(w76_anchor, dict):
+        anchor_fn = (w76_anchor.get("function") or "").strip()
+        anchor_source = (w76_anchor.get("source") or "w76_prefix").strip()
+    if not anchor_fn:
+        return []
+
+    # Gate 3: explicit-source allow-list. semantic_top1 / unknown -> suppress.
+    is_explicit = (
+        anchor_source.startswith("w76_")
+        or anchor_source in _W168_EXPLICIT_ANCHOR_SOURCES
+    )
+    if not is_explicit:
+        return []
+
+    try:
+        norm_anchor = SchemaAwareKeyspace.normalize_function_name(anchor_fn)
+    except ValueError:
+        return []
+
+    # Gate 4: prose must attribute to at least one function.
+    prose_fns = _w168_extract_prose_function_names(markdown)
+    if not prose_fns:
+        return []
+
+    # Gate 5a: anchor is among the prose subjects (incl. Q39 multi-fn
+    # comparison where the anchor is one of several named functions).
+    if norm_anchor in prose_fns:
+        return []
+
+    # Gate 5b: substring belt — anchor mentioned anywhere in the body
+    # (even informally, outside the structured framings) => not a drift.
+    # Normalise BOTH sides (ASCII-dash fold + uppercase).
+    body_norm = _w57_ascii_normalize(markdown).upper()
+    if norm_anchor in body_norm:
+        return []
+
+    # Report the dominant cited function as the subject the answer
+    # actually describes.
+    counts = sorted(
+        ((fn, body_norm.count(fn)) for fn in prose_fns),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    prose_lead = counts[0][0]
+
+    return [
+        f"GROUNDING-ATTRIBUTION-MISMATCH-HIGH: answer describes "
+        f"'{prose_lead}' but query resolved to '{anchor_fn}'"
+    ]
 
 
 def _w57_cited_name_is_known_table(
@@ -2117,11 +2310,126 @@ def _w57_check_citation_count_cap(markdown: str) -> List[str]:
     return []
 
 
+def _w169_cited_line_ranges(markdown: str) -> List[Tuple[int, int]]:
+    """W169: every ``(start, end)`` line range the prose cites, via the same
+    :data:`_LINE_REF_RE` the citation extractor uses. ``"Line 47"`` →
+    ``(47, 47)``; ``"Lines 32-125"`` → ``(32, 125)``. Degenerate matches
+    (reversed, or spans > 500 lines) are dropped, mirroring
+    :func:`_extract_line_citations`."""
+    out: List[Tuple[int, int]] = []
+    for m in _LINE_REF_RE.finditer(markdown or ""):
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else start
+        if end < start or end - start > 500:
+            continue
+        out.append((start, end))
+    return out
+
+
+def _w169_attribution_drift(
+    asked: List[str],
+    attested_writers: Dict[str, List[Tuple[int, int]]],
+    markdown: str,
+    multi_source: Dict[str, Any],
+) -> Optional[str]:
+    """W169: VARIABLE_TRACE framing-drift / scope-violation predicate.
+
+    Replaces Check 3a's frequency-dominance heuristic on the VARIABLE_TRACE
+    path (where the structured *attested_writers* signal exists). The
+    frequency rule is degenerate in the sparse-citation regime where
+    framing-drift lives — Q12 cites the named scope and the drifted function
+    once each, a 1–1 tie the 2× ratio cannot see (W169 diagnostic Probe 1
+    §1). This predicate keys on SCOPE, not frequency.
+
+    Fires (returns a ``GROUNDING-…-HIGH`` warning) iff ALL hold:
+      (i)   the query named a scope set (*asked* non-empty);
+      (ii)  EVERY named-scope function is itself an attested writer of the
+            traced column (present in *attested_writers*) — a query that
+            named a NON-writer is not penalized here (a different case);
+      (iii) the prose's substantive write-attribution resolves, by STRUCTURE
+            (never raw body-substring frequency), to a function OUTSIDE the
+            named set:
+              1. line-range → owning writer: a cited ``(start, end)`` that is
+                 NOT contained in any named-scope writer span but IS
+                 contained in some outside-scope writer span → that outside
+                 function;
+              2. else prose-name fallback
+                 (:func:`_w168_extract_prose_function_names`): a cited
+                 function name outside the named set that IS an attested
+                 writer.
+
+    Returns ``None`` (fail-safe silence) when no outside-scope attributed
+    writer is found. Pure: no LLM, no Redis, no side effects.
+
+    Confirmed FP-safe against legitimate two-function comparisons (W169
+    Probe 2 §2): there both discussed functions are in the query's named
+    set, so (iii) is false and the gate stays silent. *multi_source* is
+    accepted for caller-contract parity (the attested-writer set it feeds is
+    already cohort-scoped).
+    """
+    if not asked or not attested_writers:
+        return None
+    named = {a.strip().upper() for a in asked if a and a.strip()}
+    if not named:
+        return None
+    # (ii) every named scope function must itself be an attested writer.
+    if not all(n in attested_writers for n in named):
+        return None
+
+    def _contains(cs: int, ce: int, spans: List[Tuple[int, int]]) -> bool:
+        for ls, le in spans:
+            if ls is None or le is None:
+                continue
+            if ls <= cs and ce <= le:
+                return True
+        return False
+
+    outside_owner: Optional[str] = None
+
+    # (iii) priority 1 — line-range ownership against attested writer spans.
+    for cs, ce in _w169_cited_line_ranges(markdown):
+        # A range that belongs to a named-scope writer is on-scope: skip it.
+        if any(_contains(cs, ce, attested_writers.get(n, [])) for n in named):
+            continue
+        for fn, spans in attested_writers.items():
+            if fn in named:
+                continue
+            if _contains(cs, ce, spans):
+                outside_owner = fn
+                break
+        if outside_owner:
+            break
+
+    # (iii) priority 2 — prose-name fallback (structured extractor, not
+    # frequency). Only an outside-set name that is itself an attested writer.
+    if outside_owner is None:
+        for fn in _w168_extract_prose_function_names(markdown):
+            fu = fn.strip().upper()
+            if fu not in named and fu in attested_writers:
+                outside_owner = fu
+                break
+
+    if outside_owner is None:
+        return None
+
+    scope_label = (
+        sorted(named)[0] if len(named) == 1 else ", ".join(sorted(named))
+    )
+    return (
+        f"GROUNDING-ANCHOR-SCOPE-DRIFT-HIGH: user scoped the question to "
+        f"'{scope_label}' (an attested writer of the traced column) but the "
+        f"response attributes the write to '{outside_owner}', a different "
+        f"function outside that scope"
+    )
+
+
 def _w57_check_anchoring(
     raw_query: str,
     functions_analyzed: List[str],
     markdown: str,
     w76_anchor: Optional[Dict[str, Any]] = None,
+    multi_source: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> List[str]:
     """W57 Check 3a: when the user named a specific function, the response
     must address it.
@@ -2155,10 +2463,29 @@ def _w57_check_anchoring(
     if len(analyzed_upper) <= 1:
         return []
 
-    # Multi-function answer: the asked-about function should not be
-    # dominated by another analyzed function in the body. Compute body
-    # mention counts and flag if any other function appears
-    # _W57_PRIMARY_DOMINANCE_RATIO× more often than the asked-about one.
+    # W169 route-split: when the structured attested-writer signal is
+    # present (the VARIABLE_TRACE path — graph-first / tagged-fallback,
+    # supplied by main.py), the scope-drift predicate REPLACES the frequency
+    # heuristic below. It fires when the prose attributes the substantive
+    # write to a function OUTSIDE the named scope while the named scope is
+    # itself an attested writer. Frequency is degenerate in the sparse-
+    # citation regime where framing-drift lives (Probe 1 §1).
+    if attested_writers:
+        drift = _w169_attribution_drift(
+            asked, attested_writers, markdown, multi_source or {},
+        )
+        return [drift] if drift else []
+
+    # Non-VARIABLE_TRACE (no attested-writer signal: FUNCTION_LOGIC /
+    # COLUMN_LOGIC have no vt_tagged/vt_graph). The legacy frequency rule
+    # stands here — W169's structural predicate cannot apply without the
+    # signal, and the frequency dominance check still guards the Run-3 C2
+    # benchmark (asked about X, prose dominated by a different function).
+    #
+    # The asked-about function should not be dominated by another analyzed
+    # function in the body. Compute body mention counts and flag if any
+    # other function appears _W57_PRIMARY_DOMINANCE_RATIO× more often than
+    # the asked-about one.
     asked_primary = asked[0].upper()
     body_upper = markdown.upper()
     asked_count = body_upper.count(asked_primary)
@@ -2902,6 +3229,7 @@ def w57_enforce_grounding(
     redis_client: Any = None,
     w76_anchor: Optional[Dict[str, Any]] = None,
     w70_anchor: Optional[Dict[str, Any]] = None,
+    attested_writers: Optional[Dict[str, List[Tuple[int, int]]]] = None,
 ) -> List[str]:
     """Run all six W57 grounding checks. Returns combined warnings list.
 
@@ -2950,6 +3278,8 @@ def w57_enforce_grounding(
     warnings.extend(_w57_check_anchoring(
         raw_query, functions_analyzed, markdown,
         w76_anchor=w76_anchor,
+        multi_source=multi_source,
+        attested_writers=attested_writers,
     ))
     warnings.extend(_w57_check_chain_coherence(markdown, multi_source))
     warnings.extend(_w57_check_hierarchy_body_consistency(

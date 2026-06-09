@@ -14,7 +14,7 @@ import platform
 import traceback
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Note: ProactorEventLoop (Windows default) is used for httpx compatibility.
 # psycopg uses psycopg-binary which handles the event loop internally.
@@ -79,6 +79,7 @@ from src.agents.cache_manager import CacheManager
 from src.agents.indexer import IndexerAgent
 from src.agents.renderer import Renderer
 from src.agents.trace_diagram import (
+    attested_writers_for_target,
     build_trace_diagram,
     diagram_from_bi_routing,
     fan_in_steps_from_tagged_lines,
@@ -100,6 +101,7 @@ from src.parsing.schema_discovery import (
     schema_for_function,
     schemas_for_column,
 )
+from src.parsing.keyspace import SchemaAwareKeyspace
 from src.parsing.store import get_function_graph
 from src.tools.schema_tools import SchemaTools
 from src.tools.cache_tools import CacheClient
@@ -1646,6 +1648,12 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     # downstream caveat / clarification path still
                     # applies, and the multi-schema multi_source from
                     # Phase 3 keeps the user-visible response useful.
+                    # W164: hoist the column-identity probe so its result feeds
+                    # BOTH the schema pivot (immediately below) AND the
+                    # binding-head discriminator (column-first vs
+                    # function-identity, further below). Single Redis read — do
+                    # NOT add a second schemas_for_column probe.
+                    column_owners: list[str] = []
                     if target_var and _graph_redis is not None:
                         column_owners = schemas_for_column(
                             target_var, _graph_redis
@@ -1659,24 +1667,25 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             )
                             g_schema = column_owners[0]
 
-                    if target_var:
-                        g_query_type = "variable"
-                        g_search_term = target_var
-                    elif obj_name:
-                        # W43: object_name is the enriched semantic-search
-                        # blob, not a function identifier. Prefer the clean
-                        # name the W37 pre-check already extracts from the
-                        # raw query.
-                        candidates = extract_function_candidates(state["raw_query"])
-                        g_query_type = "function"
-                        g_search_term = candidates[0] if candidates else obj_name
-                        logger.debug(
-                            "[W43] raw_query candidates=%s, identifier=%s",
-                            candidates, g_search_term,
-                        )
-                    else:
-                        g_query_type = "variable"
-                        g_search_term = state["raw_query"]
+                    # W164: identity-gated binding head — column-first, then
+                    # function-second. Extracted to `resolve_graph_binding` so
+                    # the branch selection is offline-unit-testable (mirrors the
+                    # `apply_w80c_rerank` / collapse-gate extraction pattern).
+                    # See that helper's docstring for the full case matrix.
+                    # `column_owners` (the hoisted single probe above) is the
+                    # column discriminator; the returned g_schema may be
+                    # re-pointed for a cross-schema function (W164 tracked second
+                    # change). Cases (a)/(d) are byte-identical to the pre-W164
+                    # `if target_var: -> variable`; only a known-function
+                    # target_variable is carved out to "function".
+                    g_query_type, g_search_term, g_schema = resolve_graph_binding(
+                        target_var=target_var,
+                        obj_name=obj_name,
+                        raw_query=state["raw_query"],
+                        g_schema=g_schema,
+                        column_owners=column_owners,
+                        redis_client=_graph_redis,
+                    )
 
                     _w43_diag.info(
                         "[W43_DIAG] correlation_id=%s stage=graph_pipeline_entry"
@@ -2002,6 +2011,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             # ignored what the LLM actually produced.
             multi_source = state.get("multi_source", {}) or {}
             functions_analyzed = list(multi_source.keys())
+            # W169: per-function attested writer spans for the traced column,
+            # read from the SAME structured fan-in locals the diagram is built
+            # from (vt_graph first, vt_tagged fallback) and in the same
+            # precedence. Empty on non-VARIABLE_TRACE paths (both locals None)
+            # → the scope-drift gate in Check 3a no-ops and the legacy
+            # frequency rule stands. Computed here, before the grounding call,
+            # where both locals are in scope.
+            w169_attested_writers = attested_writers_for_target(
+                state.get("target_variable", "") or "",
+                vt_graph,
+                vt_tagged,
+                multi_source,
+            )
             with stage_timer("grounding_evaluate", correlation_id):
                 grounding = evaluate_grounding(
                     raw_query=request.query,
@@ -2010,6 +2032,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                     functions_analyzed=functions_analyzed,
                     query_type=state.get("query_type", ""),
                     redis_client=_graph_redis,
+                    attested_writers=w169_attested_writers,
                     # W76b: forward the orchestrator's anchor so the
                     # NAMED_FUNCTION_NOT_RETRIEVED check + post-hoc
                     # Caveats appender consult it instead of re-
@@ -2548,6 +2571,106 @@ _W80C_RERANK_QUERY_TYPES: frozenset[str] = frozenset({"VARIABLE_TRACE", "COLUMN_
 # FUNCTION_LOGIC retrieval profile it should have had, without touching the
 # classifier.
 _W160_COLLAPSE_TOP_K: int = 5
+
+
+def resolve_graph_binding(
+    *,
+    target_var: str,
+    obj_name: str,
+    raw_query: str,
+    g_schema: str,
+    column_owners: list[str],
+    redis_client: Any,
+) -> Tuple[str, str, str]:
+    """W164 — identity-gated graph-pipeline binding (column-first, function-second).
+
+    Returns ``(g_query_type, g_search_term, g_schema)`` for the graph
+    node-resolution call. The discriminator is IDENTITY, never name shape:
+
+      * ``column_owners`` — the result of :func:`schemas_for_column` for
+        ``target_var``, hoisted by the caller and passed in (so this helper
+        adds NO column probe). Non-empty == ``target_var`` is a known column.
+      * :func:`function_exists_in_graph` — direct Redis key probe; only
+        consulted when ``target_var`` is NOT a known column.
+
+    Case matrix (the W164 validation contract)::
+
+        target_var set?  column?  function?  ->  (type,     term,        schema)
+        ---------------------------------------------------------------------------
+        (a) yes          yes      -          ->  variable   target_var   g_schema
+        (b/c) yes        no       yes        ->  function   target_var   schema_for_function|g_schema
+        (d) yes          no       no         ->  variable   target_var   g_schema
+        (3) no           -        -   +obj   ->  function   W43-candidate g_schema
+        (else) no        -        -   -obj   ->  variable   raw_query    g_schema
+
+    The three ``target_var`` cases are NESTED under one ``if target_var:`` so
+    (a) and (d) are byte-identical to the pre-W164 ``if target_var: ->
+    variable`` for EVERY input, regardless of whether ``obj_name`` is also set
+    — only the known-function sub-case (b/c) is carved out. This is why the
+    nesting matters: a flat ``elif obj_name``-before-``elif target_var`` chain
+    would steal the (unknown-``target_var`` + ``obj_name`` set) cell away from
+    ``variable`` and move case (d), which the W164 gate forbids.
+
+    Column-first precedence: a name matching BOTH a column and a function
+    routes to ``variable`` (the W159-safe default). The W163 hazard (``ABL_``
+    prefixes tables AND functions) does not apply — the column index holds
+    COLUMNS, never tables, so an ``ABL_`` table never enters ``column_owners``.
+
+    The cross-schema :func:`schema_for_function` resolve on the function branch
+    is the W164 TRACKED SECOND CHANGE — strictly additive, fires only on the
+    newly-carved function-identity branch, and fixes an OFSERM ``CS_*`` under an
+    OFSMDM orchestrator-default that today resolves only by luck.
+    """
+    if target_var:
+        if column_owners:
+            # CASE (a): known column. W159/C04/C12 fan-in input — must not move.
+            return "variable", target_var, g_schema
+        if function_exists_in_graph(target_var, redis_client):
+            # CASES (b) / (c-with-fn-echo): the classifier echoed a real
+            # function name into target_variable. Bind to function identity
+            # rather than treating it as a (missing) column.
+            #
+            # Normalize to the canonical Redis-key form. graph:<schema>:<FN>
+            # keys are stored UPPER-cased (keyspace.graph_key does NOT
+            # normalize, and resolve_function_nodes -> get_function_graph is
+            # therefore case-SENSITIVE). function_exists_in_graph /
+            # schema_for_function both normalize internally, so they match a
+            # mixed-case echo like 'CS_Net_AT1_...'; but resolve_function_nodes
+            # would receive the raw mixed-case name and MISS the key (Redis
+            # probe: mixed=0 nodes, upper=1 node). Emitting the normalized name
+            # as g_search_term is the binding's job — it is exactly the
+            # normalization the two identity probes above already apply, and
+            # without it the function-identity binding + cross-schema repoint
+            # are inert (resolve returns 0 -> raw-source fallback, same as
+            # pre-W164). Cases (a)/(d) are untouched — they never enter this
+            # branch.
+            fn_name = SchemaAwareKeyspace.normalize_function_name(target_var)
+            fn_schema = schema_for_function(target_var, redis_client)
+            if fn_schema:
+                g_schema = fn_schema
+            logger.info(
+                "[W164] function-identity binding: target_variable=%r bound as "
+                "FUNCTION (branch=function-identity, resolved=%r schema=%r)",
+                target_var, fn_name, g_schema,
+            )
+            return "function", fn_name, g_schema
+        # CASE (d): target_var set but matches NEITHER a column NOR a function
+        # -> genuinely unknown. variable -> [] -> raw-source fallback ->
+        # W45/W49 honest decline. Byte-identical to pre-W164.
+        return "variable", target_var, g_schema
+    if obj_name:
+        # W43: object_name is the enriched semantic-search blob, not a function
+        # identifier. Prefer the clean name the W37 pre-check already extracts
+        # from the raw query. (Reached only when target_var is empty/cleared —
+        # CASE (c).)
+        candidates = extract_function_candidates(raw_query)
+        search_term = candidates[0] if candidates else obj_name
+        logger.debug(
+            "[W43] raw_query candidates=%s, identifier=%s",
+            candidates, search_term,
+        )
+        return "function", search_term, g_schema
+    return "variable", raw_query, g_schema
 
 
 def _resolve_single_function_collapse(

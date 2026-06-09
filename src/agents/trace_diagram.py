@@ -44,7 +44,7 @@ resolve, never regex-scraped from rendered markdown.
 """
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
@@ -984,3 +984,47 @@ def fan_in_steps_from_graph(
 
     return {"steps": steps, "writer_drops": writer_drops,
             "writers_total": writers_total, "scoped_out": scoped_out}
+
+
+def attested_writers_for_target(
+    target: str,
+    vt_graph: Optional[List[Dict[str, Any]]],
+    vt_tagged: Optional[List[Dict[str, Any]]],
+    multi_source: Optional[Dict[str, Any]] = None,
+) -> Dict[str, List[Tuple[int, int]]]:
+    """W169: per-function attested writer spans for *target*, read from the
+    SAME structured fan-in sources the diagram is built on, in the SAME
+    precedence the diagram uses — ``vt_graph`` (Phase-3.6 graph nodes, the
+    primary path with the W153 ``_node_writes_column`` attestation) first,
+    falling back to ``vt_tagged`` (Phase-3.5 tagged lines) only when the
+    graph path produced no steps.
+
+    Returns ``{FUNCTION_UPPER: [(line_start, line_end), ...]}`` for every
+    writer step (``edge_kind == "writes"``). Returns an empty dict when no
+    structured source is populated (the non-VARIABLE_TRACE case) or no
+    attested writer survives — the caller's W169 gate then no-ops.
+
+    Thin accessor: composes the existing :func:`fan_in_steps_from_graph` /
+    :func:`fan_in_steps_from_tagged_lines` projections so the writer-op
+    definition and cohort/span discipline stay single-sourced here. Pure;
+    no Redis, no LLM, no side effects.
+    """
+    steps: List[Dict[str, Any]] = []
+    if vt_graph:
+        steps = fan_in_steps_from_graph(
+            vt_graph, target, multi_source=multi_source
+        ).get("steps", [])
+    if not steps and vt_tagged:
+        steps = fan_in_steps_from_tagged_lines(vt_tagged, target)
+
+    writers: Dict[str, List[Tuple[int, int]]] = {}
+    for step in steps:
+        if step.get("edge_kind") != "writes":
+            continue
+        fn = str(step.get("function", "")).strip().upper()
+        if not fn:
+            continue
+        ls = step.get("line_start")
+        le = step.get("line_end")
+        writers.setdefault(fn, []).append((ls, le))
+    return writers
