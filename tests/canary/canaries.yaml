@@ -105,12 +105,24 @@ canaries:
       # named function classified COLUMN_LOGIC; without the collapse the
       # ~27-function retrieval tripped W108-TRUNCATED and forced UNVERIFIED
       # (941 citations, diagnosed read-only). The collapse gives it the
-      # FUNCTION_LOGIC profile (top_k=5, rerank skipped) -> VERIFIED.
+      # narrow FUNCTION_LOGIC profile (top_k=5, rerank skipped).
       query_type: COLUMN_LOGIC
       # No schema pin: the classifier routes schema=OFSMDM (default) but
       # FN_G_TEST_CSTM's body is owned by OFSERM; the resolved schema is not
       # what this canary protects. (Same convergent-route tolerance as C12.)
-      badge: VERIFIED
+      #
+      # W171: NO badge pin, and NO min_citations pin. BOTH float with
+      # generator phrasing, not with the W160 collapse this canary guards.
+      # ~24% of runs the LLM emits an unsupported "pass-through"
+      # characterization of FN_G_TEST_CSTM (an 8-INSERT / 3-MERGE
+      # reclassification ETL, NOT a pass-through) that W57 Check-5 correctly
+      # rejects -> UNVERIFIED-0.2 (the W148-class residual; the W57 check is
+      # correct and intentionally NOT loosened). That same degenerate prose
+      # cites the whole body as one mega-range "(Lines 69-1009)", which
+      # _extract_line_citations drops as a >500-line span
+      # (logic_explainer.py:604) -> source_citations == 0, so min_citations
+      # would float too. C19 pins ONLY the W160 structural invariants below,
+      # which held on all 52 validation runs across BOTH outcomes.
     assertions:
       - kind: done_field_neq
         path: type
@@ -121,9 +133,7 @@ canaries:
         value: W108-TRUNCATED
       - kind: warnings_not_contain
         value: UNGROUNDED_IDENTIFIERS
-      - kind: min_citations
-        value: 1
-    protects: "W160 single-function retrieval collapse. 'how does FN_G_TEST_CSTM work' is a single named function that classifies COLUMN_LOGIC; pre-W160 the wide column-writer profile pulled ~27 neighbours, tripped W108-TRUNCATED and forced UNVERIFIED. Drops if the single-function gate stops firing (collapse regressed) and the wide profile leaks back in."
+    protects: "W160 single-function retrieval collapse. 'how does FN_G_TEST_CSTM work' is a single named function that classifies COLUMN_LOGIC; pre-W160 the wide column-writer profile pulled ~27 neighbours, tripped W108-TRUNCATED and forced UNVERIFIED. Drops if the single-function gate stops firing (collapse regressed) and the wide profile leaks back in. Badge + min_citations deliberately NOT pinned (W171): both float with the pass-through residual, not with the collapse."
 
   - id: C02
     tier: 1
