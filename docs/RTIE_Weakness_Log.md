@@ -1184,7 +1184,7 @@ The margin diagnostic ([scratch/findingb_margin_report.md](scratch/findingb_marg
 
 ---
 
-## W169. Framing-drift — anchor named as framing, substantive subject a different function — RESOLVED (pending review)
+## W169. Framing-drift — anchor named as framing, substantive subject a different function — RESOLVED — merged 43de8b7
 
 **Status:** RESOLVED on `fix/w169-framing-drift-attribution` (off main `88606f0`; the only commit above the diagnostic's `05b3ff9` base is a `requirements.txt` chore touching none of the target files). Diagnosed read-only across two probes, then implemented as a Check-3a strengthening. HELD for review of the live Q12 output before commit.
 
@@ -1204,10 +1204,6 @@ The margin diagnostic ([scratch/findingb_margin_report.md](scratch/findingb_marg
 
 ---
 
-## W170. FUNCTION_LOGIC scope-drift — no attested-writer signal, W169 gate cannot cover — OPEN
+## W170. FUNCTION_LOGIC scope-drift — NOT A CURRENT DEFECT (watch item)
 
-**Status:** OPEN (facts-only stub; successor to W169, out of scope for the W169 fix).
-
-**Surface.** W169 catches scope-drift on the **VARIABLE_TRACE** path only, because its discriminator relies on the per-function attested-writer spans (`vt_graph` / `vt_tagged`) that exist only when a column is being traced. A FUNCTION_LOGIC query ("how does FN_X work?") whose prose drifts to describe a *different* function FN_Y has **no** `vt_*` signal, so `attested_writers` is empty and W169's predicate no-ops. On that path only the legacy 2× frequency dominance rule applies — which Probe 1 showed is degenerate in the sparse-citation regime (a single drifted mention vs a single anchor mention is a 1–1 tie it cannot see).
-
-**Why deferred.** The W169 signal source (attested writer spans for a traced column) does not exist for FUNCTION_LOGIC. Covering it needs a different structured signal — likely the per-function call-graph / source-body attestation the explainer already retrieves — and its own FP analysis against legitimate multi-function FUNCTION_LOGIC prose (overviews, comparisons). Diagnose-then-scope, as W169 was.
+Logged as the W169 successor on the hypothesis that framing-drift would recur on the "how does <FN> work" path. Diagnostic @ 43de8b7 (17 live runs, 8 functions, every plausible drift vector) found NO repro. Structural reason: "how does <FN> work" makes the function the sole subject — unlike W169's column-subject form, there is no second entity for the prose to drift toward — and the W70 anchor force-inject + prompt pinning remove the drift surface. Siblings were in functions_analyzed in all runs yet never named in prose. No out-of-scope attribution exists for a W169-style gate to fire on, and no FP surface to balance. Reclassified from "build gate / defer Phase 3" to watch-item. Revisit only if a future retrieval/routing change reintroduces multi-function drift on this path. Described-not-named variant folds into W166 (weak-anchor wrong-function fabrication), the live cousin.
