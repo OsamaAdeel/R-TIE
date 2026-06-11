@@ -2299,34 +2299,77 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
         return
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Resolving graph subgraph...'})}\n\n"
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Fetching actual Oracle values for each step...'})}\n\n"
+    # W34a parity for Phase 2: stage events fire at the TRUE start of each
+    # sub-stage. trace_value/explain_difference call the on_stage hook as
+    # each sub-stage begins (row fetch, graph+value resolution, explainer);
+    # the hook enqueues and this generator drains the queue while the trace
+    # task runs, so each event reaches the client as the work starts. The
+    # pre-change upfront cluster ("Resolving graph subgraph..." + "Fetching
+    # actual Oracle values...", both emitted BEFORE trace_value was even
+    # called) lied about progress and has been removed — same rationale as
+    # the W34a answer_stream() change for DATA_QUERY.
+    stage_queue: asyncio.Queue = asyncio.Queue()
+
+    def _enqueue_stage(stage_name: str, message: str) -> None:
+        stage_queue.put_nowait((stage_name, message))
+
+    def _stage_frame(stage_name: str, message: str) -> str:
+        return (
+            "event: stage\ndata: "
+            + json_mod.dumps({"stage": stage_name, "message": message})
+            + "\n\n"
+        )
 
     try:
         if query_type == "DIFFERENCE_EXPLANATION":
-            with stage_timer("phase2_explain_difference", correlation_id):
-                result = await _value_tracer.explain_difference(
-                    target_variable=target,
-                    filters=filters,
-                    schema=schema,
-                    bank_value=float(state.get("phase2_expected_value") or 0.0),
-                    system_value=float(state.get("phase2_actual_value") or 0.0),
-                    user_query=user_query,
-                    provider=provider,
-                    model=model,
-                )
+            trace_timer_name = "phase2_explain_difference"
+            trace_coro = _value_tracer.explain_difference(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                bank_value=float(state.get("phase2_expected_value") or 0.0),
+                system_value=float(state.get("phase2_actual_value") or 0.0),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+                on_stage=_enqueue_stage,
+            )
         else:
             # VALUE_TRACE (and anything else mis-routed here) -> single-row trace.
-            with stage_timer("phase2_trace_value", correlation_id):
-                result = await _value_tracer.trace_value(
-                    target_variable=target,
-                    filters=filters,
-                    schema=schema,
-                    expected_value=state.get("phase2_expected_value"),
-                    user_query=user_query,
-                    provider=provider,
-                    model=model,
-                )
+            trace_timer_name = "phase2_trace_value"
+            trace_coro = _value_tracer.trace_value(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                expected_value=state.get("phase2_expected_value"),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+                on_stage=_enqueue_stage,
+            )
+        with stage_timer(trace_timer_name, correlation_id):
+            trace_task = asyncio.create_task(trace_coro)
+            try:
+                while not trace_task.done():
+                    try:
+                        stage_name, message = await asyncio.wait_for(
+                            stage_queue.get(), timeout=0.1
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    yield _stage_frame(stage_name, message)
+                # Deliver anything enqueued in the final stretch before the
+                # task completed (events are never dropped, only reordered
+                # ahead of the meta/token frames below).
+                while not stage_queue.empty():
+                    stage_name, message = stage_queue.get_nowait()
+                    yield _stage_frame(stage_name, message)
+                # Raises the task's exception (LLMSanitizedError et al.)
+                # exactly as the pre-change `await` did.
+                result = trace_task.result()
+            finally:
+                if not trace_task.done():
+                    trace_task.cancel()
     except LLMSanitizedError as exc:
         logger.warning(
             "Phase 2 trace sanitized LLM failure | category=%s context=%s "
@@ -2390,7 +2433,10 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating explanation...'})}\n\n"
+    # (The 'explain' stage event now fires from inside the trace, at the
+    # TRUE start of the explainer LLM call — the post-hoc emit that used to
+    # sit here announced "Generating explanation..." AFTER the explanation
+    # had already been generated.)
 
     # The explanation is already produced + sanity-checked. Stream it as
     # whitespace-preserving chunks so the frontend renders it progressively.
