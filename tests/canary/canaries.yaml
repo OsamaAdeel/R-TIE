@@ -318,49 +318,66 @@ canaries:
   - id: C16
     tier: 1
     # Identifier deliberately has no underscore (bypasses
-    # extract_function_candidates / function-precheck) AND matches the W45
-    # detector regex `[A-Z]{2,}[0-9]{2,}[A-Z0-9]*` (≥2 letters then ≥2 digits).
-    # The original FAKE_COLUMN_999 pin was intercepted by the precheck
-    # because of the underscore. The first re-pin to FAKEXYZ bypassed the
-    # precheck but didn't match the W45 regex (no digits after letters), so
-    # the variable_tracer ran a grounded trace instead of firing W45.
-    # FAKECOL999 satisfies both constraints.
+    # extract_function_candidates / function-precheck); FAKECOL999 is in no
+    # index (function names, column indexes, BI literals), so no resolver
+    # claims it. Earlier pins (FAKE_COLUMN_999, FAKEXYZ) were chosen to reach
+    # the W45 post-retrieval detector — see git history for that rationale.
+    #
+    # W87 re-pin (2026-06-11): as of 2b3e14c (2026-05-15) the W87
+    # unrecognized-term gate intercepts this query BEFORE retrieval (between
+    # apply_bi_routing and the embedding call) and emits a deterministic,
+    # LLM-free clarification — done.type == unrecognized_term. The W45
+    # UNGROUNDED_IDENTIFIERS shape this canary previously pinned is
+    # unreachable by design for uncorpus'd terms (W87 is an architectural
+    # sibling of W37, short-circuiting so no LLM can fabricate an anchor).
+    # This fixture predates W87 (authored 82e4d2f, 2026-05-05). The W87
+    # short-circuit emits NO meta.query_type, so there is no route pin —
+    # assert on the done payload instead (same style as C02 / W37).
     query: "How is FAKECOL999 calculated?"
     expected:
-      # "How is X calculated?" routes to VARIABLE_TRACE per the classifier
-      # prompt rule, same as C03 and C18.
-      query_type: VARIABLE_TRACE
       badge: UNVERIFIED
     assertions:
+      - kind: done_field_eq
+        path: type
+        value: unrecognized_term
       - kind: warnings_contain
-        value: UNGROUNDED_IDENTIFIERS
+        value: UNRECOGNIZED_TERM
       - kind: warnings_contain
         value: FAKECOL999
       - kind: markdown_contains
-        value: "FAKECOL999 — Not Found in Indexed Functions"
+        value: 'Unrecognized Term: "FAKECOL999"'
+      - kind: markdown_contains
+        value: "indexed corpus"
       - kind: markdown_not_contains
         value: "This function runs in"
-      - kind: markdown_contains
-        value: "### Suggested next step"
-      - kind: markdown_contains
-        value: "manifest gap report"
-    protects: "W45 truly-ungrounded path stays correct after Phase 4's multi-schema backstop. Identifier shape (no underscore) deliberately bypasses the function-precheck."
+    protects: "W87 pre-retrieval unrecognized-term gate for a truly-uncorpus'd identifier — deterministic LLM-free clarification (done.type=unrecognized_term, UNRECOGNIZED_TERM warning naming the term), no fabricated anchor. Identifier shape (no underscore) deliberately bypasses the function-precheck so W87 is the gate that fires. Drops if the gate stops intercepting (a grounded trace or LLM answer appears) or the clarification shape changes."
 
   - id: C18
     tier: 1
+    # W87 re-pin (2026-06-11): CAP999 is a BI-shaped (3-digit CAP-code) term
+    # that is NOT in the BI literal index, so no resolver claims it and the
+    # W87 unrecognized-term gate (2b3e14c, 2026-05-15) intercepts BEFORE
+    # retrieval — same mechanism and rationale as C16 (see its comment).
+    # The previously pinned W45 UNGROUNDED_IDENTIFIERS shape is unreachable
+    # by design; this fixture predates W87 (82e4d2f, 2026-05-05). No route
+    # pin: the W87 short-circuit emits NO meta.query_type — assert on the
+    # done payload (C02 / W37 style).
     query: "How is CAP999 calculated?"
     expected:
-      # Classifier emits VARIABLE_TRACE for "how is X calculated?" per its
-      # prompt rule (matches C03 and C16). CAP999 is not in the BI literal
-      # index, so no FUNCTION_LOGIC promotion happens — VARIABLE_TRACE stays.
-      query_type: VARIABLE_TRACE
       badge: UNVERIFIED
     assertions:
+      - kind: done_field_eq
+        path: type
+        value: unrecognized_term
       - kind: warnings_contain
-        value: UNGROUNDED_IDENTIFIERS
+        value: UNRECOGNIZED_TERM
+      - kind: warnings_contain
+        value: CAP999
+      - kind: markdown_contains
+        value: 'Unrecognized Term: "CAP999"'
       - kind: markdown_not_contains
         value: "This function runs in"
-    protects: "W45 BI-shape (3-digit CAP-code) ungrounded handling. Distinct from C16 — exercises business-identifier shape specifically."
+    protects: "W87 gate on the business-identifier shape specifically — an uncorpus'd CAP-code gets the deterministic clarification, not a fabricated trace. Distinct from C16 (bare fake column shape); both must keep done.type=unrecognized_term + the UNRECOGNIZED_TERM warning naming the term."
 
   # ──────────────────────────────────────────────────────────────────────
   # Tier 2 — DATA_QUERY surface, pinned SQL semantics
