@@ -421,3 +421,152 @@ def test_payload_no_cfi_condition():
     }]
     payload = assemble_llm_payload(nodes, [], "N_ANNUAL_GROSS_INCOME", "How?", [])
     assert "CFI" not in payload, f"Commented-out CFI should not appear in payload"
+
+
+# =======================================================================
+# W167: honest, count-aware payload truncation for wide writer fan-in.
+#
+# Defect: a column with N attested writers (e.g. N_STD_ACCT_HEAD_AMT, N=90)
+# overflows the 4 KB payload budget; the old blind string slice kept only the
+# first ~4 writer STEPs and the prose then reported those 4 as the COMPLETE
+# writer set, badge VERIFIED. The fix states the TRUE count in a top-anchored
+# notice (survives the tail truncation) and labels the shown steps a subset.
+# Fixtures use the real N_STD_ACCT_HEAD_AMT magnitude (90 writers).
+# =======================================================================
+
+_W167_TARGET = "N_STD_ACCT_HEAD_AMT"
+
+
+def _w167_writer_node(fn: str, line: int, target: str = _W167_TARGET) -> dict:
+    """One INSERT writer node for *target*, from its own function — enough
+    column-map bulk that ~90 of them blow the 4 KB budget."""
+    return {
+        "function": fn,
+        "node": {
+            "id": f"{fn}_N1",
+            "type": "INSERT",
+            "target_table": "FCT_STANDARD_ACCT_HEAD",
+            "source_tables": ["DIM_STANDARD_ACCT_HEAD", "DIM_DATES", "DIM_RUN"],
+            "column_maps": {"mapping": {
+                target: "SUM(COALESCE(SRC.N_STD_ACCT_HEAD_AMT,0))",
+                "N_STD_ACCT_HEAD_SKEY": "SRC.N_STD_ACCT_HEAD_SKEY",
+                "N_RUN_SKEY": "to_char(DIM_RUN.N_RUN_SKEY)",
+            }},
+            "calculation": [],
+            "conditions": ["DIM_RUN.N_RUN_SKEY = '870'"],
+            "committed_after": True,
+            "line_start": line,
+            "line_end": line,
+        },
+    }
+
+
+def test_w167_wide_fanin_states_true_count_and_subset():
+    """90 attested writers, budget fits only a few: payload states the TRUE
+    count (90), frames the shown set as a subset ('of 90' + SUBSET), and does
+    NOT silently truncate the completeness claim away."""
+    fns = [f"SEC_RWA_EXP_STD_ACCT_HEAD_DATA_POP_{i:02d}" for i in range(90)]
+    nodes = [_w167_writer_node(fn, 24 + i) for i, fn in enumerate(fns)]
+    attested = {fn.upper(): [(24 + i, 24 + i)] for i, fn in enumerate(fns)}
+
+    payload = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query=f"What writes {_W167_TARGET}?", execution_order=nodes,
+        attested_writers=attested,
+    )
+
+    # The defining trust assertions: true count + subset framing present, and
+    # the LLM is directed to state the true total (the first live cut had the
+    # model say "multiple functions" and omit the count).
+    assert "WRITER COMPLETENESS NOTICE" in payload
+    assert "90 attested functions" in payload
+    assert "of 90 writers" in payload
+    assert "MUST state" in payload
+    assert "SUBSET" in payload
+    assert "NOT the complete list" in payload
+    # The notice is at the top so it survives the tail truncation.
+    assert payload.index("WRITER COMPLETENESS NOTICE") < 50
+    # Budget still respected.
+    assert len(payload) <= 4000
+
+
+def test_w167_narrow_fanin_lists_all_no_subset_framing():
+    """3 writers, all fit under budget: no notice, all three present, no
+    spurious 'and others' / subset framing implying more writers than exist."""
+    fns = ["FN_WRITER_A", "FN_WRITER_B", "FN_WRITER_C"]
+    nodes = [_w167_writer_node(fn, 24 + i) for i, fn in enumerate(fns)]
+    attested = {fn.upper(): [(24 + i, 24 + i)] for i, fn in enumerate(fns)}
+
+    payload = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query=f"What writes {_W167_TARGET}?", execution_order=nodes,
+        attested_writers=attested,
+    )
+
+    assert len(payload) <= 4000
+    assert "WRITER COMPLETENESS NOTICE" not in payload
+    assert "SUBSET" not in payload
+    for fn in fns:
+        assert fn in payload
+
+
+def test_w167_single_writer_unchanged():
+    """One writer: unchanged, no completeness notice, no count-padding."""
+    nodes = [_w167_writer_node("FN_ONLY_WRITER", 24)]
+    payload = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query=f"What writes {_W167_TARGET}?", execution_order=nodes,
+        attested_writers={"FN_ONLY_WRITER": [(24, 24)]},
+    )
+    assert "WRITER COMPLETENESS NOTICE" not in payload
+    assert "SUBSET" not in payload
+    assert "FN_ONLY_WRITER" in payload
+
+
+def test_w167_truncation_deterministic():
+    """Same input -> identical payload (the shown subset is stable, since
+    execution order is a deterministic topological sort)."""
+    fns = [f"FN_W_{i:02d}" for i in range(90)]
+    nodes = [_w167_writer_node(fn, 24 + i) for i, fn in enumerate(fns)]
+    attested = {fn.upper(): [(24 + i, 24 + i)] for i, fn in enumerate(fns)}
+
+    p1 = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query="q", execution_order=nodes, attested_writers=attested,
+    )
+    p2 = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query="q", execution_order=nodes, attested_writers=attested,
+    )
+    assert p1 == p2
+
+
+def test_w167_non_writer_not_counted_in_total():
+    """The stated total is the ATTESTED writer count, not the raw node/function
+    count: a function present in `nodes` but absent from `attested_writers`
+    (a non-writer that merely references the column) must not inflate N."""
+    fns = [f"FN_W_{i:02d}" for i in range(90)]
+    nodes = [_w167_writer_node(fn, 24 + i) for i, fn in enumerate(fns)]
+    # A 91st function that mentions the column but is NOT an attested writer.
+    nodes.append(_w167_writer_node("FN_NON_WRITER_READER", 999))
+    attested = {fn.upper(): [(24 + i, 24 + i)] for i, fn in enumerate(fns)}  # 90
+
+    payload = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query="q", execution_order=nodes, attested_writers=attested,
+    )
+    assert "90 attested functions" in payload
+    assert "91 attested" not in payload
+
+
+def test_w167_no_attested_writers_preserves_legacy_truncation():
+    """When no attested-writer signal is supplied (e.g. a single-function logic
+    walk), an over-budget payload keeps the legacy plain [truncated] marker —
+    the W167 notice is writer-fan-in-specific, not a blanket change."""
+    nodes = [_w167_writer_node(f"FN_BIG_{i:02d}", 24 + i) for i in range(90)]
+    payload = assemble_llm_payload(
+        nodes=nodes, edges=[], target_variable=_W167_TARGET,
+        user_query="q", execution_order=nodes,  # no attested_writers
+    )
+    assert "WRITER COMPLETENESS NOTICE" not in payload
+    assert "[truncated]" in payload

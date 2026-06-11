@@ -470,31 +470,40 @@ canaries:
       # query_type is route-convergent here, NOT a single deterministic
       # label: the classifier emits VARIABLE_TRACE (~87%) or COLUMN_LOGIC
       # (~13%) for "What writes X?", and BOTH converge on the same
-      # logic_explainer route — the generated answer, citations, badge and
-      # GROUNDING-HIGH warnings are byte-identical regardless of the label
-      # (measured 15/15 runs; the only field that flipped was this one).
-      # Pinning the bare label made C12 flaky (~13% spurious fails) with no
-      # change in what it actually protects. Same convergent-route ambiguity
-      # C09 and C13 already handle. Accept either; do NOT re-pin to a single
-      # value — the load-bearing assertions are badge + GROUNDING-HIGH below.
+      # logic_explainer route. Accept either; do NOT re-pin to a single
+      # value. Same convergent-route ambiguity C09 and C13 already handle.
       query_type:
         one_of: [VARIABLE_TRACE, COLUMN_LOGIC]
-      # W57 retroactive catch (was VERIFIED pre-W57): the model presents
-      # 4 SEC_*_DATA_POP_* functions as a sequential chain even though
-      # none of them are in functions_analyzed (semantic search returned
-      # the *_THRESHOLD_* / MINORITY_INTEREST family instead). Plus
-      # Line 24 cited 4×. Pre-W57 this stamped VERIFIED on a
-      # fabricated chain; W57's chain-coherence + per-claim binding
-      # checks correctly downgrade.
-      badge: UNVERIFIED
+      # W167 re-pin (was `badge: UNVERIFIED` + a `GROUNDING-HIGH:` assertion):
+      # the original entry pinned a STALE wrong-family fabrication — it
+      # asserted the model chained 4 SEC_*_DATA_POP_* functions that were NOT
+      # in functions_analyzed (semantic search had returned the
+      # *_THRESHOLD_* / MINORITY_INTEREST family), so W57 downgraded to
+      # UNVERIFIED + GROUNDING-HIGH. That retrieval no longer occurs: live
+      # @ 906186d the SEC writers ARE retrieved and described, badge VERIFIED
+      # 7/7. N_STD_ACCT_HEAD_AMT is in fact a WIDE fan-in (90 attested
+      # writers); pre-W167 the prose reported only the 4 that fit the 4 KB
+      # payload budget and framed them as the COMPLETE set (the W167 trust
+      # defect). Post-W167 the prose states the true total and labels the
+      # detailed writers a subset. Badge is NOT pinned (W171 lesson: it floats
+      # with generator phrasing on this family); the invariants below are the
+      # protected surface.
     assertions:
       - kind: warnings_not_contain
         value: UNGROUNDED_IDENTIFIERS
+      # Writers retrieved & described — the principal SEC_*_STD_ACCT_HEAD_DATA_POP
+      # writers are deterministic (execution order). Substring is robust to
+      # which SEC variant leads and to corpus growth.
+      - kind: markdown_contains
+        value: STD_ACCT_HEAD_DATA_POP
+      # W167 honest-count framing: the wide fan-in is acknowledged, the shown
+      # writers are NOT claimed to be the complete set. Both phrasings observed
+      # stably live (the payload notice directs the model to state the total).
+      - kind: markdown_contains_any
+        values: ["in total", "principal writer"]
       - kind: min_citations
         value: 1
-      - kind: warnings_contain
-        value: "GROUNDING-HIGH:"
-    protects: "VARIABLE_TRACE for a multi-schema column stays grounded (citations present, no W45 fire). The Phase 4 single-owner pivot is correctly NOT firing here — that path is exercised by C11 (DATA_QUERY → OFSERM single-table pivot). W57 enforcement actively catches the chain-of-non-retrieved-functions fabrication via the HIGH-severity chain-coherence check; regression to badge=VERIFIED with no GROUNDING-HIGH: warning would mean fabricated step-chains can rubber-stamp again. query_type is route-convergent (VARIABLE_TRACE or COLUMN_LOGIC both reach the same logic_explainer) and is accepted as either — it is NOT the protected invariant, so it must not be re-pinned to a single value; the badge + GROUNDING-HIGH assertions are."
+    protects: "W167 honest wide writer fan-in. N_STD_ACCT_HEAD_AMT has 90 attested writers; the prose must surface a real writer (STD_ACCT_HEAD_DATA_POP family) AND frame the detailed set as a subset of the larger total ('in total' / 'principal writers'), never as the complete writer list — the W167 trust defect was reporting 4-of-90 as complete with badge VERIFIED. Regression if the writer set stops being retrieved/cited (min_citations, UNGROUNDED), or if the honest-count framing disappears (the prose reverts to claiming the shown subset is exhaustive). Badge deliberately NOT pinned: it floats with generator phrasing on this pass-through-prone family (W171 lesson — pin the invariant, not the metric). query_type is route-convergent (VARIABLE_TRACE or COLUMN_LOGIC both reach logic_explainer); accepted as either."
 
   # ──────────────────────────────────────────────────────────────────────
   # Tier 3 — manual; needs local Oracle data state
