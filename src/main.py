@@ -1689,6 +1689,20 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                             relevant_edges = fetch_relevant_edges(node_ids, g_schema, _graph_redis)
                         with stage_timer("graph_determine_exec_order", correlation_id):
                             exec_order = determine_execution_order(fetched_nodes, relevant_edges)
+                        # W167: the write-attested writer set for the traced
+                        # column, from the SAME source the diagram is built on
+                        # (attested_writers_for_target -> fan_in_steps_from_graph,
+                        # W153 attestation). Passed to assemble_llm_payload so a
+                        # budget-truncated wide fan-in states its TRUE writer
+                        # count instead of letting the prose claim the surviving
+                        # subset (e.g. 4 of 90) is the complete set. Computed
+                        # separately from the W169 grounding call below (which
+                        # keys on state["target_variable"]) to avoid perturbing
+                        # that orthogonal gate; the helper is pure and cheap.
+                        w167_attested_writers = attested_writers_for_target(
+                            g_search_term, fetched_nodes, None,
+                            state.get("multi_source", {}) or {},
+                        )
                         with stage_timer("graph_assemble_payload", correlation_id):
                             payload = assemble_llm_payload(
                                 nodes=fetched_nodes,
@@ -1696,6 +1710,7 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                                 target_variable=g_search_term,
                                 user_query=state["raw_query"],
                                 execution_order=exec_order,
+                                attested_writers=w167_attested_writers,
                             )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
