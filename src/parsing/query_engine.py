@@ -4,6 +4,7 @@ No LLM calls here — pure Python.
 All inputs come from Redis.
 """
 
+import re
 from typing import Any
 
 from src.parsing.store import (
@@ -856,6 +857,7 @@ def assemble_llm_payload(
     target_variable: str,
     user_query: str,
     execution_order: list[dict],
+    attested_writers: Any = None,
 ) -> str:
     """Build a compact text payload for the LLM.
 
@@ -870,6 +872,19 @@ def assemble_llm_payload(
 
     Column mappings are truncated when there are too many entries to keep
     the total under ~2000 characters.
+
+    ``attested_writers`` (W167): the structurally-attested writer set for
+    ``target_variable`` — the SAME source the trace diagram is built from
+    (``attested_writers_for_target`` → ``fan_in_steps_from_graph``), passed in
+    as a ``{FUNCTION: spans}`` dict or any iterable of function names. When a
+    wide writer fan-in exceeds the char budget, the per-step detail is
+    truncated to whatever fits; previously the prose then claimed the surviving
+    subset (e.g. 4 of 90) was the COMPLETE writer set, badge VERIFIED — a trust
+    defect. When supplied and the payload is truncated below the true writer
+    count, a top-anchored completeness notice states the true count and labels
+    the shown steps as a subset, so the explainer cannot assert completeness.
+    Steps are emitted in deterministic execution order
+    (:func:`determine_execution_order`), so the shown subset is stable.
     """
     lines: list[str] = []
     lines.append(f"Query: {user_query}")
@@ -1129,11 +1144,90 @@ def assemble_llm_payload(
 
     payload = "\n".join(lines)
 
-    # Trim if exceeding budget
+    # Trim if exceeding budget (W167: count-aware, completeness-honest).
     if len(payload) > _MAX_PAYLOAD_CHARS:
-        payload = payload[:_MAX_PAYLOAD_CHARS - 20] + "\n... [truncated]"
+        payload = _truncate_payload_honestly(
+            payload, target_variable, attested_writers
+        )
 
     return payload
+
+
+# Reserve for the W167 completeness notice + trailing marker (bounded: a fixed
+# template, two integer counts, and a column name). Sized so the final payload
+# — notice + boundary-cut body + marker — still respects _MAX_PAYLOAD_CHARS.
+_W167_NOTICE_RESERVE = 560
+
+
+def _truncate_payload_honestly(
+    payload: str,
+    target_variable: str,
+    attested_writers: Any,
+) -> str:
+    """W167: truncate an over-budget payload WITHOUT letting the prose claim
+    the surviving subset is the complete writer set.
+
+    The old behaviour (``payload[:CAP-20] + "... [truncated]"``) silently
+    amputated a wide writer fan-in: for a 90-writer column only the first ~4
+    writer steps fit under the 4 KB cap, and the explainer then reported those
+    4 as the COMPLETE set of writers (badge VERIFIED) — a 4/90 completeness
+    lie. The trace diagram, built from the same nodes with no length bound,
+    held all 90.
+
+    Fix: when ``attested_writers`` is supplied (the same write-attested set the
+    diagram is built from) and truncation drops below the true writer count,
+    emit a top-anchored notice — it survives the tail truncation — that states
+    the TRUE writer count and labels the detailed steps as a subset. The
+    explainer reads it and reports "written by N functions" instead of N=shown.
+
+    When ``attested_writers`` is empty/absent (non-writer-fan-in payloads, e.g.
+    a single-function logic walk), behaviour is unchanged: the plain
+    ``[truncated]`` marker.
+    """
+    writer_names = {
+        str(w).strip().upper() for w in (attested_writers or {}) if str(w).strip()
+    }
+    n_total = len(writer_names)
+
+    if n_total == 0:
+        # No writer-completeness signal to protect — preserve prior behaviour.
+        return payload[:_MAX_PAYLOAD_CHARS - 20] + "\n... [truncated]"
+
+    # Truncate the body at a section boundary ("--- FUNCTION:" / "--- STEP")
+    # so we never cut a writer record mid-way and can count whole writers
+    # shown. Reserve room up front for the notice so it always fits.
+    body_budget = max(0, _MAX_PAYLOAD_CHARS - _W167_NOTICE_RESERVE)
+    cut = payload.rfind("\n--- ", 0, body_budget)
+    if cut <= 0:
+        cut = body_budget
+    shown_body = payload[:cut].rstrip()
+
+    # Count distinct attested writers that survived in the shown body.
+    shown_fns = {
+        m.upper()
+        for m in re.findall(
+            r"--- (?:STEP \d+(?:\s*\[[^\]]+\])?|FUNCTION): (\S+) ---", shown_body
+        )
+    }
+    shown_writers = shown_fns & writer_names
+    m_shown = len(shown_writers)
+
+    if m_shown >= n_total:
+        # All attested writers are already shown; the overflow is non-writer
+        # detail (intermediates / reads). No completeness lie to prevent.
+        return payload[:_MAX_PAYLOAD_CHARS - 20] + "\n... [truncated]"
+
+    notice = (
+        f"WRITER COMPLETENESS NOTICE (read first): {target_variable} is "
+        f"written by {n_total} attested functions in total (per the "
+        f"dependency graph). Your answer MUST state that {target_variable} is "
+        f"written by {n_total} functions. Only {m_shown} of {n_total} writers "
+        f"are detailed below (the principal writers by execution order) - this "
+        f"is a SUBSET, NOT the complete list. Do NOT state or imply that the "
+        f"writers shown are the only ones.\n"
+        f"{'=' * 60}\n"
+    )
+    return notice + shown_body + "\n... [detail truncated to fit budget]"
 
 
 # ---------------------------------------------------------------------------
