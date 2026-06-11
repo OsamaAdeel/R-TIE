@@ -370,17 +370,27 @@ canaries:
     tier: 2
     query: "What writes N_EOP_BAL?"
     expected:
+      # W173 re-pin. Old pin (badge VERIFIED + markdown FN_LOAD_OPS_RISK_DATA)
+      # was stale on both counts: FN_LOAD_OPS_RISK_DATA does NOT write
+      # N_EOP_BAL (commented-out declaration only; its attested column is
+      # N_ANNUAL_GROSS_INCOME), and the content pin was already failing at
+      # W148, before the W150 hedge existed. The graph-attested writer set is
+      # POPULATE_PP_FROMGL / POPULATE_PP_FROMGL_AMC (both OFSMDM, INSERT),
+      # resolved deterministically by column-provenance routing. Badge NOT
+      # pinned (W171 lesson — it floats with generator phrasing); schema IS
+      # stable (colprov stamps it when all writers share one schema).
       query_type: VARIABLE_TRACE
       schema: OFSMDM
-      badge: VERIFIED
     assertions:
       - kind: markdown_contains
-        value: FN_LOAD_OPS_RISK_DATA
+        value: POPULATE_PP_FROMGL
+      - kind: warnings_not_contain
+        value: W150-NEAR-TWIN-AMBIGUOUS
       - kind: warnings_not_contain
         value: UNGROUNDED_IDENTIFIERS
       - kind: min_citations
         value: 1
-    protects: "Known-writers VARIABLE_TRACE in OFSMDM. Drops if model regresses on writer enumeration."
+    protects: "Column-provenance writer enumeration in OFSMDM, and the W173 hedge seam: colprov-injected score-0.0 writer sentinels must not be read as a near-twin embedding tie (the C04 misfire). Drops if the W150 hedge re-intercepts resolved column-writer queries or writer enumeration regresses."
 
   - id: C06
     tier: 2

@@ -194,6 +194,12 @@ def determine_primary_anchor(state: LogicState) -> Optional[Dict[str, Any]]:
             # Exclude it so semantic_top1 anchors on a genuine cosine hit, never
             # a graph-expansion neighbour. W95/W147 injected entries use score
             # 0.0 and resolve at L1/L4 BEFORE this layer, so they are unaffected.
+            # W173 caveat: that L1/L4 argument does NOT hold for column-
+            # provenance injected writers (a column query has no L1-L4 layer),
+            # so on colprov queries this min() anchors on an injected 0.0
+            # sentinel. The W150 hedge no longer misreads those sentinels
+            # (_is_colprov_injected_sentinel), but the L5 anchor pick itself
+            # is a DEFERRED known defect — see the W173 Weakness Log entry.
             if fv > 2.0:
                 return float("inf")
             return fv
@@ -280,6 +286,47 @@ def _w150_near_twin(a: str, b: str) -> bool:
     )
 
 
+def _is_colprov_injected_sentinel(
+    record: Any,
+    function_name: str,
+    column_provenance: Optional[Dict[str, Any]],
+) -> bool:
+    """W173 — is this multi_source record a column-provenance injection?
+
+    ``ensure_column_writers_in_search_results`` force-injects resolved column
+    writers with a hardcoded ``score: 0.0``; ``fetch_multi_logic`` strips the
+    ``anchor_injected`` flag, so at the hedge/L5 decision point the only
+    reliable identification is the conjunction pinned by the W173 pre-fix
+    probe — BOTH conjuncts are load-bearing:
+
+      * ``score == 0.0`` alone is fragile (``fetch_multi_logic`` defaults a
+        MISSING score to 0.0 — currently unreachable, but a latent trap);
+      * ``writer_functions`` membership alone is wrong (a writer can also
+        arrive as a GENUINE cosine hit with its real score, and must keep
+        participating in the near-twin margin).
+
+    Case-insensitive name match: ``writer_functions`` preserves the resolver's
+    casing while multi_source keys come from ``function_name``. Returns False
+    for a non-colprov query (``column_provenance`` absent/empty), so every
+    non-colprov path is byte-identical to pre-W173 behavior.
+    """
+    if not isinstance(column_provenance, dict):
+        return False
+    writers = column_provenance.get("writer_functions") or []
+    if not writers:
+        return False
+    if not isinstance(record, dict):
+        return False
+    try:
+        score = float(record.get("score"))
+    except (TypeError, ValueError):
+        return False
+    if score != 0.0:
+        return False
+    fn_upper = (function_name or "").upper()
+    return any(fn_upper == (w or "").upper() for w in writers)
+
+
 def detect_near_twin_ambiguity(
     state: LogicState,
     anchor: Optional[Dict[str, Any]],
@@ -295,10 +342,20 @@ def detect_near_twin_ambiguity(
     cosine candidates form a near-twin cohort (:func:`_w150_near_twin`) AND
     their distance margin is < ``_W150_MARGIN_MAX``. Returns ``None`` otherwise
     (caller proceeds to the normal confident explainer path).
+
+    W173: column-provenance injected writer records
+    (:func:`_is_colprov_injected_sentinel`) are excluded from the candidate
+    set — their hardcoded ``score: 0.0`` is an injection sentinel, not an
+    embedding similarity, so two injected near-twin writers produced a
+    degenerate ``margin = 0.0`` and hedged a deterministically-resolved,
+    complete writer answer (the C04 "What writes N_EOP_BAL?" misfire). The
+    margin is computed over GENUINE cosine candidates only; when exclusion
+    leaves fewer than two, there is no tie to hedge on.
     """
     if not isinstance(anchor, dict) or anchor.get("source") != "semantic_top1":
         return None
 
+    column_provenance = state.get("column_provenance") or {}
     multi_source = state.get("multi_source") or {}
     real = []
     for fn, data in multi_source.items():
@@ -311,8 +368,13 @@ def detect_near_twin_ambiguity(
             fv = float(v)
         except (TypeError, ValueError):
             continue
-        if fv <= _W150_COSINE_MAX:  # exclude the W149 >2.0 expansion sentinel
-            real.append((fn, fv))
+        if fv > _W150_COSINE_MAX:  # exclude the W149 >2.0 expansion sentinel
+            continue
+        # W173: exclude colprov-injected writer sentinels (score 0.0 is an
+        # injection artifact, not a cosine distance).
+        if _is_colprov_injected_sentinel(data, fn, column_provenance):
+            continue
+        real.append((fn, fv))
     real.sort(key=lambda kv: kv[1])
 
     if len(real) < 2:

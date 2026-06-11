@@ -19,6 +19,7 @@ import pytest
 from src.agents.anchor_resolution import (
     determine_primary_anchor,
     detect_near_twin_ambiguity,
+    _is_colprov_injected_sentinel,
     _w150_near_twin,
     _W150_MARGIN_MAX,
 )
@@ -174,3 +175,126 @@ def test_w150_siblings_capped_at_five():
     hedge = detect_near_twin_ambiguity({"multi_source": ms}, _SEMANTIC)
     assert hedge is not None
     assert len(hedge["siblings"]) == 5
+
+
+# --------------------------------------------------------------------------- #
+# W173 — colprov-injected sentinels excluded from the near-twin margin
+# --------------------------------------------------------------------------- #
+
+# The real C04 case: both attested N_EOP_BAL writers force-injected at 0.0.
+_NEOP_PROVENANCE = {
+    "column": "N_EOP_BAL",
+    "writer_functions": ["POPULATE_PP_FROMGL", "POPULATE_PP_FROMGL_AMC"],
+}
+
+
+def test_w173_no_hedge_when_top2_are_injected_writer_sentinels():
+    """The C04 misfire: two injected twin writers at 0.0 must NOT hedge."""
+    state = {
+        "column_provenance": _NEOP_PROVENANCE,
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.0),       # injected sentinel
+            ("POPULATE_PP_FROMGL_AMC", 0.0),   # injected sentinel
+            ("ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION", 0.41),  # genuine hit
+        ),
+    }
+    assert detect_near_twin_ambiguity(state, _SEMANTIC) is None
+
+
+def test_w173_genuine_near_twin_tie_still_hedges_on_colprov_query():
+    """Must-not-regress: real cosine twins still hedge even when a
+    column_provenance stamp exists (the twins are NOT injected writers)."""
+    state = {
+        "column_provenance": _NEOP_PROVENANCE,
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.0),  # injected sentinel — excluded
+            ("CS_THRESHOLD_TREATMENT_AMOUNT_ABOVE_AGGREGATE_THRESHOLD_CALCULATION", 0.48),
+            ("CS_THRESHOLD_TREATMENT_AMOUNT_BELOW_AGGREGATE_THRESHOLD_CALCULATION", 0.49),
+        ),
+    }
+    hedge = detect_near_twin_ambiguity(state, _SEMANTIC)
+    assert hedge is not None
+    assert hedge["top1"] == \
+        "CS_THRESHOLD_TREATMENT_AMOUNT_ABOVE_AGGREGATE_THRESHOLD_CALCULATION"
+    assert "POPULATE_PP_FROMGL" not in hedge["siblings"]
+
+
+def test_w173_mixed_sentinel_plus_genuine_hit_no_false_tie():
+    """One injected sentinel + one genuine hit: the sentinel is excluded, a
+    single genuine candidate cannot form a tie, no hedge."""
+    state = {
+        "column_provenance": _NEOP_PROVENANCE,
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.0),                  # injected — excluded
+            ("POPULATE_PP_FROMGL_AMC", 0.44),             # genuine cosine hit
+        ),
+    }
+    assert detect_near_twin_ambiguity(state, _SEMANTIC) is None
+
+
+def test_w173_writer_with_real_cosine_score_keeps_participating():
+    """Load-bearing conjunct: a writer retrieved as a GENUINE hit (in
+    writer_functions but score != 0.0) is NOT excluded — membership alone
+    would wrongly drop it from the margin computation."""
+    state = {
+        "column_provenance": _NEOP_PROVENANCE,
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.48),      # genuine hit, despite membership
+            ("POPULATE_PP_FROMGL_AMC", 0.49),  # genuine hit, despite membership
+        ),
+    }
+    hedge = detect_near_twin_ambiguity(state, _SEMANTIC)
+    assert hedge is not None
+    assert hedge["top1"] == "POPULATE_PP_FROMGL"
+    assert hedge["margin"] < _W150_MARGIN_MAX
+
+
+def test_w173_non_colprov_query_behavior_unchanged():
+    """No column_provenance in state → helper inert → pre-W173 behavior:
+    a 0.0-score twin pair still hedges (score alone never excludes)."""
+    state = {
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.0),
+            ("POPULATE_PP_FROMGL_AMC", 0.0),
+        ),
+    }
+    hedge = detect_near_twin_ambiguity(state, _SEMANTIC)
+    assert hedge is not None
+    assert hedge["margin"] == 0.0
+
+
+def test_w173_case_insensitive_writer_match():
+    """writer_functions casing differs from multi_source key casing →
+    still recognized as injected sentinels → no hedge."""
+    state = {
+        "column_provenance": {
+            "column": "N_EOP_BAL",
+            "writer_functions": ["populate_pp_fromgl", "Populate_Pp_Fromgl_Amc"],
+        },
+        "multi_source": _ms(
+            ("POPULATE_PP_FROMGL", 0.0),
+            ("POPULATE_PP_FROMGL_AMC", 0.0),
+        ),
+    }
+    assert detect_near_twin_ambiguity(state, _SEMANTIC) is None
+
+
+@pytest.mark.parametrize("record,fn,prov,expected", [
+    # the canonical injected sentinel
+    ({"score": 0.0}, "POPULATE_PP_FROMGL", _NEOP_PROVENANCE, True),
+    # genuine hit despite membership (score conjunct)
+    ({"score": 0.41}, "POPULATE_PP_FROMGL", _NEOP_PROVENANCE, False),
+    # 0.0 score but not a writer (membership conjunct)
+    ({"score": 0.0}, "FN_LOAD_OPS_RISK_DATA", _NEOP_PROVENANCE, False),
+    # no provenance (non-colprov query)
+    ({"score": 0.0}, "POPULATE_PP_FROMGL", None, False),
+    ({"score": 0.0}, "POPULATE_PP_FROMGL", {}, False),
+    # empty writer list
+    ({"score": 0.0}, "POPULATE_PP_FROMGL", {"writer_functions": []}, False),
+    # malformed record / score
+    ("not-a-dict", "POPULATE_PP_FROMGL", _NEOP_PROVENANCE, False),
+    ({"score": None}, "POPULATE_PP_FROMGL", _NEOP_PROVENANCE, False),
+    ({"score": "abc"}, "POPULATE_PP_FROMGL", _NEOP_PROVENANCE, False),
+])
+def test_w173_sentinel_helper_truth_table(record, fn, prov, expected):
+    assert _is_colprov_injected_sentinel(record, fn, prov) is expected
