@@ -1711,6 +1711,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                                 user_query=state["raw_query"],
                                 execution_order=exec_order,
                                 attested_writers=w167_attested_writers,
+                                # B2: function-walkthrough bindings must not
+                                # get column-trace pass-through consolidation.
+                                target_is_function=(g_query_type == "function"),
                             )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
