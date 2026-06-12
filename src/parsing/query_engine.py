@@ -858,6 +858,7 @@ def assemble_llm_payload(
     user_query: str,
     execution_order: list[dict],
     attested_writers: Any = None,
+    target_is_function: bool = False,
 ) -> str:
     """Build a compact text payload for the LLM.
 
@@ -869,6 +870,15 @@ def assemble_llm_payload(
       ``SCALAR_COMPUTE`` nodes.
     * **PASS-THROUGH** label for steps where a column is copied unchanged
       (``DIRECT`` type).
+
+    ``target_is_function`` (B2): pass True when ``target_variable`` is the
+    FUNCTION being walked through (binding kind ``g_query_type ==
+    "function"``), not a column. Pass-through classification is column-trace
+    semantics ("is the target COLUMN copied unchanged"); against a function
+    name every node degenerates to pass-through and the whole function
+    flattens to one false "not transformed" block. With True, consolidation
+    is skipped and every node renders as a full per-node step. Default False
+    preserves the column-target behavior unchanged (colprov / W175 rides it).
 
     Column mappings are truncated when there are too many entries to keep
     the total under ~2000 characters.
@@ -936,9 +946,15 @@ def assemble_llm_payload(
     tv_upper = target_variable.strip().upper()
 
     # --- Consolidate consecutive same-function pass-through nodes ---
+    # B2: skipped entirely for function-walkthrough targets —
+    # _is_passthrough_node answers "is the target COLUMN copied unchanged",
+    # which degenerates to True for every node when the target is a function
+    # name. Function targets render every node as a full per-node step.
     consolidated: list = []  # entries or {"consolidated": True, ...} dicts
+    if target_is_function:
+        consolidated = list(non_upstream_order)
     i = 0
-    while i < len(non_upstream_order):
+    while not target_is_function and i < len(non_upstream_order):
         entry = non_upstream_order[i]
         node = entry.get("node", entry)
         fn = entry.get("function", "")
