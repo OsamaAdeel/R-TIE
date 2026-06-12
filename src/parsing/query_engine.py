@@ -1004,7 +1004,12 @@ def assemble_llm_payload(
                 lines.append(f"--- FUNCTION: {fn_name} ---")
                 exec_cond = entry.get("execution_condition")
                 if exec_cond and isinstance(exec_cond, dict):
-                    plain = exec_cond.get("plain_text", exec_cond.get("description", ""))
+                    # The only producer (parser.detect_execution_condition)
+                    # emits "raw_condition"; plain_text/description kept as
+                    # fallback for any other shape.
+                    plain = (exec_cond.get("raw_condition")
+                             or exec_cond.get("plain_text")
+                             or exec_cond.get("description", ""))
                     if plain:
                         lines.append(f"EXECUTION CONDITION: {plain}")
                 elif exec_cond and isinstance(exec_cond, str):
@@ -1031,7 +1036,12 @@ def assemble_llm_payload(
             lines.append(f"--- FUNCTION: {fn_name} ---")
             exec_cond = entry.get("execution_condition")
             if exec_cond and isinstance(exec_cond, dict):
-                plain = exec_cond.get("plain_text", exec_cond.get("description", ""))
+                # The only producer (parser.detect_execution_condition)
+                # emits "raw_condition"; plain_text/description kept as
+                # fallback for any other shape.
+                plain = (exec_cond.get("raw_condition")
+                         or exec_cond.get("plain_text")
+                         or exec_cond.get("description", ""))
                 expr = exec_cond.get("expression", "")
                 if plain:
                     lines.append(f"EXECUTION CONDITION: {plain}")
