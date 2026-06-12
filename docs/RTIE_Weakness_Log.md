@@ -1393,3 +1393,45 @@ Not opened as active work because it needs a product decision first: **is enumer
 ## W177. Classify `confidence: 0.0` on fabricated declines — cheap unused signal (note)
 
 gpt-4o-mini emitted `confidence: 0.0` on all 3 false-decline runs (vs 0.70-0.85 on its correct routes), i.e. the model self-reported maximal uncertainty while fabricating an unsupported_reason. Nothing downstream consumes classify confidence as a decline-gate today. Recording because it's a usable cheap backstop if either (a) a future decline-gate wants a "low-confidence UNSUPPORTED → don't decline authoritatively / soften to clarification" rule, or (b) the W55 swap ever proceeds and wants a guardrail. Note, not a fix; signal observed on one model and one query shape — validate distribution before relying on it.
+
+---
+
+## W178. Residency check: unqualified-column pass violates the documented skip-unknown-table contract — misleading rejection message — OPEN (planned; diagnostics-correctness)
+
+**Severity: diagnostics-correctness, NOT a wrong-answer path.** In every observed C11 case the rejected SQL was genuinely bad; the defect is that the rejection MESSAGE attributes the offending column to a table the SQL never asserted it on, which misdirects triage — it misdirected the original C11 triage.
+
+**Surface.** `validate_column_residency` documents ([sql_guardian.py:295-298](src/tools/sql_guardian.py#L295-L298)) that FROM tables absent from the catalog are skipped as unprovable. The QUALIFIED-column pass honors this ([sql_guardian.py:362-368](src/tools/sql_guardian.py#L362-L368)): a qualifier resolving to a non-cataloged table is skipped. The UNQUALIFIED pass does NOT: `union_cols` is built from `known_from_tables` only ([sql_guardian.py:340-350](src/tools/sql_guardian.py#L340-L350)), so a non-cataloged FROM table contributes nothing, and a bare column genuinely scoped to it fails `col not in union_cols` and is rejected with a message naming the CATALOGED tables ([sql_guardian.py:410-424](src/tools/sql_guardian.py#L410-L424)). Observed live: `column=FIC_MIS_DATE table=FCT_STANDARD_ACCT_HEAD` for a column the SQL never asserted on that table.
+
+**Fix options (when prioritized).** Option A — apply the skip-unknown rule to bare columns whenever a non-cataloged table is in FROM scope (small, ~5-10 lines; costs coverage on the hallucinated-table+hallucinated-column pair). Option B — scope-aware attribution via sqlparse (correct, no coverage loss, ~100-200 lines; sqlparse is already a Guardian import).
+
+**RELATED — same qualification-bug family, fold into this ticket.** The pre-existing direct-date arm of `_check_suspicious_result`'s FIC_MIS_DATE baseline interpolates the UNQUALIFIED primary FROM table ([data_query.py:1255-1258](src/agents/data_query.py#L1255-L1258)); for OFSERM direct-date tables (which render schema-qualified) it likely ORA-00942s today and is swallowed non-fatally ([data_query.py:1266-1270](src/agents/data_query.py#L1266-L1270)) → silently "not suspicious". The C11 fix made the NEW skey arm schema-qualified ([data_query.py:1239-1253](src/agents/data_query.py#L1239-L1253)) but left the direct-date arm unchanged per minimal scope.
+
+**Provenance.** Surfaced by the C11 diagnostic chain (2026-06-11/12), live on main; surfaced during C11 (commit `7f32365` / merge `67c86ce`) but the residency check itself was NOT changed by the C11 fix.
+
+---
+
+## W179. Catalog enrichment fills only EMPTY graph column sets — 23 partial-column tables — latent residency false-positive class — OPEN (planned)
+
+**Severity: latent false positive** (valid generated SQL wrongly rejected), NOT a wrong-answer path.
+
+**Surface.** The Phase-4 snapshot fall-through in the catalog builder enriches a table's column set from the Oracle snapshot ONLY when the graph-derived set is empty ([data_query.py:1121-1134](src/agents/data_query.py#L1121-L1134), condition `not tables_to_columns[table]`). 23 cataloged OFSERM tables have NON-empty graph sets that are strict SUBSETS of their real Oracle columns — e.g. FSI_CAP_BANKING_EXPOSURES 129/272, FSI_CAP_INVESTMENT_EXPOSURES 158/275, FCT_STANDARD_ACCT_HEAD 12/21. Valid generated SQL touching a real-but-never-graph-seen column on any of these is falsely rejected by either residency pass (the column genuinely isn't in the catalog set RTIE compares against).
+
+**Fix (when prioritized).** ~3-line extension: UNION partial graph sets with the Oracle snapshot columns, not just fill empties.
+
+**Provenance.** Surfaced by the C11 diagnostic (commit `7f32365` / merge `67c86ce`); distinct from W178 and NOT part of the C11 fix.
+
+---
+
+## W180. Column-substitution-under-alias — DATA_QUERY answers VERIFIED for a NON-EXISTENT column by silently aliasing a real one — OPEN — HIGH / WRONG-ANSWER TRUST DEFECT — fix-worthy, diagnostic-first (NOT a watch-item)
+
+**Severity: HIGH — wrong-answer path with a VERIFIED badge, the cardinal RTIE failure class** (cf. C01, W167, the W169 framing-drift work). Unlike W178/W179 above (false-positive / message-quality items, planned-but-lower), this answers the user's question WRONGLY and confidently. Needs its own diagnostic then a fix when prioritized — do not park as a watch-item.
+
+**Observed live (deliberately probed, C11 class validation, 2026-06-12, validation backend).** A DATA_QUERY for a column that does NOT exist on the target table — `N_BASIC_INDICATOR_CAR` on `FCT_OPS_RISK_SUMMARY` — was answered VERIFIED: the generator silently SUBSTITUTED a real column (`N_RWA_AMT`) under the alias `TOTAL_N_BASIC_INDICATOR_CAR`. The user asked for column X and received a confident SUM of column Y labeled as X.
+
+**Why nothing caught it.** The residency check passes — the substituted column IS valid on the table, and the alias is just a label; no validator compares the ANSWERED column against the ASKED column. The W57 grounding overlay doesn't run on the DATA_QUERY path's result semantics, and the C11 gate machinery inspects catalog columns for date-key routing, not asked-column existence.
+
+**Diagnostic first (scope for the future ticket).** Repro across query shapes; localize the mechanism — is the generator inventing the alias, or is the orchestrator's column extraction mis-resolving a non-existent column to a near neighbor; measure frequency; check whether it occurs on non-aggregate queries too.
+
+**Likely fix direction (recorded for the log, not decided).** Validate the asked-for column exists on the resolved target table BEFORE generation (a pre-check, sibling to the C11 gate machinery which already inspects catalog columns), and/or reject an answer whose SELECT alias references a column absent from the resolved schema.
+
+**Provenance.** Surfaced during C11 class validation (2026-06-12), live on the validation backend; surfaced during C11 (commit `7f32365` / merge `67c86ce`) and deliberately kept OUT of the C11 fix.
