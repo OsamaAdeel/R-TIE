@@ -483,7 +483,19 @@ canaries:
         value: OFSERM.FCT_STANDARD_ACCT_HEAD
       - kind: sql_not_contains
         value: STG_STANDARD_ACCT_HEAD
-    protects: "Phase 4 schema pivot — DATA_QUERY routes to OFSERM, schema-qualified SQL, no STG substitution."
+      # C11 fix: FCT_STANDARD_ACCT_HEAD has no FIC_MIS_DATE — the date is
+      # pre-resolved deterministically to N_MIS_DATE_SKEY through
+      # DIM_DATES.D_CALENDAR_DATE BEFORE generation. The generated SQL
+      # must filter on the resolved skey value with NO DIM_DATES subquery
+      # and NO FIC_MIS_DATE anywhere (the DIM_DATES.FIC_MIS_DATE pivot is
+      # all-NULL — it executes and returns a silent empty).
+      - kind: sql_contains
+        value: N_MIS_DATE_SKEY
+      - kind: sql_not_contains
+        value: DIM_DATES
+      - kind: sql_not_contains
+        value: FIC_MIS_DATE
+    protects: "Phase 4 schema pivot — DATA_QUERY routes to OFSERM, schema-qualified SQL, no STG substitution. C11 skey pre-resolution — date filtered via deterministic N_MIS_DATE_SKEY, never an LLM-improvised DIM_DATES pivot."
 
   - id: C12
     tier: 2
