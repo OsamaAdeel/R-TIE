@@ -13,3 +13,6 @@ dist/
 node_modules/
 db/modules/**/functions/*.bak
 tests/canary/last_*.log
+
+# Proprietary SQL logic — excluded from public repo (history scrubbed via git-filter-repo)
+db/modules/*/functions/
