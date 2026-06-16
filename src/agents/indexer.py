@@ -326,11 +326,23 @@ class IndexerAgent:
         _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
         _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
         _ssl_ctx.load_default_certs()
-        self._embeddings = OpenAIEmbeddings(
-            model=embedding_model,
-            http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
-            http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
-        )
+        # Env-driven embedding backend — see llm_factory.resolve_embedding_config.
+        # When EMBEDDING_BASE_URL is set (local Ollama nomic-embed-text), route
+        # there with base_url + api_key + tiktoken_enabled=False (Ollama's
+        # OpenAI-compat endpoint needs string inputs, not tiktoken int arrays).
+        from src.llm_factory import resolve_embedding_config as _resolve_emb
+        _emb_cfg = _resolve_emb()
+        _emb_kwargs: dict = {
+            "model": embedding_model or _emb_cfg["model"],
+            "http_client": _httpx.Client(verify=_ssl_ctx, timeout=60),
+            "http_async_client": _httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+        }
+        if _emb_cfg["base_url"]:
+            _emb_kwargs["base_url"] = _emb_cfg["base_url"]
+            _emb_kwargs["api_key"] = _emb_cfg["api_key"]
+            _emb_kwargs["check_embedding_ctx_length"] = False
+            _emb_kwargs["tiktoken_enabled"] = False
+        self._embeddings = OpenAIEmbeddings(**_emb_kwargs)
 
     async def index_module(
         self, module_name: str, force: bool = False

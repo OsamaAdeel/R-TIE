@@ -1350,11 +1350,19 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
             _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
             _ssl_ctx.load_default_certs()
-            embeddings = OpenAIEmbeddings(
-                model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-                http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
-                http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
-            )
+            from src.llm_factory import resolve_embedding_config as _resolve_emb
+            _emb_cfg = _resolve_emb()
+            _emb_kwargs: dict = {
+                "model": _emb_cfg["model"],
+                "http_client": _httpx.Client(verify=_ssl_ctx, timeout=60),
+                "http_async_client": _httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+            }
+            if _emb_cfg["base_url"]:
+                _emb_kwargs["base_url"] = _emb_cfg["base_url"]
+                _emb_kwargs["api_key"] = _emb_cfg["api_key"]
+                _emb_kwargs["check_embedding_ctx_length"] = False
+                _emb_kwargs["tiktoken_enabled"] = False
+            embeddings = OpenAIEmbeddings(**_emb_kwargs)
             # W80: prefer the clean anchor (W76 / BI routing); fall back to
             # raw_query — never the classifier blob, which used to be stamped
             # into object_name by classify_query and poisoned the embedding.
