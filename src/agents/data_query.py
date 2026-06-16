@@ -106,6 +106,15 @@ HARD CONSTRAINTS — violating any of these produces an invalid response:
   be bound via `TO_DATE(:param_name, 'YYYY-MM-DD')`, not as bare strings.
   Pass the date as a 'YYYY-MM-DD' string in params. Apply this rule to
   BOTH the main SQL and count_sql.
+- DATE-SKEY FACT TABLES: some fact tables have NO FIC_MIS_DATE column and
+  key their MIS date by N_MIS_DATE_SKEY (a NUMBER). When the filters
+  provide a pre-resolved `mis_date_skey`, filter those tables with
+  `N_MIS_DATE_SKEY = :mis_date_skey` (no TO_DATE — it is a number, not a
+  date). NEVER join or subquery DIM_DATES to translate a calendar date
+  yourself, and never invent a FIC_MIS_DATE predicate on a table whose
+  column list does not include it. If a date filter is needed on a
+  date-skey table and no `mis_date_skey` was provided, respond with the
+  `unsupported` JSON shape instead of guessing a date pivot.
 
 CHAR COLUMN HANDLING — Oracle CHAR(n) columns store blank-padded values.
 A direct equality between a CHAR(n) column and a VARCHAR2 bind variable
@@ -180,6 +189,141 @@ Example of a TIME_SERIES response shape:
   "count_sql": null
 }
 """
+
+
+# ---------------------------------------------------------------------
+# C11: deterministic date→skey pre-resolution
+# ---------------------------------------------------------------------
+# A large share of the cataloged OFSERM fact tables
+# (FCT_STANDARD_ACCT_HEAD, FCT_OPS_RISK_SUMMARY, ...) have no
+# FIC_MIS_DATE column — their MIS date is keyed by N_MIS_DATE_SKEY,
+# resolvable only through DIM_DATES.D_CALENDAR_DATE. Letting the LLM
+# pick the pivot column is the silent-empty trap: DIM_DATES.FIC_MIS_DATE
+# is entirely NULL in the data, so a wrong-column pivot passes every
+# validator, executes, and returns SUM=NULL over zero rows. The skey is
+# therefore resolved deterministically BEFORE generation (mirroring
+# W88's resolve_skey_for_anchor in computation_router.py) and injected
+# as a plain value — the LLM never sees or chooses a pivot column.
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SCHEMA_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
+
+# Mirrors W88's _SKEY_CACHE: keyed by (schema, date); failures cached as
+# None so an unreachable Oracle or absent date isn't re-probed on every
+# query until reset_date_skey_cache() runs (process restart or tests).
+_DATE_SKEY_CACHE: dict[tuple[str, str], Optional[int]] = {}
+
+
+def reset_date_skey_cache() -> None:
+    """Clear the date→skey cache (tests / operational reset)."""
+    _DATE_SKEY_CACHE.clear()
+
+
+def _table_uses_date_skey(
+    table: str, tables_to_columns: dict[str, set[str]],
+) -> bool:
+    """Gate: True when *table* is cataloged with N_MIS_DATE_SKEY and
+    WITHOUT FIC_MIS_DATE. Direct-date tables (STG_PRODUCT_PROCESSOR and
+    every other FIC_MIS_DATE table) return False and keep their direct
+    date filter untouched."""
+    cols = tables_to_columns.get(table)
+    if not cols:
+        return False
+    return "N_MIS_DATE_SKEY" in cols and "FIC_MIS_DATE" not in cols
+
+
+async def resolve_date_skey(
+    schema_tools, schema: str, mis_date: str,
+) -> Optional[int]:
+    """Resolve a calendar date to its DIM_DATES N_DATE_SKEY.
+
+    The pivot column is D_CALENDAR_DATE — NOT FIC_MIS_DATE, which is
+    entirely NULL in DIM_DATES (the silent-empty trap this resolver
+    exists to avoid).
+
+    Cardinality safety: DIM_DATES may hold multiple versioned rows per
+    date in production (D_RECORD_START/END_DATE,
+    F_LATEST_RECORD_INDICATOR). SELECT DISTINCT collapses same-skey
+    versions; if more than one DISTINCT skey survives, the
+    F_LATEST_RECORD_INDICATOR = 'Y' guard is applied as a tiebreaker.
+    The guard is deliberately NOT applied unconditionally: the local
+    DIM_DATES row carries a NULL indicator, so a hard ='Y' filter would
+    fail to resolve every date in this environment. Anything other than
+    exactly one surviving skey returns None — the caller declines
+    honestly, never guesses.
+
+    Read-only: goes through ``schema_tools.execute_raw`` (SQLGuardian-
+    validated SELECT on the existing pool), same as W88's resolver.
+
+    Returns the integer skey, or None when the date is absent from
+    DIM_DATES, the cardinality is ambiguous, or the lookup failed
+    (cases distinguished in logs).
+    """
+    if not mis_date or not _ISO_DATE_RE.match(str(mis_date)):
+        logger.warning(
+            "C11 date-skey: non-ISO date %r — not resolving", mis_date
+        )
+        return None
+    schema_token = (schema or "").strip().upper()
+    if not _SCHEMA_TOKEN_RE.match(schema_token):
+        logger.warning("C11 date-skey: invalid schema token %r", schema)
+        return None
+
+    cache_key = (schema_token, str(mis_date))
+    if cache_key in _DATE_SKEY_CACHE:
+        return _DATE_SKEY_CACHE[cache_key]
+
+    base_sql = (
+        "SELECT DISTINCT N_DATE_SKEY "
+        f"FROM {schema_token}.DIM_DATES "
+        "WHERE D_CALENDAR_DATE = TO_DATE(:cal_date, 'YYYY-MM-DD')"
+    )
+    try:
+        rows = await schema_tools.execute_raw(
+            base_sql, {"cal_date": str(mis_date)}
+        )
+        skeys = sorted(
+            {int(r[0]) for r in (rows or []) if r and r[0] is not None}
+        )
+        if len(skeys) > 1:
+            # Production multi-version case: tiebreak on the
+            # latest-record indicator.
+            rows = await schema_tools.execute_raw(
+                base_sql + " AND F_LATEST_RECORD_INDICATOR = 'Y'",
+                {"cal_date": str(mis_date)},
+            )
+            skeys = sorted(
+                {int(r[0]) for r in (rows or []) if r and r[0] is not None}
+            )
+        if len(skeys) == 1:
+            skey = skeys[0]
+            _DATE_SKEY_CACHE[cache_key] = skey
+            logger.info(
+                "C11 date-skey resolved | schema=%s date=%s skey=%d",
+                schema_token, mis_date, skey,
+            )
+            return skey
+        if not skeys:
+            logger.warning(
+                "C11 date-skey: date %s not present in %s.DIM_DATES "
+                "(D_CALENDAR_DATE)",
+                mis_date, schema_token,
+            )
+        else:
+            logger.warning(
+                "C11 date-skey: date %s ambiguous in %s.DIM_DATES even "
+                "after latest-record guard (skeys=%s) — declining",
+                mis_date, schema_token, skeys,
+            )
+        _DATE_SKEY_CACHE[cache_key] = None
+        return None
+    except Exception as exc:
+        logger.warning(
+            "C11 date-skey lookup failed | schema=%s date=%s error=%s",
+            schema_token, mis_date, exc,
+        )
+        _DATE_SKEY_CACHE[cache_key] = None
+        return None
 
 
 class DataQueryAgent:
@@ -412,6 +556,81 @@ class DataQueryAgent:
                 ))
                 return
 
+        # C11: deterministic date→skey pre-resolution. When the user
+        # names a cataloged fact table that keys its MIS date by
+        # N_MIS_DATE_SKEY (no FIC_MIS_DATE), resolve the date to its
+        # DIM_DATES skey HERE and inject the value into generation —
+        # the LLM must never choose a date pivot column (the
+        # DIM_DATES.FIC_MIS_DATE wrong-pivot passes every validator
+        # and returns a silent empty). Direct-date tables gate False
+        # and keep their FIC_MIS_DATE filter unchanged.
+        skey_hint: Optional[dict] = None
+        if w88_plan is None:
+            mis_date_for_skey = filters.get("mis_date")
+            named_cataloged = [
+                t for t in _extract_user_query_tables(user_query)
+                if tables_to_columns.get(t)
+            ]
+            skey_tables = [
+                t for t in named_cataloged
+                if _table_uses_date_skey(t, tables_to_columns)
+            ]
+            if skey_tables and mis_date_for_skey:
+                yield (
+                    "stage", "search",
+                    f"Resolving MIS date {mis_date_for_skey} to its "
+                    "DIM_DATES date key...",
+                )
+                resolved_skey = await resolve_date_skey(
+                    self._schema_tools, target_schema, mis_date_for_skey,
+                )
+                if resolved_skey is None:
+                    # No fallback to an LLM-improvised pivot — that
+                    # reintroduces the silent-empty trap. Honest decline.
+                    logger.warning(
+                        "DataQuery date-skey unresolved | schema=%s "
+                        "date=%s tables=%s — declining",
+                        target_schema, mis_date_for_skey, skey_tables,
+                    )
+                    yield ("result", {
+                        "status": "unsupported",
+                        "query_kind": None,
+                        "sql": None,
+                        "count_sql": None,
+                        "params": {},
+                        "rows": [],
+                        "columns": [],
+                        "row_count": 0,
+                        "summary": (
+                            f"No data available for {mis_date_for_skey}: "
+                            "the date is not present in the warehouse "
+                            "calendar (DIM_DATES)."
+                        ),
+                        "explanation": (
+                            f"Table(s) {', '.join(skey_tables)} key their "
+                            "MIS date by N_MIS_DATE_SKEY, which must be "
+                            f"resolved through {target_schema}.DIM_DATES "
+                            "(D_CALENDAR_DATE). The requested date "
+                            f"{mis_date_for_skey} did not resolve to a "
+                            "date key, so there is no data for that date. "
+                            "No partial answer returned. If the date "
+                            "should exist, verify DIM_DATES is populated "
+                            "for it."
+                        ),
+                        "sanity_warnings": [],
+                        "verification_sql": None,
+                        "correlation_id": correlation_id,
+                    })
+                    return
+                skey_hint = {
+                    "skey": resolved_skey,
+                    "mis_date": mis_date_for_skey,
+                    "tables": skey_tables,
+                    # Keep the calendar-date filter visible when the
+                    # query also names a direct-date table (mixed join).
+                    "drop_mis_date": len(skey_tables) == len(named_cataloged),
+                }
+
         if w88_plan is not None:
             # W88 short-circuit: skip LLM generation entirely. The
             # canonical SQL is already built; fall through to Guardian
@@ -432,6 +651,7 @@ class DataQueryAgent:
                         catalog_text=catalog_text,
                         provider=provider,
                         model=model,
+                        skey_hint=skey_hint,
                     )
             except Exception as exc:
                 logger.error("DataQuery SQL generation failed: %s", exc)
@@ -793,6 +1013,7 @@ class DataQueryAgent:
         catalog_text: str,
         provider: Optional[str],
         model: Optional[str],
+        skey_hint: Optional[dict] = None,
     ) -> dict:
         llm = create_llm(
             provider=provider,
@@ -804,6 +1025,28 @@ class DataQueryAgent:
         )
 
         non_null_filters = {k: v for k, v in filters.items() if v not in (None, "")}
+        skey_hint_text = ""
+        if skey_hint:
+            # C11: the date is already resolved to its DIM_DATES skey —
+            # the LLM receives the value and must not pick a pivot
+            # column. Drop the calendar date from the filters unless a
+            # direct-date table is also in play (mixed join), where it
+            # still binds that table's FIC_MIS_DATE.
+            if skey_hint.get("drop_mis_date"):
+                non_null_filters.pop("mis_date", None)
+            non_null_filters["mis_date_skey"] = skey_hint["skey"]
+            skey_hint_text = (
+                "RESOLVED DATE KEY (deterministic — use as-is): table(s) "
+                f"{', '.join(skey_hint['tables'])} have no FIC_MIS_DATE "
+                "column; their MIS date is keyed by N_MIS_DATE_SKEY. The "
+                f"requested date {skey_hint['mis_date']} has already been "
+                f"resolved to N_MIS_DATE_SKEY = {skey_hint['skey']}. "
+                "Filter these tables with N_MIS_DATE_SKEY = :mis_date_skey "
+                "(NUMBER bind — no TO_DATE) and include "
+                f"\"mis_date_skey\": {skey_hint['skey']} in params. Do NOT "
+                "join or subquery DIM_DATES, and do NOT reference "
+                "FIC_MIS_DATE on these tables.\n\n"
+            )
         filters_hint = (
             "Orchestrator-extracted filters (use these as bind variables "
             "where relevant): " + json.dumps(non_null_filters, default=str)
@@ -814,6 +1057,7 @@ class DataQueryAgent:
         prompt = (
             f"Question: {user_query}\n\n"
             f"{filters_hint}\n\n"
+            f"{skey_hint_text}"
             "Available schema (tables → columns):\n"
             f"{catalog_text}\n"
         )
@@ -960,30 +1204,63 @@ class DataQueryAgent:
         predicates = _extract_predicate_columns(where_text)
         non_date_predicates = [
             col for col in predicates
-            if col != "FIC_MIS_DATE" and not col.endswith("_DATE")
+            if col != "FIC_MIS_DATE"
+            and not col.endswith("_DATE")
+            # C11: N_MIS_DATE_SKEY IS the date filter on skey-keyed
+            # tables — a zero result with only that predicate is "no
+            # data that day", same as a bare FIC_MIS_DATE filter.
+            and col != "N_MIS_DATE_SKEY"
         ]
         if not non_date_predicates:
             return False, None
+
+        # C11: skey-keyed fact tables (no FIC_MIS_DATE) arrive here with
+        # the pre-resolved `mis_date_skey` bind. The old hardcoded
+        # FIC_MIS_DATE baseline threw ORA-00904 on them, was caught
+        # non-fatally below, and silently degraded to "not suspicious" —
+        # blind for exactly the class the C11 resolver makes executable.
+        mis_date_skey = params.get("mis_date_skey")
+        use_skey_baseline = (
+            mis_date_skey is not None and "N_MIS_DATE_SKEY" in predicates
+        )
 
         mis_date = (
             params.get("mis_date")
             or params.get("fic_mis_date")
             or params.get("date")
         )
-        if not mis_date:
+        if not use_skey_baseline and not mis_date:
             return False, None
 
         target_table = _extract_primary_from_table(stripped)
         if not target_table:
             return False, None
 
-        baseline_sql = (
-            f"SELECT COUNT(*) FROM {target_table} "
-            "WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
-        )
+        if use_skey_baseline:
+            # Keep the schema qualifier: skey-keyed tables render
+            # schema-qualified (OFSERM.FCT_*) — an unqualified baseline
+            # would resolve in the connected user's default schema and
+            # ORA-00942 straight back into blindness.
+            qualified_table = (
+                _extract_primary_from_table_qualified(stripped)
+                or target_table
+            )
+            baseline_sql = (
+                f"SELECT COUNT(*) FROM {qualified_table} "
+                "WHERE N_MIS_DATE_SKEY = :mis_date_skey"
+            )
+            baseline_params = {"mis_date_skey": mis_date_skey}
+            date_label = f"date key {mis_date_skey}"
+        else:
+            baseline_sql = (
+                f"SELECT COUNT(*) FROM {target_table} "
+                "WHERE FIC_MIS_DATE = TO_DATE(:mis_date, 'YYYY-MM-DD')"
+            )
+            baseline_params = {"mis_date": mis_date}
+            date_label = str(mis_date)
         try:
             baseline_rows = await self._schema_tools.execute_raw(
-                baseline_sql, {"mis_date": mis_date}
+                baseline_sql, baseline_params
             )
             baseline = int(baseline_rows[0][0]) if baseline_rows else 0
         except Exception as exc:
@@ -997,7 +1274,7 @@ class DataQueryAgent:
 
         reason = (
             f"The query returned 0, but table {target_table} has "
-            f"{baseline:,} row(s) at {mis_date}. The filter on "
+            f"{baseline:,} row(s) at {date_label}. The filter on "
             f"{', '.join(non_date_predicates)} may have a data-type "
             "mismatch (CHAR padding, case sensitivity) or a bad value. "
             "Please verify the SQL before trusting this result."
@@ -1494,6 +1771,13 @@ def _extract_primary_from_table(sql: str) -> Optional[str]:
         return None
     raw = match.group(1)
     return raw.split(".")[-1].upper()
+
+
+def _extract_primary_from_table_qualified(sql: str) -> Optional[str]:
+    """Like :func:`_extract_primary_from_table` but preserves a
+    ``SCHEMA.`` qualifier when the SQL carries one."""
+    match = _FROM_PRIMARY_RE.search(sql)
+    return match.group(1).upper() if match else None
 
 
 # ---------------------------------------------------------------------

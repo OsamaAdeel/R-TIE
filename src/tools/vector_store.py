@@ -7,7 +7,6 @@ creation, document storage with embeddings, and KNN similarity search.
 """
 
 import hashlib
-import os
 import struct
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -42,14 +41,7 @@ class VectorStore:
     after that, taking the one-time embedding-call cost.
     """
 
-    # Embedding dimension. Default 1536 = OpenAI text-embedding-3-small.
-    # Override via RTIE_EMBEDDING_DIM env var when using another backend:
-    #   nomic-embed-text / text-embedding-004 / bge-base   -> 768
-    #   bge-large / embed-english-v3.0 / voyage-3          -> 1024
-    #   text-embedding-3-large                             -> 3072
-    # Index schema is dimension-keyed; changing this requires
-    # FT.DROPINDEX idx:rtie_vectors DD so it rebuilds at the new size.
-    EMBEDDING_DIM = int(os.getenv("RTIE_EMBEDDING_DIM", "1536"))
+    EMBEDDING_DIM = 1536
     INDEX_NAME = "idx:rtie_vectors"
     # Phase 3: prefix changed to include schema. Anything keyed under
     # the old `rtie:vec:<module>:<fn>` shape is purged on FLUSHDB +

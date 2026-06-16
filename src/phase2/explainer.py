@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.llm_factory import create_llm
 from src.llm_errors import sanitize_llm_exception
 from src.logger import get_logger
+from src.telemetry import stage_timer
 
 logger = get_logger(__name__, concern="app")
 
@@ -419,7 +420,8 @@ class Phase2Explainer:
             HumanMessage(content=prompt),
         ]
         try:
-            response = await llm.ainvoke(messages)
+            with stage_timer("phase2_explainer_llm"):
+                response = await llm.ainvoke(messages)
         except Exception as exc:
             raise sanitize_llm_exception(
                 exc, context="phase2_invoke_llm"

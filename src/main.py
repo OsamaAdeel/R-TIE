@@ -29,7 +29,7 @@ from pydantic import BaseModel
 # Load .env BEFORE importing modules that read environment at import time.
 # src.llm_factory freezes the per-call-site model map (_RESOLVED_SITE_MODELS)
 # from RTIE_MODEL_OVERRIDES at module-import time; if load_dotenv runs after
-# that import (it used to, ~20 lines below), the override is missing and every
+# that import (it used to, ~90 lines below), the override is missing and every
 # site silently falls back to SITE_MODEL_DEFAULTS (gpt-4o-mini) — which the
 # claude_cli provider then sends to the Claude CLI as an invalid model. The
 # late load_dotenv() below is now redundant but harmless (override=False).
@@ -108,12 +108,7 @@ from src.tools.cache_tools import CacheClient
 from src.tools.vector_store import VectorStore
 from src.monitoring.health import HealthChecker
 from src.middleware.correlation_id import CorrelationIdMiddleware, get_correlation_id
-from src.llm_factory import (
-    get_default_model,
-    get_default_provider,
-    list_available_models,
-    resolve_embedding_config,
-)
+from src.llm_factory import list_available_models, get_default_provider, get_default_model
 from src.llm_errors import (
     LLMSanitizedError,
     build_declined_response,
@@ -323,26 +318,13 @@ async def lifespan(app: FastAPI):
         cache_client=_cache_client,
     )
 
-    # Dynamic provider resolution via llm_factory.get_default_provider —
-    # reads DEFAULT_LLM_PROVIDER env, falls back to API-key auto-detect,
-    # last-resort claude_cli. settings.yaml's description_provider is used
-    # only when NO env config is present (fresh-clone happy path).
-    _has_env_llm_config = bool(
-        os.getenv("DEFAULT_LLM_PROVIDER")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("ANTHROPIC_API_KEY")
-    )
     _indexer = IndexerAgent(
         vector_store=_vector_store,
         embedding_model=os.getenv(
             "EMBEDDING_MODEL",
             embedding_cfg.get("model", "text-embedding-3-small"),
         ),
-        llm_provider=(
-            get_default_provider()
-            if _has_env_llm_config
-            else embedding_cfg.get("description_provider", "openai")
-        ),
+        llm_provider=embedding_cfg.get("description_provider", "openai"),
         llm_model=embedding_cfg.get("description_model", "gpt-4o"),
         temperature=llm_cfg["temperature"],
         max_tokens=llm_cfg["max_tokens"],
@@ -1368,20 +1350,11 @@ async def stream_endpoint(request: QueryRequest, req: Request):
             _ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
             _ssl_ctx.maximum_version = _ssl.TLSVersion.TLSv1_2
             _ssl_ctx.load_default_certs()
-            # Env-driven embedding backend — see llm_factory.resolve_embedding_config.
-            # Same plumbing as src/agents/indexer.py and src/pipeline/logic_graph.py.
-            _emb_cfg = resolve_embedding_config()
-            _emb_kwargs: dict = {
-                "model": _emb_cfg["model"],
-                "http_client": _httpx.Client(verify=_ssl_ctx, timeout=60),
-                "http_async_client": _httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
-            }
-            if _emb_cfg["base_url"]:
-                _emb_kwargs["base_url"] = _emb_cfg["base_url"]
-                _emb_kwargs["api_key"] = _emb_cfg["api_key"]
-                _emb_kwargs["check_embedding_ctx_length"] = False
-                _emb_kwargs["tiktoken_enabled"] = False
-            embeddings = OpenAIEmbeddings(**_emb_kwargs)
+            embeddings = OpenAIEmbeddings(
+                model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+                http_client=_httpx.Client(verify=_ssl_ctx, timeout=60),
+                http_async_client=_httpx.AsyncClient(verify=_ssl_ctx, timeout=60),
+            )
             # W80: prefer the clean anchor (W76 / BI routing); fall back to
             # raw_query — never the classifier blob, which used to be stamped
             # into object_name by classify_query and poisoned the embedding.
@@ -1747,6 +1720,9 @@ async def stream_endpoint(request: QueryRequest, req: Request):
                                 user_query=state["raw_query"],
                                 execution_order=exec_order,
                                 attested_writers=w167_attested_writers,
+                                # B2: function-walkthrough bindings must not
+                                # get column-trace pass-through consolidation.
+                                target_is_function=(g_query_type == "function"),
                             )
                         state["llm_payload"] = payload
                         state["graph_available"] = True
@@ -2335,34 +2311,77 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
         yield f"event: done\ndata: {json_mod.dumps(payload)}\n\n"
         return
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'search', 'message': 'Resolving graph subgraph...'})}\n\n"
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'fetch', 'message': 'Fetching actual Oracle values for each step...'})}\n\n"
+    # W34a parity for Phase 2: stage events fire at the TRUE start of each
+    # sub-stage. trace_value/explain_difference call the on_stage hook as
+    # each sub-stage begins (row fetch, graph+value resolution, explainer);
+    # the hook enqueues and this generator drains the queue while the trace
+    # task runs, so each event reaches the client as the work starts. The
+    # pre-change upfront cluster ("Resolving graph subgraph..." + "Fetching
+    # actual Oracle values...", both emitted BEFORE trace_value was even
+    # called) lied about progress and has been removed — same rationale as
+    # the W34a answer_stream() change for DATA_QUERY.
+    stage_queue: asyncio.Queue = asyncio.Queue()
+
+    def _enqueue_stage(stage_name: str, message: str) -> None:
+        stage_queue.put_nowait((stage_name, message))
+
+    def _stage_frame(stage_name: str, message: str) -> str:
+        return (
+            "event: stage\ndata: "
+            + json_mod.dumps({"stage": stage_name, "message": message})
+            + "\n\n"
+        )
 
     try:
         if query_type == "DIFFERENCE_EXPLANATION":
-            with stage_timer("phase2_explain_difference", correlation_id):
-                result = await _value_tracer.explain_difference(
-                    target_variable=target,
-                    filters=filters,
-                    schema=schema,
-                    bank_value=float(state.get("phase2_expected_value") or 0.0),
-                    system_value=float(state.get("phase2_actual_value") or 0.0),
-                    user_query=user_query,
-                    provider=provider,
-                    model=model,
-                )
+            trace_timer_name = "phase2_explain_difference"
+            trace_coro = _value_tracer.explain_difference(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                bank_value=float(state.get("phase2_expected_value") or 0.0),
+                system_value=float(state.get("phase2_actual_value") or 0.0),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+                on_stage=_enqueue_stage,
+            )
         else:
             # VALUE_TRACE (and anything else mis-routed here) -> single-row trace.
-            with stage_timer("phase2_trace_value", correlation_id):
-                result = await _value_tracer.trace_value(
-                    target_variable=target,
-                    filters=filters,
-                    schema=schema,
-                    expected_value=state.get("phase2_expected_value"),
-                    user_query=user_query,
-                    provider=provider,
-                    model=model,
-                )
+            trace_timer_name = "phase2_trace_value"
+            trace_coro = _value_tracer.trace_value(
+                target_variable=target,
+                filters=filters,
+                schema=schema,
+                expected_value=state.get("phase2_expected_value"),
+                user_query=user_query,
+                provider=provider,
+                model=model,
+                on_stage=_enqueue_stage,
+            )
+        with stage_timer(trace_timer_name, correlation_id):
+            trace_task = asyncio.create_task(trace_coro)
+            try:
+                while not trace_task.done():
+                    try:
+                        stage_name, message = await asyncio.wait_for(
+                            stage_queue.get(), timeout=0.1
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    yield _stage_frame(stage_name, message)
+                # Deliver anything enqueued in the final stretch before the
+                # task completed (events are never dropped, only reordered
+                # ahead of the meta/token frames below).
+                while not stage_queue.empty():
+                    stage_name, message = stage_queue.get_nowait()
+                    yield _stage_frame(stage_name, message)
+                # Raises the task's exception (LLMSanitizedError et al.)
+                # exactly as the pre-change `await` did.
+                result = trace_task.result()
+            finally:
+                if not trace_task.done():
+                    trace_task.cancel()
     except LLMSanitizedError as exc:
         logger.warning(
             "Phase 2 trace sanitized LLM failure | category=%s context=%s "
@@ -2426,7 +2445,10 @@ async def _phase2_stream(state, user_query, correlation_id, provider, model):
     }
     yield f"event: meta\ndata: {json_mod.dumps(meta, default=str)}\n\n"
 
-    yield f"event: stage\ndata: {json_mod.dumps({'stage': 'explain', 'message': 'Generating explanation...'})}\n\n"
+    # (The 'explain' stage event now fires from inside the trace, at the
+    # TRUE start of the explainer LLM call — the post-hoc emit that used to
+    # sit here announced "Generating explanation..." AFTER the explanation
+    # had already been generated.)
 
     # The explanation is already produced + sanity-checked. Stream it as
     # whitespace-preserving chunks so the frontend renders it progressively.

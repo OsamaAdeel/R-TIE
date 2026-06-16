@@ -16,7 +16,7 @@ missing, we stop immediately and tell the user.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.agents.ambiguity import (
     build_identifier_ambiguous_response,
@@ -39,8 +39,23 @@ from src.phase2.origins_catalog import get_eop_override, is_gl_blocked
 from src.phase2.row_inspector import RowInspector
 from src.phase2.trace_router import TraceRouter
 from src.phase2.value_fetcher import ValueFetcher
+from src.telemetry import stage_timer
 
 logger = get_logger(__name__, concern="app")
+
+
+def _safe_emit(
+    on_stage: Optional[Callable[[str, str], None]],
+    stage: str,
+    message: str,
+) -> None:
+    """Invoke the optional stage hook; a hook failure must never break a trace."""
+    if on_stage is None:
+        return
+    try:
+        on_stage(stage, message)
+    except Exception:
+        logger.warning("phase2 on_stage hook failed (non-fatal)", exc_info=True)
 
 
 # Target-table selection for common variables. Additional mappings are
@@ -97,8 +112,16 @@ class ValueTracerAgent:
         user_query: str = "",
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        on_stage: Optional[Callable[[str, str], None]] = None,
     ) -> dict:
         """Run the row-first pipeline end-to-end.
+
+        ``on_stage`` (optional) is called as ``on_stage(stage, message)`` at
+        the TRUE start of each user-visible sub-stage (W34a parity for
+        Phase 2). Stage keys are restricted to the frontend pipeline
+        vocabulary (search/fetch/explain) and emitted in that order so
+        ``buildPipelineSteps`` never steps backward. Hook failures are
+        swallowed — progress reporting must never break a trace.
 
         Returns a dict with:
 
@@ -121,6 +144,10 @@ class ValueTracerAgent:
         # Identifier-ambiguity check — short-circuits before table selection
         # when the target column exists on multiple tables and the user gave
         # only a bare identifier. Pure catalog lookup, no LLM call.
+        _safe_emit(
+            on_stage, "search",
+            "Locating the target table and checking the column catalog...",
+        )
         try:
             tables_to_columns = build_tables_to_columns(self._redis, schema)
         except Exception as exc:
@@ -148,10 +175,15 @@ class ValueTracerAgent:
 
         # ---- Stage 1: determine target table and fetch the row ----
         target_table = self._determine_target_table(target_variable)
-        fetch_result = await self._row_inspector.fetch_target_row(
-            target_table=target_table,
-            filters=filters,
+        _safe_emit(
+            on_stage, "fetch",
+            f"Fetching the target row from Oracle ({target_table})...",
         )
+        with stage_timer("phase2_row_fetch", correlation_id):
+            fetch_result = await self._row_inspector.fetch_target_row(
+                target_table=target_table,
+                filters=filters,
+            )
 
         if fetch_result["status"] == "oracle_error":
             error = fetch_result.get("error") or "oracle error"
@@ -171,11 +203,13 @@ class ValueTracerAgent:
             gl_code = filters.get("gl_code") or filters.get("V_GL_CODE")
             eop_override = get_eop_override(gl_code) if gl_code else None
             gl_blocked = is_gl_blocked(gl_code) if gl_code else False
-            evidence = self._evidence_builder.build_for_missing_row(
-                filters,
-                eop_override=eop_override,
-                gl_blocked=gl_blocked,
-            )
+            with stage_timer("phase2_evidence_build", correlation_id):
+                evidence = self._evidence_builder.build_for_missing_row(
+                    filters,
+                    eop_override=eop_override,
+                    gl_blocked=gl_blocked,
+                )
+            _safe_emit(on_stage, "explain", "Generating explanation...")
             explainer_result = await self._explainer.explain(
                 route="missing_row",
                 evidence=evidence,
@@ -208,29 +242,38 @@ class ValueTracerAgent:
 
         # ---- Stage 4: build evidence ----
         if strategy in ("graph_trace", "partial_graph_trace"):
+            _safe_emit(
+                on_stage, "fetch",
+                "Resolving graph subgraph and fetching actual Oracle "
+                "values for each step...",
+            )
             graph_path, value_chain = await self._resolve_graph_and_values(
                 target_variable=target_variable,
                 filters=filters,
                 schema=schema,
             )
-            evidence = self._evidence_builder.build_for_plsql_trace(
-                row=row,
-                classification=classification,
-                graph_path=graph_path,
-                value_chain=value_chain,
-            )
+            with stage_timer("phase2_evidence_build", correlation_id):
+                evidence = self._evidence_builder.build_for_plsql_trace(
+                    row=row,
+                    classification=classification,
+                    graph_path=graph_path,
+                    value_chain=value_chain,
+                )
         elif strategy == "etl_explain":
-            evidence = self._evidence_builder.build_for_etl_origin(
-                row=row,
-                classification=classification,
-            )
+            with stage_timer("phase2_evidence_build", correlation_id):
+                evidence = self._evidence_builder.build_for_etl_origin(
+                    row=row,
+                    classification=classification,
+                )
         else:
-            evidence = self._evidence_builder.build_for_unknown_origin(
-                row=row,
-                classification=classification,
-            )
+            with stage_timer("phase2_evidence_build", correlation_id):
+                evidence = self._evidence_builder.build_for_unknown_origin(
+                    row=row,
+                    classification=classification,
+                )
 
         # ---- Stage 5: LLM explains ----
+        _safe_emit(on_stage, "explain", "Generating explanation...")
         explainer_result = await self._explainer.explain(
             route=strategy,
             evidence=evidence,
@@ -269,6 +312,7 @@ class ValueTracerAgent:
         user_query: str = "",
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        on_stage: Optional[Callable[[str, str], None]] = None,
     ) -> dict:
         """Handle a DIFFERENCE_EXPLANATION query.
 
@@ -284,6 +328,7 @@ class ValueTracerAgent:
             user_query=user_query,
             provider=provider,
             model=model,
+            on_stage=on_stage,
         )
         result["query_type"] = "DIFFERENCE_EXPLANATION"
         result["bank_value"] = bank_value
@@ -357,31 +402,33 @@ class ValueTracerAgent:
         schema: str,
     ) -> tuple[list[dict], list[dict]]:
         """Resolve the graph path and fetch actual values at each node."""
-        node_ids = resolve_query_to_nodes(
-            query_type="variable",
-            target_variable=target_variable,
-            function_name="",
-            table_name="",
-            schema=schema,
-            redis_client=self._redis,
-        )
-        if not node_ids:
-            return [], []
+        with stage_timer("phase2_subgraph_resolve"):
+            node_ids = resolve_query_to_nodes(
+                query_type="variable",
+                target_variable=target_variable,
+                function_name="",
+                table_name="",
+                schema=schema,
+                redis_client=self._redis,
+            )
+            if not node_ids:
+                return [], []
 
-        nodes = fetch_nodes_by_ids(
-            node_ids, schema, self._redis, include_upstream=True
-        )
-        edges = fetch_relevant_edges(node_ids, schema, self._redis)
-        ordered = determine_execution_order(nodes, edges)
-        main_path = [e for e in ordered if not e.get("is_upstream")]
-        if not main_path:
-            main_path = ordered
+            nodes = fetch_nodes_by_ids(
+                node_ids, schema, self._redis, include_upstream=True
+            )
+            edges = fetch_relevant_edges(node_ids, schema, self._redis)
+            ordered = determine_execution_order(nodes, edges)
+            main_path = [e for e in ordered if not e.get("is_upstream")]
+            if not main_path:
+                main_path = ordered
 
-        value_chain = await self._value_fetcher.fetch_value_chain(
-            graph_path=main_path,
-            filters=filters,
-            target_column=target_variable,
-        )
+        with stage_timer("phase2_value_chain_fetch", steps=len(main_path)):
+            value_chain = await self._value_fetcher.fetch_value_chain(
+                graph_path=main_path,
+                filters=filters,
+                target_column=target_variable,
+            )
         return main_path, value_chain
 
     def _known_functions(self, schema: str) -> set[str]:
