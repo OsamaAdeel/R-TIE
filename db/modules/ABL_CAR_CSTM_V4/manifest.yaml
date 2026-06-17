@@ -1,0 +1,2857 @@
+batch: ABL_CAR_CSTM_V4
+schema: OFSERM
+description: ABL_CAR_CSTM_V4 batch — full PMF Standardized Approach run (18 processes across LOAD/Transform/Rule phases; PL/SQL-backed T2T and CSTM tasks from all sheets per runchart 8.1.2.6.6)
+processes:
+  - name: ABL_CAPITAL_STRUCTURE_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: BNK_SPECIFIC_PROV_WRITE_OFF_AMNT_DATA_POP_IRB
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 2
+        name: INV_SPECIFIC_PROV_WRITE_OFF_AMNT_DATA_POP_IRB
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 3
+        name: SFT_SPECIFIC_PROV_WRITE_OFF_AMNT_DATA_POP_IRB
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 4
+        name: T2T_FSI_CAP_INVESTMENT_STD_ACCT_HEAD_POP
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 5
+        name: T2T_FSI_CAP_BANKING_STD_ACCT_HEAD_POP
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 6
+        name: T2T_FSI_CAP_NETTABLE_POOL_STD_ACCT_HEAD_POP
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 7
+        name: T2T_FCT_CCP_DETAILS_STD_ACCT_HEAD_POP
+        type: T2T
+        source_file: T2T_FCT_CCP_DETAILS_STD_ACCT_HEAD_POP.sql
+        active: true
+      - order: 8
+        name: SEC_PRE_CRM_RWA_EXP_STD_ACCT_HEAD_DATA_POP_IRB
+        type: T2T
+        source_file: SEC_PRE_CRM_RWA_EXP_STD_ACCT_HEAD_DATA_POP_IRB.sql
+        active: true
+      - order: 9
+        name: SEC_PRE_CRM_RWA_EXP_STD_ACCT_HEAD_DATA_POP_STD
+        type: T2T
+        source_file: SEC_PRE_CRM_RWA_EXP_STD_ACCT_HEAD_DATA_POP_STD.sql
+        active: true
+      - order: 10
+        name: INV_DRV_DEDUCTION_CALC_ACCT_HEAD_DATA_POP
+        type: T2T
+        source_file: INV_DRV_DEDUCTION_CALC_ACCT_HEAD_DATA_POP.sql
+        active: true
+      - order: 11
+        name: SEC_RWA_EXP_STD_ACCT_HEAD_DATA_POP_IRB
+        type: T2T
+        source_file: SEC_RWA_EXP_STD_ACCT_HEAD_DATA_POP_IRB.sql
+        active: true
+      - order: 12
+        name: SEC_RWA_EXP_STD_ACCT_HEAD_DATA_POP_STD
+        type: T2T
+        source_file: SEC_RWA_EXP_STD_ACCT_HEAD_DATA_POP_STD.sql
+        active: true
+      - order: 13
+        name: PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP
+        type: T2T
+        source_file: PREV_QTR_CET1_STANDARD_ACCT_HEAD_DATA_POP.sql
+        active: true
+      - order: 14
+        name: T2T_FSI_CAP_EXP_STD_ACCT_HEAD_DATA_POP
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 15
+        name: T2T_FSI_GL_DATA_STD_ACCT_HEAD_RWA_DATA_POP
+        type: T2T
+        source_file: T2T_FSI_GL_DATA_STD_ACCT_HEAD_RWA_DATA_POP.sql
+        active: true
+      - order: 16
+        name: T2T_ACCT_LEVEL_GEN_PROV_STD_ACCT_HEAD_POP
+        type: T2T
+        source_file: T2T_ACCT_LEVEL_GEN_PROV_STD_ACCT_HEAD_POP.sql
+        active: true
+    sub_processes:
+      - name: CR_INPUT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: ABL_CAP_MITIGANT_DATA_POPULATION
+            type: T2T
+            source_file: ABL_CAP_MITIGANT_DATA_POPULATION.sql
+            active: true
+          - order: 2
+            name: Allocation_Rank_Assignment
+            type: TYPE3
+            source_file: Allocation_Rank_Assignment.sql
+            active: true
+      - name: RW_MAP_SETUP
+        tasks:
+          - order: 1
+            name: ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM
+            type: CSTM_DT
+            source_file: ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM.sql
+            active: true
+      - name: OPS_RISK_INPUT_POPULATION
+        tasks:
+          - order: 1
+            name: OPS_RISK_DATA_POPULATION_CSTM
+            type: CSTM_T2T
+            source_file: OPS_RISK_DATA_POPULATION_CSTM.sql
+            active: true
+      - name: CONSOLIDATION_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: Cap_Consl_Effective_Shareholding_Percent_for_an_Entity_Based_on_Consolidation_Approach
+            type: TYPE3
+            source_file: Cap_Consl_Effective_Shareholding_Percent_for_an_Entity_Based_on_Consolidation_Approach.sql
+            active: true
+          - order: 2
+            name: Cap_Consl_Non_Regulatory_Entity_Significant_Investment_Identification
+            type: TYPE3
+            source_file: Cap_Consl_Non_Regulatory_Entity_Significant_Investment_Identification.sql
+            active: true
+          - order: 3
+            name: PARTY_SHARE_HOLD_PERCENT_POP
+            type: T2T
+            source_file: PARTY_SHARE_HOLD_PERCENT_POP.sql
+            active: true
+          - order: 4
+            name: Party_Shareholding_Percent_Calculation_for_Reporting_Entity
+            type: TYPE3
+            source_file: Party_Shareholding_Percent_Calculation_for_Reporting_Entity.sql
+            active: true
+          - order: 5
+            name: REP_BANK_PARTY_SHARE_HOLD_PERCENT_CREATION
+            type: T2T
+            source_file: REP_BANK_PARTY_SHARE_HOLD_PERCENT_CREATION.sql
+            active: true
+          - order: 6
+            name: Significant_Investment_in_Party_for_Reporting_Bank_Identification
+            type: TYPE3
+            source_file: Significant_Investment_in_Party_for_Reporting_Bank_Identification.sql
+            active: true
+          - order: 7
+            name: Third_Party_Minority_Holding_Indicator_Assignment_under_Capital_Consolidation
+            type: TYPE3
+            source_file: Third_Party_Minority_Holding_Indicator_Assignment_under_Capital_Consolidation.sql
+            active: true
+          - order: 8
+            name: ENTITY_INFO_HIER_DATA_POP
+            type: T2T
+            source_file: ENTITY_INFO_HIER_DATA_POP.sql
+            active: true
+          - order: 9
+            name: Capital_Head_Attribute_Shareholding_Percent_Multiplication
+            type: TYPE3
+            source_file: Capital_Head_Attribute_Shareholding_Percent_Multiplication.sql
+            active: true
+  - name: ABL_CAPITAL_STRUCTURE_DATA_PROCESSING
+    sub_processes:
+      - name: MINORITY_INTEREST_CALCULATIONS
+        tasks:
+          - order: 1
+            name: MINORITY_INTEREST_DATA_POP
+            type: T2T
+            source_file: MINORITY_INTEREST_DATA_POP.sql
+            active: true
+          - order: 2
+            name: CS_Minority_Interest_Minimum_Required_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Minimum_Required_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Minimum Required Capital"
+          - order: 3
+            name: CS_Minority_Interest_Surplus_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Surplus_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Surplus Capital"
+          - order: 4
+            name: CS_Minority_Interest_Third_party_contribution_in_Surplus
+            type: TYPE3
+            source_file: CS_Minority_Interest_Third_party_contribution_in_Surplus.sql
+            active: true
+            description: "CS - Minority Interest - Third party contribution in Surplus"
+          - order: 5
+            name: CS_Minority_Interest_Third_party_contribution_in_Surplus_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Third_party_contribution_in_Surplus_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Third party contribution in Surplus Capital"
+      - name: ABL_CAPITAL_STANDARD_ACCOUNTING_POPULATION
+        tasks:
+          - order: 1
+            name: CAPITAL_STD_ACCT_HEAD_POP
+            type: T2T
+            source_file: CAPITAL_STD_ACCT_HEAD_POP.sql
+            active: true
+          - order: 2
+            name: CAPITAL_SETUP_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: CAPITAL_SETUP_STANDARD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CAPITAL_SOURCE_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+          - order: 4
+            name: ABL_CAPITAL_SOURCE_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: ABL_CAPITAL_SOURCE_STANDARD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 5
+            name: MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: MKT_RISK_DEDUCTION_CALC_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 6
+            name: INTERNAL_TRANSACTIONS_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: INTERNAL_TRANSACTIONS_STANDARD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 7
+            name: FSI_STD_CAPITAL_ACCT_HEAD_POP
+            type: T2T
+            source_file: FSI_STD_CAPITAL_ACCT_HEAD_POP.sql
+            active: true
+          - order: 8
+            name: GL_CAPITAL_ACCT_HEAD_POPULATION
+            type: T2T
+            source_file: GL_CAPITAL_ACCT_HEAD_POPULATION.sql
+            active: true
+          - order: 9
+            name: T2T_BNK_DEDUCTION_STD_ACCT_HEAD_POP
+            type: T2T
+            source_file: T2T_BNK_DEDUCTION_STD_ACCT_HEAD_POP.sql
+            active: true
+      - name: STANDARD_ACCOUNT_CAP_COMP_GROUP_ASSIGNMENT
+        tasks:
+          - order: 1
+            name: CS_Standard_Account_Head_Capital_Comp_Group_Assignment
+            type: TYPE3
+            source_file: CS_Standard_Account_Head_Capital_Comp_Group_Assignment.sql
+            active: true
+            description: "CS - Standard Account Head Capital Comp Group Assignment"
+      - name: ABL_REGULATORY_ADJUSTMENTS_DEDUCTION_CALCULATION
+        tasks:
+          - order: 1
+            name: CS_Goodwill_Calculation
+            type: TYPE3
+            source_file: CS_Goodwill_Calculation.sql
+            active: true
+            description: "CS - Goodwill Calculation"
+          - order: 2
+            name: CS_Goodwill_Net_of_DTL_Calculation
+            type: TYPE3
+            source_file: CS_Goodwill_Net_of_DTL_Calculation.sql
+            active: true
+            description: "CS - Goodwill Net of DTL Calculation"
+          - order: 3
+            name: CS_Other_Intangible_Assets_Net_of_DTL_Calculation
+            type: TYPE3
+            source_file: CS_Other_Intangible_Assets_Net_of_DTL_Calculation.sql
+            active: true
+            description: "CS - Other Intangible Assets Net of DTL Calculation"
+          - order: 4
+            name: CS_Goodwill_and_Other_Intangible_Assets_Net_of_DTL_Calculation
+            type: TYPE3
+            source_file: CS_Goodwill_and_Other_Intangible_Assets_Net_of_DTL_Calculation.sql
+            active: true
+            description: "CS - Goodwill and Other Intangible Assets Net of DTL Calculation"
+          - order: 5
+            name: CS_Deferred_Tax_Asset_Net_of_DTL_Calculation
+            type: TYPE3
+            source_file: CS_Deferred_Tax_Asset_Net_of_DTL_Calculation.sql
+            active: true
+            description: "CS - Deferred Tax Asset Net of DTL Calculation"
+          - order: 6
+            name: CS_Defined_Pension_Fund_Asset_Net_of_DTL_Calculation
+            type: TYPE3
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "CS - Defined Pension Fund Asset Net of DTL Calculation"
+          - order: 7
+            name: ABL_Def_Pension_Fund_Asset_Net_DTL
+            type: CSTM_DT
+            source_file: ABL_Def_Pension_Fund_Asset_Net_DTL.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 8
+            name: CS_Net_Defined_Pension_Fund_Calculation
+            type: TYPE3
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "CS - Net Defined Pension Fund Calculation"
+          - order: 9
+            name: ABL_Net_Def_Pens_Fnd_Calc
+            type: CSTM_DT
+            source_file: ABL_Net_Def_Pens_Fnd_Calc.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 10
+            name: ABL_Stop
+            type: CSTM_DT
+            source_file: ABL_Stop.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 11
+            name: CS_Net_Cash_Flow_Hedge_Reserve_Calculation
+            type: TYPE3
+            source_file: CS_Net_Cash_Flow_Hedge_Reserve_Calculation.sql
+            active: true
+            description: "CS - Net Cash Flow Hedge Reserve Calculation"
+          - order: 12
+            name: CS_Mortgage_Servicing_Rights_Net_of_DTL_Calculation
+            type: TYPE3
+            source_file: CS_Mortgage_Servicing_Rights_Net_of_DTL_Calculation.sql
+            active: true
+            description: "CS - Mortgage Servicing Rights Net of DTL Calculation"
+          - order: 13
+            name: CS_Deferred_Tax_Asset_Related_to_Temporary_Differences_Calculation
+            type: TYPE3
+            source_file: CS_Deferred_Tax_Asset_Related_to_Temporary_Differences_Calculation.sql
+            active: true
+            description: "CS - Deferred Tax Asset Related to Temporary Differences Calculation"
+      - name: ABL_PROVISION_CALCULATION
+        tasks:
+          - order: 1
+            name: CS_General_Provision_for_IRB
+            type: TYPE3
+            source_file: CS_General_Provision_for_IRB.sql
+            active: true
+            description: "CS - General Provision for IRB"
+          - order: 2
+            name: CS_Total_Provision_for_IRB
+            type: TYPE3
+            source_file: CS_Total_Provision_for_IRB.sql
+            active: true
+            description: "CS - Total Provision for IRB"
+          - order: 3
+            name: CS_EL_Greater_than_Provisions_IRB
+            type: TYPE3
+            source_file: CS_EL_Greater_than_Provisions_IRB.sql
+            active: true
+            description: "CS - EL Greater than Provisions - IRB"
+          - order: 4
+            name: CS_Excess_of_Total_Eligible_Provision_part_of_Gross_Tier_2
+            type: TYPE3
+            source_file: CS_Excess_of_Total_Eligible_Provision_part_of_Gross_Tier_2.sql
+            active: true
+            description: "CS - Excess of Total Eligible Provision part of Gross Tier 2"
+          - order: 5
+            name: CS_General_Provision_for_Standardized_Approach
+            type: TYPE3
+            source_file: CS_General_Provision_for_Standardized_Approach.sql
+            active: true
+            description: "CS - General Provision for Standardized Approach"
+          - order: 6
+            name: CS_Latent_Revaluation_Reserve
+            type: TYPE3
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "CS - Latent Revaluation Reserve"
+          - order: 7
+            name: CS_Latent_Revaluation_Reserve
+            type: CSTM_DT
+            source_file: CS_Latent_Revaluation_Reserve.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Latent Revaluation Reserve"
+      - name: GROSS_CAPITAL_CALCULATION
+        tasks:
+          - order: 1
+            name: CS_Gross_Common_Equity_Tier1_Capital
+            type: TYPE3
+            source_file: CS_Gross_Common_Equity_Tier1_Capital.sql
+            active: true
+            description: "CS - Gross Common Equity Tier1 Capital"
+          - order: 2
+            name: CS_Gross_Additional_Tier1_Capital
+            type: TYPE3
+            source_file: CS_Gross_Additional_Tier1_Capital.sql
+            active: true
+            description: "CS - Gross Additional Tier1 Capital"
+          - order: 3
+            name: CS_Gross_Tier2_Capital
+            type: TYPE3
+            source_file: CS_Gross_Tier2_Capital.sql
+            active: true
+            description: "CS - Gross Tier2 Capital"
+      - name: PHASE_IN_DEDUCTION_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: MINORITY_INTEREST_PHASE_IN_TREATMENT_DATA_POP
+            type: T2T
+            source_file: MINORITY_INTEREST_PHASE_IN_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 2
+            name: CALC_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP
+            type: T2T
+            source_file: CALC_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CAPITAL_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP
+            type: T2T
+            source_file: CAPITAL_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 4
+            name: STD_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP
+            type: T2T
+            source_file: STD_ACCT_HEAD_PHASE_IN_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 5
+            name: OTHER_DEDUCTIONS_PHASE_IN_TREATMENT_DATA_POP
+            type: T2T
+            source_file: OTHER_DEDUCTIONS_PHASE_IN_TREATMENT_DATA_POP.sql
+            active: true
+      - name: PHASE_IN_DEDUCTION_CALCULATIONS
+        tasks:
+          - order: 1
+            name: CS_Phase_In_and_Balance_Capital_Component_Group_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_and_Balance_Capital_Component_Group_Assignment.sql
+            active: true
+            description: "CS - Phase In and Balance Capital Component Group Assignment"
+          - order: 2
+            name: CS_Phase_In_Deduction_Percentage_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Deduction_Percentage_Assignment.sql
+            active: true
+            description: "CS - Phase In Deduction Percentage Assignment"
+          - order: 3
+            name: CS_Phase_In_Treatment_RW_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_RW_Assignment.sql
+            active: true
+            description: "CS - Phase In Treatment RW Assignment"
+          - order: 4
+            name: CS_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Phase In Deduction Amount"
+          - order: 5
+            name: CS_Regulatory_Adjustments_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Regulatory_Adjustments_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Regulatory Adjustments Phase In Deduction Amount"
+          - order: 6
+            name: CS_Regulatory_Investments_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Regulatory_Investments_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Regulatory Investments Phase In Deduction Amount"
+      - name: ABL_NET_CET_POST_MINORITY_INTEREST_AND_REGULATORY_ADJUSTMENTS
+        tasks:
+          - order: 1
+            name: MINORITY_INTEREST_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: MINORITY_INTEREST_STANDARD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 2
+            name: REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: REGULATORY_ADJUSTMENT_STANDARD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 3
+            name: REGULATORY_INVST_DEDUCTION_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: REGULATORY_INVST_DEDUCTION_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 4
+            name: ABL_RECIPR_CRH_HEAD_CSTM
+            type: CSTM_DT
+            source_file: ABL_RECIPR_CRH_HEAD_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 5
+            name: ABL_Deduction_RWA_Cap_Struct
+            type: CSTM_DT
+            source_file: ABL_Deduction_RWA_Cap_Struct.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 6
+            name: CS_Net_CET1_Capital_Post_Minority_Interest_Adjustment
+            type: TYPE3
+            source_file: CS_Net_CET1_Capital_Post_Minority_Interest_Adjustment.sql
+            active: true
+            description: "CS - Net CET1 Capital Post Minority Interest Adjustment"
+          - order: 7
+            name: ABL_POST_REGADJCET1_CSTM
+            type: CSTM_DT
+            source_file: ABL_POST_REGADJCET1_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 8
+            name: ABL_TFC_DED_CET1_CSTM
+            type: CSTM_DT
+            source_file: ABL_TFC_DED_CET1_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 9
+            name: CS_Net_CET1_Capital_post_Regulatory_Adjustment
+            type: TYPE3
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "CS - Net CET1 Capital post Regulatory Adjustment"
+      - name: ABL_INSIGNIFICANT_INVESTMENT_IN_ENTITIES_OUTSIDE_REG_CONSOLIDATION_PROCESSING
+        tasks:
+          - order: 1
+            name: INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP
+            type: T2T
+            source_file: INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 2
+            name: ABL_INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP
+            type: CSTM_T2T
+            source_file: ABL_INSIGNFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Total_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Total_Deduction_Amount.sql
+            active: true
+            description: "CS - Insignificant Invst in Non Regulatory Consl Entity Total Deduction Amount"
+          - order: 4
+            name: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Amount.sql
+            active: true
+            description: "CS - Insignificant Invst in Non Regulatory Consl Entity Deduction Amount"
+          - order: 5
+            name: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Percentage
+            type: TYPE3
+            source_file: CS_Insignificant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Percentage.sql
+            active: true
+            description: "CS - Insignificant Invst in Non Regulatory Consl Entity Deduction Percentage"
+          - order: 6
+            name: CS_Phase_In_Treatment_Insignificant_Invst_Deduction_Amount_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Insignificant_Invst_Deduction_Amount_Assignment.sql
+            active: true
+            description: "CS - Phase In Treatment - Insignificant Invst Deduction Amount Assignment"
+          - order: 7
+            name: CS_Insignificant_Invst_in_Non_Regulatory_Entity_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Insignificant_Invst_in_Non_Regulatory_Entity_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Insignificant Invst in Non Regulatory Entity Phase In Deduction Amount"
+          - order: 8
+            name: INSIGNFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: INSIGNFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 9
+            name: CS_Net_CET1_Capital_post_deduction_of_Insignificant_Investment_in_Non_Reg_Consl_Entities
+            type: TYPE3
+            source_file: CS_Net_CET1_Capital_post_deduction_of_Insignificant_Investment_in_Non_Reg_Consl_Entities.sql
+            active: true
+            description: "CS - Net CET1 Capital post deduction of Insignificant Investment in Non Reg Consl Entities"
+      - name: ABL_SIGNIFICANT_INVESTMENT_IN_ENTITIES_OUTSIDE_REG_CONSOLIDATION_PROCESSING
+        tasks:
+          - order: 1
+            name: SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP
+            type: T2T
+            source_file: SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 2
+            name: ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP
+            type: CSTM_T2T
+            source_file: ABL_SIGNIFCNT_INVSTMNT_IN_NON_REG_CONSL_ENTITY_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Total_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Total_Deduction_Amount.sql
+            active: true
+            description: "CS - Significant Invst in Non Regulatory Consl Entity Total Deduction Amount"
+          - order: 4
+            name: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Amount.sql
+            active: true
+            description: "CS - Significant Invst in Non Regulatory Consl Entity Deduction Amount"
+          - order: 5
+            name: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Percentage
+            type: TYPE3
+            source_file: CS_Significant_Invst_in_Non_Regulatory_Consl_Entity_Deduction_Percentage.sql
+            active: true
+            description: "CS - Significant Invst in Non Regulatory Consl Entity - Deduction Percentage"
+          - order: 6
+            name: CS_Phase_In_Treatment_Significant_Invst_Deduction_Amount_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Significant_Invst_Deduction_Amount_Assignment.sql
+            active: true
+            description: "CS - Phase In Treatment - Significant Invst Deduction Amount Assignment"
+          - order: 7
+            name: CS_Significant_Invst_in_Non_Regulatory_Entity_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Significant_Invst_in_Non_Regulatory_Entity_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Significant Invst in Non Regulatory Entity Phase In Deduction Amount"
+          - order: 8
+            name: SIGNIFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: SIGNIFCNT_INVST_DED_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 9
+            name: CS_Net_CET1_Capital_post_deduction_of_Significant_Investment_in_Non_Reg_Consl_Entities
+            type: TYPE3
+            source_file: CS_Net_CET1_Capital_post_deduction_of_Significant_Investment_in_Non_Reg_Consl_Entities.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Net CET1 Capital post deduction of Significant Investment in Non Reg Consl Entities"
+      - name: THRESHOLD_TREATMENT_CALCULATIONS
+        tasks:
+          - order: 1
+            name: SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP
+            type: T2T
+            source_file: SIGNIFICANT_INVST_THRESHOLD_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 2
+            name: STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP
+            type: T2T
+            source_file: STD_ACCT_HEAD_THRESHOLD_TREATMENT_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CS_Threshold_Treatment_Net_CET1_post_ded_of_Insig_Invest_in_Non_Reg_Consl_Entity_and_Indirect_Exp
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Net_CET1_post_ded_of_Insig_Invest_in_Non_Reg_Consl_Entity_and_Indirect_Exp.sql
+            active: true
+            description: "CS -Threshold Treatment - Net CET1 post ded of Insig Invest in Non Reg Consl Entity and Indirect Exp"
+          - order: 4
+            name: CS_Threshold_Treatment_Individual_Threshold_Assignment
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Individual_Threshold_Assignment.sql
+            active: true
+            description: "CS - Threshold Treatment - Individual Threshold Assignment"
+          - order: 5
+            name: CS_Threshold_Treatment_Amount_below_Individual_threshold_calculation
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Amount_below_Individual_threshold_calculation.sql
+            active: true
+            description: "CS - Threshold Treatment - Amount below Individual threshold calculation"
+          - order: 6
+            name: CS_Threshold_Treatment_Amount_above_Individual_threshold_calculation
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Amount_above_Individual_threshold_calculation.sql
+            active: true
+            description: "CS - Threshold Treatment - Amount above Individual threshold calculation"
+          - order: 7
+            name: CS_Phase_In_Treatment_Individual_Threshold_Deduction_Amount_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Individual_Threshold_Deduction_Amount_Assignment.sql
+            active: true
+            description: "CS - Phase In Treatment - Individual Threshold Deduction Amount Assignment"
+          - order: 8
+            name: CS_Phase_In_Treatment_Individual_Threshold_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Individual_Threshold_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Phase In Treatment - Individual Threshold Phase In Deduction Amount"
+          - order: 9
+            name: THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: THRESHOLD_DEDUCTION_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 10
+            name: Standard_Account_Head_Amount_Population_for_Individual_Threshold_Deduction
+            type: TYPE3
+            source_file: Standard_Account_Head_Amount_Population_for_Individual_Threshold_Deduction.sql
+            active: true
+            description: "Standard Account Head Amount Population for Individual Threshold Deduction"
+          - order: 11
+            name: CS_Net_CET1_post_Deduction_above_Individual_Threshold_Limit
+            type: TYPE3
+            source_file: CS_Net_CET1_post_Deduction_above_Individual_Threshold_Limit.sql
+            active: true
+            description: "CS - Net CET1 post Deduction above Individual Threshold Limit"
+          - order: 12
+            name: CS_Threshold_Treatment_Net_CET1_post_Deduction_above_Threshold_Limit
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Net_CET1_post_Deduction_above_Threshold_Limit.sql
+            active: true
+            description: "CS - Threshold Treatment - Net CET1 post Deduction above Threshold Limit"
+          - order: 13
+            name: CS_Threshold_Treatment_Aggregate_Threshold_Assignment
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Aggregate_Threshold_Assignment.sql
+            active: true
+            description: "CS - Threshold Treatment - Aggregate Threshold Assignment"
+          - order: 14
+            name: CS_Threshold_Treatment_Amount_below_Aggregate_threshold_calculation
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Amount_below_Aggregate_threshold_calculation.sql
+            active: true
+            description: "CS - Threshold Treatment - Amount below Aggregate threshold calculation"
+          - order: 15
+            name: CS_Threshold_Treatment_Amount_above_Aggregate_threshold_calculation
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Amount_above_Aggregate_threshold_calculation.sql
+            active: true
+            description: "CS - Threshold Treatment - Amount above Aggregate threshold calculation"
+          - order: 16
+            name: CS_Phase_In_Treatment_Aggregate_Threshold_Deduction_Amount_Assignment
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Aggregate_Threshold_Deduction_Amount_Assignment.sql
+            active: true
+            description: "CS - Phase In Treatment - Aggregate Threshold Deduction Amount Assignment"
+          - order: 17
+            name: CS_Phase_In_Treatment_Aggregate_Threshold_Phase_In_Deduction_Amount
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Aggregate_Threshold_Phase_In_Deduction_Amount.sql
+            active: true
+            description: "CS - Phase In Treatment - Aggregate Threshold Phase In Deduction Amount"
+          - order: 18
+            name: AGGREGATE_THRESHOLD_DED_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: AGGREGATE_THRESHOLD_DED_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 19
+            name: CS_Threshold_Treatment_Calculation_of_Amount_to_be_Risk_Weighted
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Calculation_of_Amount_to_be_Risk_Weighted.sql
+            active: true
+            description: "CS - Threshold Treatment - Calculation of Amount to be Risk Weighted"
+          - order: 20
+            name: CS_Threshold_Treatment_Risk_Weight_Assignment
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Risk_Weight_Assignment.sql
+            active: true
+            description: "CS - Threshold Treatment - Risk Weight Assignment"
+          - order: 21
+            name: CS_Threshold_Treatment_Risk_Weighted_Asset_Calculation
+            type: TYPE3
+            source_file: CS_Threshold_Treatment_Risk_Weighted_Asset_Calculation.sql
+            active: true
+            description: "CS - Threshold Treatment - Risk Weighted Asset Calculation"
+      - name: POST_PHASE_IN_TREATMENT_CALCULATIONS
+        tasks:
+          - order: 1
+            name: CS_Phase_In_Treatment_Balance_Phase_In_Amount
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_Balance_Phase_In_Amount.sql
+            active: true
+            description: "CS - Phase In Treatment - Balance Phase In Amount"
+          - order: 2
+            name: POST_PHASE_IN_AMOUNT_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: POST_PHASE_IN_AMOUNT_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 3
+            name: CS_Phase_In_Treatment_RWA_Calculation
+            type: TYPE3
+            source_file: CS_Phase_In_Treatment_RWA_Calculation.sql
+            active: true
+            description: "CS - Phase In Treatment - RWA Calculation"
+      - name: NET_CAPITAL_CALCULATIONS
+        tasks:
+          - order: 1
+            name: CS_Net_AT1_Post_Minority_Interest_Adjustment
+            type: TYPE3
+            source_file: CS_Net_AT1_Post_Minority_Interest_Adjustment.sql
+            active: true
+            description: "CS - Net AT1 Post Minority Interest Adjustment"
+          - order: 2
+            name: CS_Shortfall_in_AT1_Post_Minority_Interest_Adjustment
+            type: TYPE3
+            source_file: CS_Shortfall_in_AT1_Post_Minority_Interest_Adjustment.sql
+            active: true
+            description: "CS - Shortfall in AT1 Post Minority Interest Adjustment"
+          - order: 3
+            name: CS_Net_AT1_Capital_Post_Regulatory_Adjustment
+            type: TYPE3
+            source_file: CS_Net_AT1_Capital_Post_Regulatory_Adjustment.sql
+            active: true
+            description: "CS - Net AT1 Capital Post Regulatory Adjustment"
+          - order: 4
+            name: CS_Shortfall_in_AT1_Post_Regulatory_Adjustment
+            type: TYPE3
+            source_file: CS_Shortfall_in_AT1_Post_Regulatory_Adjustment.sql
+            active: true
+            description: "CS - Shortfall in AT1 Post Regulatory Adjustment"
+          - order: 5
+            name: CS_Net_Tier_2_Capital_Calculation
+            type: TYPE3
+            source_file: CS_Net_Tier_2_Capital_Calculation.sql
+            active: true
+            description: "CS - Net Tier 2 Capital Calculation"
+          - order: 6
+            name: CS_Shortfall_in_Tier_2_Capital
+            type: TYPE3
+            source_file: CS_Shortfall_in_Tier_2_Capital.sql
+            active: true
+            description: "CS - Shortfall in Tier 2 Capital"
+          - order: 7
+            name: CS_Net_Additional_Tier_1_Capital_Calculation
+            type: TYPE3
+            source_file: CS_Net_Additional_Tier_1_Capital_Calculation.sql
+            active: true
+            description: "CS - Net Additional Tier 1 Capital Calculation"
+          - order: 8
+            name: CS_Shortfall_in_Additional_Tier_1_Capital
+            type: TYPE3
+            source_file: CS_Shortfall_in_Additional_Tier_1_Capital.sql
+            active: true
+            description: "CS - Shortfall in Additional Tier 1 Capital"
+          - order: 9
+            name: CS_Net_CET1_Capital_post_adjustment_due_to_insufficient_AT1_Capital
+            type: TYPE3
+            source_file: CS_Net_CET1_Capital_post_adjustment_due_to_insufficient_AT1_Capital.sql
+            active: true
+            description: "CS - Net CET1 Capital post adjustment due to insufficient AT1 Capital"
+          - order: 10
+            name: CS_Net_Common_Equity_Tier_1_Capital
+            type: TYPE3
+            source_file: CS_Net_Common_Equity_Tier_1_Capital.sql
+            active: true
+            description: "CS - Net Common Equity Tier 1 Capital"
+          - order: 11
+            name: CS_Net_Tier_1_Capital
+            type: TYPE3
+            source_file: CS_Net_Tier_1_Capital.sql
+            active: true
+            description: "CS - Net Tier 1 Capital"
+      - name: CAPITAL_REPORTING_CALCULATIONS
+        tasks:
+          - order: 1
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party"
+          - order: 2
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Common_Equity_T1_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Common_Equity_T1_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party included in Common Equity T1 Capital"
+          - order: 3
+            name: CS_Significant_Investment_amount_in_Common_Stock_above_the_15_pct_Aggregate_Threshold_Limit
+            type: TYPE3
+            source_file: CS_Significant_Investment_amount_in_Common_Stock_above_the_15_pct_Aggregate_Threshold_Limit.sql
+            active: true
+            description: "CS - Significant Investment amount in Common Stock above the 15 pct Aggregate Threshold Limit"
+          - order: 4
+            name: CS_MSR_above_the_15_percent_Aggregate_Threshold_Limit
+            type: TYPE3
+            source_file: CS_MSR_above_the_15_percent_Aggregate_Threshold_Limit.sql
+            active: true
+            description: "CS - MSR above the 15 percent Aggregate Threshold Limit"
+          - order: 5
+            name: CS_DTA_related_to_Temporary_Differences_above_the_15_percent_Aggregate_Threshold_Limit
+            type: TYPE3
+            source_file: CS_DTA_related_to_Temporary_Differences_above_the_15_percent_Aggregate_Threshold_Limit.sql
+            active: true
+            description: "CS - DTA related to Temporary Differences above the 15 percent Aggregate Threshold Limit"
+          - order: 6
+            name: CS_Capital_Investments_in_Significant_entities_in_the_form_of_common_stock_that_are_not_deducted
+            type: TYPE3
+            source_file: CS_Capital_Investments_in_Significant_entities_in_the_form_of_common_stock_that_are_not_deducted.sql
+            active: true
+            description: "CS - Capital Investments in Significant entities, in the form of common stock , that are not deducted"
+          - order: 7
+            name: CS_MSR_net_of_DTL_that_are_not_deducted
+            type: TYPE3
+            source_file: CS_MSR_net_of_DTL_that_are_not_deducted.sql
+            active: true
+            description: "CS - MSR net of DTL that are not deducted"
+          - order: 8
+            name: CS_DTA_arising_from_temporary_differences_net_of_DTL_that_are_not_deducted
+            type: TYPE3
+            source_file: CS_DTA_arising_from_temporary_differences_net_of_DTL_that_are_not_deducted.sql
+            active: true
+            description: "CS - DTA arising from temporary differences net of DTL that are not deducted"
+          - order: 9
+            name: CS_Total_Investments_in_Private_Equity_Investment_Firm_AT1
+            type: TYPE3
+            source_file: CS_Total_Investments_in_Private_Equity_Investment_Firm_AT1.sql
+            active: true
+            description: "CS - Total Investments in Private Equity Investment Firm - AT1"
+          - order: 10
+            name: CS_Total_Investments_in_Private_Equity_Investment_Firm_CET1
+            type: TYPE3
+            source_file: CS_Total_Investments_in_Private_Equity_Investment_Firm_CET1.sql
+            active: true
+            description: "CS - Total Investments in Private Equity Investment Firm - CET1"
+          - order: 11
+            name: SECURITIZED_DEDUCTIONS_STD_ACCT_HEAD_POP
+            type: T2T
+            source_file: SECURITIZED_DEDUCTIONS_STD_ACCT_HEAD_POP.sql
+            active: true
+          - order: 12
+            name: RESECURITIZED_DEDUCTIONS_STD_ACCT_HEAD_POP
+            type: T2T
+            source_file: RESECURITIZED_DEDUCTIONS_STD_ACCT_HEAD_POP.sql
+            active: true
+          - order: 13
+            name: CS_Minority_Interest_T1_Capital_attributable_to_Third_Party
+            type: TYPE3
+            source_file: CS_Minority_Interest_T1_Capital_attributable_to_Third_Party.sql
+            active: true
+            description: "CS - Minority Interest - T1 Capital attributable to Third Party"
+          - order: 14
+            name: CS_Minority_Interest_T1_Capital_Surplus_attributable_to_Third_Party
+            type: TYPE3
+            source_file: CS_Minority_Interest_T1_Capital_Surplus_attributable_to_Third_Party.sql
+            active: true
+            description: "CS - Minority Interest - T1 Capital Surplus attributable to Third Party"
+          - order: 15
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Tier_1_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Tier_1_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party included in Tier 1 Capital"
+          - order: 16
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_AT1_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_AT1_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party included in AT1 Capital"
+          - order: 17
+            name: CS_Minority_Interest_Total_Capital_attributable_to_Third_Party
+            type: TYPE3
+            source_file: CS_Minority_Interest_Total_Capital_attributable_to_Third_Party.sql
+            active: true
+            description: "CS - Minority Interest - Total Capital attributable to Third Party"
+          - order: 18
+            name: CS_Minority_Interest_Total_Capital_Surplus_attributable_to_Third_Party
+            type: TYPE3
+            source_file: CS_Minority_Interest_Total_Capital_Surplus_attributable_to_Third_Party.sql
+            active: true
+            description: "CS - Minority Interest - Total Capital Surplus attributable to Third Party"
+          - order: 19
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Total_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Total_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party included in Total Capital"
+          - order: 20
+            name: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Tier_2_Capital
+            type: TYPE3
+            source_file: CS_Minority_Interest_Capital_attributable_to_Third_Party_included_in_Tier_2_Capital.sql
+            active: true
+            description: "CS - Minority Interest - Capital attributable to Third Party included in Tier 2 Capital"
+      - name: ABL_CAPITAL_STRUCTURE_DEDUCTIONS_RWA_EXPOSURES
+        tasks:
+          - order: 1
+            name: ABL_ADD_ACCR_SIG_INSIG_EAD
+            type: CSTM_DT
+            source_file: ABL_ADD_ACCR_SIG_INSIG_EAD.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 2
+            name: CAP_INVESTMENTS_POSITIONS_DATA_POP
+            type: T2T
+            source_file: CAP_INVESTMENTS_POSITIONS_DATA_POP.sql
+            active: true
+          - order: 3
+            name: RECIPROCAL_CROSS_HLDNG_CAP_DEDUCTION_EXPOSURES
+            type: T2T
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+          - order: 4
+            name: INSIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES
+            type: T2T
+            source_file: INSIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES.sql
+            active: true
+          - order: 5
+            name: SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES
+            type: T2T
+            source_file: SIGNFCNT_INVSTMNT_CAP_DEDUCTION_EXPOSURES.sql
+            active: true
+          - order: 6
+            name: Deduction_RWA_Cap_Struct
+            type: T2T
+            source_file: Deduction_RWA_Cap_Struct.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 7
+            name: ABL_MR_INSIGNFCNT_DED_CSTM
+            type: CSTM_DT
+            source_file: ABL_MR_INSIGNFCNT_DED_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 8
+            name: ABL_CREDITRISK_INSIGNFCNT_DED_CSTM
+            type: CSTM_DT
+            source_file: ABL_CREDITRISK_INSIGNFCNT_DED_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 9
+            name: ABL_MR_CAP090_CSTM
+            type: CSTM_DT
+            source_file: ABL_MR_CAP090_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+      - name: ABL_RWA_POPULATIONS
+        tasks:
+          - order: 1
+            name: ABL_CR_CAP169_CSTM
+            type: CSTM_DT
+            source_file: ABL_CR_CAP169_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 2
+            name: FN_FSI_CAP_EXP_STD_ACCT_HEAD_DATA_POP_CSTM
+            type: CSTM_DT
+            source_file: FN_FSI_CAP_EXP_STD_ACCT_HEAD_DATA_POP_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+          - order: 3
+            name: MKT_RISK_RWA_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: MKT_RISK_RWA_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 4
+            name: OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: OPS_RISK_RWA_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 5
+            name: REG_ADJUSTMENT_RWA_STD_ACCT_HEAD_DATA_POP
+            type: T2T
+            source_file: REG_ADJUSTMENT_RWA_STD_ACCT_HEAD_DATA_POP.sql
+            active: true
+          - order: 6
+            name: CAP_CVA_RWA_STD_ACCT_HEAD_POP
+            type: T2T
+            source_file: CAP_CVA_RWA_STD_ACCT_HEAD_POP.sql
+            active: true
+          - order: 7
+            name: CS_Credit_RWA
+            type: TYPE3
+            source_file: CS_Credit_RWA.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Credit RWA"
+          - order: 8
+            name: CS_Total_RWA
+            type: TYPE3
+            source_file: CS_Total_RWA.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Total RWA"
+          - order: 9
+            name: ABL_TOTAL_RWA_CSTM
+            type: CSTM_DT
+            source_file: ABL_TOTAL_RWA_CSTM.sql
+            active: false
+            inactive_reason: source_file_missing
+      - name: CAPITAL_RATIO_CALCULATIONS
+        tasks:
+          - order: 1
+            name: CS_Common_Equity_Tier_1_Capital_ratio
+            type: TYPE3
+            source_file: CS_Common_Equity_Tier_1_Capital_ratio.sql
+            active: true
+            description: "CS - Common Equity Tier 1 Capital ratio"
+          - order: 2
+            name: CS_Tier_1_Capital_Ratio
+            type: TYPE3
+            source_file: CS_Tier_1_Capital_Ratio.sql
+            active: true
+            description: "CS - Tier 1 Capital Ratio"
+          - order: 3
+            name: CS_Tier_2_Capital_Ratio
+            type: TYPE3
+            source_file: CS_Tier_2_Capital_Ratio.sql
+            active: true
+            description: "CS - Tier 2 Capital Ratio"
+          - order: 4
+            name: CS_Total_Eligible_Capital
+            type: TYPE3
+            source_file: CS_Total_Eligible_Capital.sql
+            active: true
+            description: "CS - Total Eligible Capital"
+          - order: 5
+            name: CS_Capital_Ratio
+            type: TYPE3
+            source_file: CS_Capital_Ratio.sql
+            active: true
+            description: "CS - Capital Ratio"
+      - name: CAPITAL_BUFFERS
+        tasks:
+          - order: 1
+            name: CS_Required_Capital_Ratio_Assignment
+            type: TYPE3
+            source_file: CS_Required_Capital_Ratio_Assignment.sql
+            active: true
+            description: "CS Required Capital Ratio Assignment"
+          - order: 2
+            name: CS_Required_Additional_Loss_Absorbency_Assignment
+            type: TYPE3
+            source_file: CS_Required_Additional_Loss_Absorbency_Assignment.sql
+            active: true
+            description: "CS Required Additional Loss Absorbency Assignment"
+          - order: 3
+            name: SUB_EXP_COUNTRYWISE_CREDIT_RISK_SUMMARY
+            type: T2T
+            source_file: SUB_EXP_COUNTRYWISE_CREDIT_RISK_SUMMARY.sql
+            active: true
+          - order: 4
+            name: Country_wise_Total_EAD_for_Non_Securitized_Exposures
+            type: TYPE3
+            source_file: Country_wise_Total_EAD_for_Non_Securitized_Exposures.sql
+            active: true
+            description: "Country wise Total EAD for Non Securitized Exposures"
+          - order: 5
+            name: Country_wise_Total_EAD_for_Securitized_Exposures
+            type: TYPE3
+            source_file: Country_wise_Total_EAD_for_Securitized_Exposures.sql
+            active: true
+            description: "Country wise Total EAD for Securitized Exposures"
+          - order: 6
+            name: COUNTRYWISE_MARKET_RISK_SUMMARY
+            type: T2T
+            source_file: COUNTRYWISE_MARKET_RISK_SUMMARY.sql
+            active: true
+          - order: 7
+            name: COUNTRYWISE_RISK_SUMMARY_POP
+            type: T2T
+            source_file: COUNTRYWISE_RISK_SUMMARY_POP.sql
+            active: true
+          - order: 8
+            name: REQ_CNTR_CYC_BUFFER_POP
+            type: T2T
+            source_file: REQ_CNTR_CYC_BUFFER_POP.sql
+            active: true
+          - order: 9
+            name: CS_Required_weighted_Average_Countercyclical_Buffer
+            type: TYPE3
+            source_file: CS_Required_weighted_Average_Countercyclical_Buffer.sql
+            active: true
+            description: "CS Required weighted Average Countercyclical Buffer"
+          - order: 10
+            name: CS_Required_Buffer_from_CET1_Capital
+            type: TYPE3
+            source_file: CS_Required_Buffer_from_CET1_Capital.sql
+            active: true
+            description: "CS Required Buffer from CET1 Capital"
+          - order: 11
+            name: CS_Required_Buffer_from_Tier1_Capital
+            type: TYPE3
+            source_file: CS_Required_Buffer_from_Tier1_Capital.sql
+            active: true
+            description: "CS Required Buffer from Tier1 Capital"
+          - order: 12
+            name: CS_Required_Buffer_from_Capital_Adequacy_Ratio
+            type: TYPE3
+            source_file: CS_Required_Buffer_from_Capital_Adequacy_Ratio.sql
+            active: true
+            description: "CS Required Buffer from Capital Adequacy Ratio"
+          - order: 13
+            name: CS_Required_Total_Buffer
+            type: TYPE3
+            source_file: CS_Required_Total_Buffer.sql
+            active: true
+            description: "CS Required Total Buffer"
+          - order: 14
+            name: CS_Available_Buffer_from_CET1_Capital
+            type: TYPE3
+            source_file: CS_Available_Buffer_from_CET1_Capital.sql
+            active: true
+            description: "CS Available Buffer from CET1 Capital"
+          - order: 15
+            name: FCT_CAP_CONS_RATIO_POP
+            type: T2T
+            source_file: FCT_CAP_CONS_RATIO_POP.sql
+            active: true
+          - order: 16
+            name: CS_Capital_Buffer_Amount_Calculation
+            type: TYPE3
+            source_file: CS_Capital_Buffer_Amount_Calculation.sql
+            active: true
+            description: "CS Capital Buffer Amount Calculation"
+          - order: 17
+            name: CS_Minimum_Capital_Conservation_Ratio
+            type: TYPE3
+            source_file: CS_Minimum_Capital_Conservation_Ratio.sql
+            active: true
+            description: "CS Minimum Capital Conservation Ratio"
+          - order: 18
+            name: CS_Capital_Conservation_Buffer
+            type: TYPE3
+            source_file: CS_Capital_Conservation_Buffer.sql
+            active: true
+            description: "CS - Capital Conservation Buffer"
+          - order: 19
+            name: CS_Countercyclical_Buffer
+            type: TYPE3
+            source_file: CS_Countercyclical_Buffer.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Countercyclical Buffer"
+          - order: 20
+            name: CS_Systemic_Risk_Buffer
+            type: TYPE3
+            source_file: CS_Systemic_Risk_Buffer.sql
+            active: false
+            inactive_reason: source_file_missing
+            description: "CS - Systemic Risk Buffer"
+
+  # =====================================================================
+  # W-(this-update) — runchart-driven expansion of ABL_CAR_CSTM_V4 manifest
+  # Adds T2T / CSTM_DT / CSTM_T2T tasks from runchart sheets other than
+  # PMFBISCS023. Top-level processes mirror runchart 'Process Name'; sub-
+  # processes mirror 'Sub Process Name' (with 'Sub Sub Process Name'
+  # flattened via ' - ' for entries with three nesting levels).
+  # `order` is the absolute position in the runchart's per-process sheet
+  # (counting ALL task types — T2T, TYPE3, TYPE2, CSTM_DT, etc. — so the
+  # T2T/CSTM-only manifest will have gaps where TYPE3/TYPE2 rows were
+  # skipped per scope).
+  # =====================================================================
+
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: ABL_COMMON_DATA_PROCESSING
+    sub_processes:
+      - name: ABL_CAPITAL_CONSOLIDATION_AND_PARAMETER_ASSIGNMENT
+        tasks:
+          - order: 2
+            name: T2T_FSI_CAP_RUN_EXE_PARAMETERS
+            type: T2T
+            source_file: T2T_FSI_CAP_RUN_EXE_PARAMETERS.sql
+            active: true
+            description: "FSI_CAP_RUN_EXE_PARAMETERS"
+          - order: 4
+            name: RUN_PARAMETERS_DATA_POP
+            type: T2T
+            source_file: RUN_PARAMETERS_DATA_POP.sql
+            active: true
+            description: "Insert data into RUN_PARAMETER from FSI_RUN_PARAMETER"
+          - order: 5
+            name: EXCHANGE_RATE_DATA_POPULATION
+            type: T2T
+            source_file: EXCHANGE_RATE_DATA_POPULATION.sql
+            active: true
+          - order: 6
+            name: T2T_FSI_CAP_CURRENCY_CONVERSION_POP
+            type: T2T
+            source_file: T2T_FSI_CAP_CURRENCY_CONVERSION_POP.sql
+            active: true
+            description: "insersion into FSI_CAP_CURRENCY_CONVERSION"
+          - order: 8
+            name: ENTITY_SHR_HLD_PERCENT_POP
+            type: T2T
+            source_file: ENTITY_SHR_HLD_PERCENT_POP.sql
+            active: true
+          - order: 16
+            name: T2T_FSI_CAP_JCY_CONVERSION_POP
+            type: T2T
+            source_file: T2T_FSI_CAP_JCY_CONVERSION_POP.sql
+            active: true
+      - name: ABL_COMMON_RECLASSIFICATION
+        tasks:
+          - order: 1
+            name: FSI_SENIORITY_RECLASSIFICATION_POP
+            type: T2T
+            source_file: FSI_SENIORITY_RECLASSIFICATION_POP.sql
+            active: true
+          - order: 2
+            name: T2T_FSI_ACCOUNT_PURPOSE_RECLASS_DATA_POP
+            type: T2T
+            source_file: T2T_FSI_ACCOUNT_PURPOSE_RECLASS_DATA_POP.sql
+            active: true
+          - order: 3
+            name: FSI_BANK_BASE_ROLE_RECLASS_DATA_POP
+            type: T2T
+            source_file: FSI_BANK_BASE_ROLE_RECLASS_DATA_POP.sql
+            active: true
+          - order: 4
+            name: FSI_PARTY_PARTY_RELATIONSHIP_POP
+            type: T2T
+            source_file: FSI_PARTY_PARTY_RELATIONSHIP_POP.sql
+            active: true
+          - order: 5
+            name: INSTRUMENT_TYPE_UNDERLYING_TYPE_RECLASS_POP
+            type: T2T
+            source_file: INSTRUMENT_TYPE_UNDERLYING_TYPE_RECLASS_POP.sql
+            active: true
+          - order: 6
+            name: MITIGANT_PROD_TYPE_RECLASS_POP
+            type: T2T
+            source_file: MITIGANT_PROD_TYPE_RECLASS_POP.sql
+            active: true
+          - order: 7
+            name: GL_STD_ACCT_HEAD_RECLASS_POP
+            type: T2T
+            source_file: GL_STD_ACCT_HEAD_RECLASS_POP.sql
+            active: true
+          - order: 15
+            name: MITIGANT_TYPE_RECLASS_POP
+            type: T2T
+            source_file: MITIGANT_TYPE_RECLASS_POP.sql
+            active: true
+          - order: 16
+            name: FSI_REG_INDUSTRY_RECLASS_DATA_POP
+            type: T2T
+            source_file: FSI_REG_INDUSTRY_RECLASS_DATA_POP.sql
+            active: true
+          - order: 19
+            name: CAPITAL_ACCT_HEAD_RECLASS_POP
+            type: T2T
+            source_file: CAPITAL_ACCT_HEAD_RECLASS_POP.sql
+            active: true
+            description: "FSI_CAP_STD_ACCT_HEAD_RECLASS"
+          - order: 20
+            name: T2T_FSI_COMMODITY_CLASSIFICATION
+            type: T2T
+            source_file: T2T_FSI_COMMODITY_CLASSIFICATION.sql
+            active: true
+          - order: 21
+            name: INSTRUMENT_TYPE_RECLASSIFICATION_POPULATION_STD
+            type: T2T
+            source_file: INSTRUMENT_TYPE_RECLASSIFICATION_POPULATION_STD.sql
+            active: true
+          - order: 26
+            name: PROD_TYPE_RECLASSIFICATION_POP_STD
+            type: T2T
+            source_file: PROD_TYPE_RECLASSIFICATION_POP_STD.sql
+            active: true
+          - order: 29
+            name: FIXED_ASSET_PROD_TYPE_RECLASS_DATA_POP
+            type: T2T
+            source_file: FIXED_ASSET_PROD_TYPE_RECLASS_DATA_POP.sql
+            active: true
+            description: "Inserting data into FSI_FXD_ASST_PROD_TYPE_RECLASS from DIM_FIXED_ASSETS_TYPE"
+          - order: 30
+            name: T2T_FSI_GUARANTEE_SCHEME_RECLASS_DATA_POP
+            type: T2T
+            source_file: T2T_FSI_GUARANTEE_SCHEME_RECLASS_DATA_POP.sql
+            active: true
+          - order: 32
+            name: FN_PRODUCT_RECLASS_CSTM
+            type: CSTM_DT
+            source_file: FN_PRODUCT_RECLASS_CSTM.sql
+            active: true
+            description: "FN_PRODUCT_RECLASS_CSTM custom function for product reclassification"
+          - order: 34
+            name: TRANSACTION_TYPE_RECLASS_POP
+            type: T2T
+            source_file: TRANSACTION_TYPE_RECLASS_POP.sql
+            active: true
+          - order: 38
+            name: FSI_SEC_POOL_TYPE_RECLASS_DATA_POP
+            type: T2T
+            source_file: FSI_SEC_POOL_TYPE_RECLASS_DATA_POP.sql
+            active: true
+      - name: INCREMENTAL_PROCESSING_DATA_LOAD
+        tasks:
+          - order: 1
+            name: CAP_RUN_INCR_ACCOUNT_MAP_DATA_POP
+            type: T2T
+            source_file: CAP_RUN_INCR_ACCOUNT_MAP_DATA_POP.sql
+            active: true
+          - order: 2
+            name: CAP_DEF_INCR_ACCOUNT_MAP_DATA_POP
+            type: T2T
+            source_file: CAP_DEF_INCR_ACCOUNT_MAP_DATA_POP.sql
+            active: true
+      - name: ACCOUNT_LOAD_RUN_ID_MAPPING
+        tasks:
+          - order: 1
+            name: CAP_ACCOUNT_LOAD_RUN_MAP_DATA_POP
+            type: T2T
+            source_file: CAP_ACCOUNT_LOAD_RUN_MAP_DATA_POP.sql
+            active: true
+            description: "FSI_ACCOUNT_LOAD_RUN_MAP -> FSI_CAP_ACCOUNT_LOAD_RUN_MAP"
+          - order: 2
+            name: CAP_CREDIT_LINE_ACCOUNT_LOAD_RUN_MAP_DATA_POP
+            type: T2T
+            source_file: CAP_CREDIT_LINE_ACCOUNT_LOAD_RUN_MAP_DATA_POP.sql
+            active: true
+      - name: CAPITAL_ACCOUNTING_HEAD_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: DIM_GL_CAPITAL_ACCT_HEAD_CREATION
+            type: T2T
+            source_file: DIM_GL_CAPITAL_ACCT_HEAD_CREATION.sql
+            active: true
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: ABL_OTHER_RECLASSIFICATION
+    tasks:
+      - order: 2
+        name: RATING_RECLASSIFICATION_POPULATION
+        type: T2T
+        source_file: RATING_RECLASSIFICATION_POPULATION.sql
+        active: true
+      - order: 4
+        name: PARTY_TYPE_RECLASSIFICATION_POPULATION_STD
+        type: T2T
+        source_file: PARTY_TYPE_RECLASSIFICATION_POPULATION_STD.sql
+        active: true
+
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: ABL_CREDIT_RATING_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: ACCOUNT_RATINGS_POPULATION
+        type: T2T
+        source_file: ACCOUNT_RATINGS_POPULATION.sql
+        active: true
+      - order: 2
+        name: INSTRUMENT_RATINGS_POPULATION
+        type: T2T
+        source_file: INSTRUMENT_RATINGS_POPULATION.sql
+        active: true
+      - order: 3
+        name: PARTY_RATINGS_POPULATION
+        type: T2T
+        source_file: PARTY_RATINGS_POPULATION.sql
+        active: true
+      - order: 4
+        name: SOVEREIGN_RATINGS_POPULATION
+        type: T2T
+        source_file: SOVEREIGN_RATINGS_POPULATION.sql
+        active: true
+      - order: 5
+        name: FN_POP_SOVEREIGN_RATING_DETAILS_CSTM
+        type: CSTM_DT
+        active: false
+        inactive_reason: source_file_missing
+        description: "SOVEREIGN_RATINGS_POPULATION T2T is replaced with this DT"
+      - order: 6
+        name: INSTRUMENT_UNDERLYING_RATING_DETAILS
+        type: T2T
+        source_file: INSTRUMENT_UNDERLYING_RATING_DETAILS.sql
+        active: true
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: NETTING_AGREEMENT_DETAILS_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: NETTING_AGREEMENT_DETAILS_DATA_POP
+        type: T2T
+        source_file: NETTING_AGREEMENT_DETAILS_DATA_POP.sql
+        active: true
+      - order: 2
+        name: NET_AGREEMENT_COLLATERALS_PLACED_DATA_POP
+        type: T2T
+        source_file: NET_AGREEMENT_COLLATERALS_PLACED_DATA_POP.sql
+        active: true
+      - order: 3
+        name: NET_AGREEMENT_COLLATERALS_RECEIVED_DATA_POP
+        type: T2T
+        source_file: NET_AGREEMENT_COLLATERALS_RECEIVED_DATA_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: ABL_OTHER_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: INSTRUMENT_CONTRACT_DETAILS
+        type: T2T
+        source_file: INSTRUMENT_CONTRACT_DETAILS.sql
+        active: true
+      - order: 2
+        name: FCT_REFERENCE_ISSUE_DATA_POPULATION
+        type: T2T
+        source_file: FCT_REFERENCE_ISSUE_DATA_POPULATION.sql
+        active: true
+      - order: 3
+        name: SCP_RISK_WEIGHT_MAPPING_POPULATION
+        type: T2T
+        source_file: SCP_RISK_WEIGHT_MAPPING_POPULATION.sql
+        active: true
+      - order: 4
+        name: NON_SEC_RISK_WEIGHT_MAPPING_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+        description: "ABL_NON_SEC_RISK_WEIGHT_MAP_POP_CSTM cstm T2T added in Batch ( remove S rating flag)"
+      - order: 6
+        name: T2T_FSI_CAP_PARTY_FINANCIALS
+        type: T2T
+        source_file: T2T_FSI_CAP_PARTY_FINANCIALS.sql
+        active: true
+      - order: 7
+        name: ACCT_MITIGANT_MAPPING_POP
+        type: T2T
+        source_file: ACCT_MITIGANT_MAPPING_POP.sql
+        active: true
+        description: "STG_ACCOUNT_MITIGANT_MAP -> FSI_CAP_EXP_MITIGANT_MAPPING"
+      - order: 8
+        name: FSI_BASEL_ASSET_CATEGRY_MAP_DATA_POP
+        type: T2T
+        source_file: FSI_BASEL_ASSET_CATEGRY_MAP_DATA_POP.sql
+        active: true
+      - order: 9
+        name: T2T_BASEL_CREDIT_RATING_BAND_MAP_DATA_POP
+        type: T2T
+        source_file: T2T_BASEL_CREDIT_RATING_BAND_MAP_DATA_POP.sql
+        active: true
+      - order: 10
+        name: ABL_UPD_OTC_EAD_METHOD
+        type: CSTM_DT
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: BIS_RISK_WEIGHT_MAP_PROCESSING
+    tasks:
+      - order: 9
+        name: MITIGANT_RISK_WEIGHT_MAPPING_POP
+        type: T2T
+        source_file: MITIGANT_RISK_WEIGHT_MAPPING_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFCOM020 ----
+  - name: ACCOUNT_PLACED_COLL_MAPPING_DATA_POP
+    tasks:
+      - order: 1
+        name: ACCT_PLACED_COLLATERAL_MAPPING
+        type: T2T
+        source_file: ACCT_PLACED_COLLATERAL_MAPPING.sql
+        active: true
+  # ---- from runchart sheet PMFBISOR004 ----
+  - name: ABL_OPERATIONAL_RISK_BASIC_INDICATOR_APPROACH
+    tasks:
+      - order: 1
+        name: Operational Risk Data Population
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+        description: "Removed this from batch"
+      - order: 2
+        name: ABL Operational Risk Data Population CSTM
+        type: CSTM_T2T
+        active: false
+        inactive_reason: source_file_missing
+        description: "OPS_RISK_DATA_POPULATION_CSTM t2t added in batch AND stg_ops_risk_data.v_data_processing_type = CASE WHEN fct_entity_info.n_basel_consl_optn_type_skey = 1 THEN 'C' WHEN fct_entity_info.n_basel_consl_optn_type_skey = 2 THEN 'A' END"
+      - order: 17
+        name: OPS_RISK_SUMMARY_POPULATION
+        type: T2T
+        source_file: OPS_RISK_SUMMARY_POPULATION.sql
+        active: true
+
+  # ---- from runchart sheet PMFSTDBISBNK001 ----
+  - name: AB_BNK_PRODUCT_PROCESSOR_DATA_POP
+    tasks:
+      - order: 1
+        name: BANKING_ASSETS_SOLD_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+        description: "removed this T2T"
+      - order: 2
+        name: ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION
+        type: T2T
+        source_file: ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION.sql
+        active: true
+        description: "ABL_BANKING_BILLS_EXPOSURE_DATA_CREATION custom t2t added in batch"
+      - order: 3
+        name: BANKING_LEASES_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: ABL_BANKING_LC_EXPOSURE_DATA_CREATION
+        type: T2T
+        source_file: ABL_BANKING_LC_EXPOSURE_DATA_CREATION.sql
+        active: true
+        description: "ABL_BANKING_LC_EXPOSURE_DATA_CREATION custom t2t added in batch"
+      - order: 5
+        name: BANKING_OD_EXPOSURE_DATA_CREATION
+        type: T2T
+        source_file: BANKING_OD_EXPOSURE_DATA_CREATION.sql
+        active: true
+      - order: 6
+        name: BANKING_CARDS_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+        description: "ABL_BANKING_CARDS_EXPOSURE_DATA_CREATION custom t2t added in batch"
+      - order: 7
+        name: BANKING_LEASE_RESIDUAL_DATA_CREATION
+        type: T2T
+        source_file: BANKING_LEASE_RESIDUAL_DATA_CREATION.sql
+        active: true
+      - order: 8
+        name: ABL_BANKING_GRT_EXPOSURE_DATA_CREATION
+        type: T2T
+        source_file: ABL_BANKING_GRT_EXPOSURE_DATA_CREATION.sql
+        active: true
+        description: "ABL_BANKING_GRT_EXPOSURE_DATA_CREATION custom t2t added in batch"
+      - order: 9
+        name: BANKING_CREDIT_LINE_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+        description: "removed this T2T"
+      - order: 10
+        name: ABL_BANKING_LOAN_EXPOSURE_DATA_CREATION
+        type: T2T
+        source_file: ABL_BANKING_LOAN_EXPOSURE_DATA_CREATION.sql
+        active: true
+        description: "ABL_BANKING_LOAN_EXPOSURE_DATA_CREATION custom t2t added in batch"
+      - order: 11
+        name: BANKING_COMMITMENT_CONTRACT_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+        description: "removed this T2T"
+
+  # ---- from runchart sheet PMFSTDBISBNK001 ----
+  - name: ABL_BNK_DATA_PROCESSING_STD
+    sub_processes:
+      - name: ABL_BNK_CCF_ASSIGNMENT_STD
+        tasks:
+          - order: 7
+            name: FN_CCF_OOB_CSTM
+            type: CSTM_DT
+            source_file: FN_CCF_OOB_CSTM.sql
+            active: true
+      - name: ABL_BNK_REGULATORY_RETAIL_PORTFOLIO
+        tasks:
+          - order: 1
+            name: FN_G_TEST_CSTM
+            type: CSTM_DT
+            source_file: FN_G_TEST_CSTM.sql
+            active: true
+            description: "cstm Granulaity test Function"
+      - name: MULTIPLE_RATING_ASSESSMENT
+        tasks:
+          - order: 4
+            name: FN_ELIG_MULT_RATINGS_CSTM
+            type: CSTM_DT
+            source_file: FN_ELIG_MULT_RATINGS_CSTM.sql
+            active: true
+            description: "812 Rule has been changed into DT some customizations are made at count( N_BASEL_RANKING =1 ) and count( N_BASEL_RANKING =2)"
+      - name: ABL_BNK_MULTIPLE_ASSESSMENT_BASED_RISK_WEIGHT_ASSIGNMENT_V2
+        tasks:
+          - order: 6
+            name: FN_OTH_ITR_RATING_CSTM
+            type: CSTM_DT
+            source_file: FN_OTH_ITR_RATING_CSTM.sql
+            active: true
+      - name: ABL_BANKING_RISK_WEIGHT_ASSIGNMENT_POST_ISSUE_ISSUER_ASSESSMENT
+        tasks:
+          - order: 3
+            name: FN_BNK_RW_3MONTHS_LESS_CSTM
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+            description: "OM <=0.25 BNK custom based on basel rating"
+          - order: 4
+            name: FN_CCR_PROD_ASSET_CLASS_RW_CSTM
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+            description: "CCR product type , RRP asset class and 0.75 RW assigned"
+          - order: 5
+            name: FN_OTH_ITR_RW_CSTM
+            type: CSTM_DT
+            source_file: FN_OTH_ITR_RW_CSTM.sql
+            active: true
+          - order: 6
+            name: FN_COR_RW_U2_CSTM
+            type: CSTM_DT
+            source_file: FN_COR_RW_U2_CSTM.sql
+            active: true
+            description: "1.25 RW assigned"
+          - order: 7
+            name: FN_BNK_CGCB_CSTM
+            type: CSTM_DT
+            source_file: FN_BNK_CGCB_CSTM.sql
+            active: true
+  # ---- from runchart sheet PMFSTDBISINV001 ----
+  - name: ABL_INVESTMENT_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: BANKING_UNDERLYING_INVESTMENT_DATA_POP
+        type: T2T
+        source_file: BANKING_UNDERLYING_INVESTMENT_DATA_POP.sql
+        active: true
+      - order: 2
+        name: CR_RISK_POSITION_MAPPING_POPULATION
+        type: T2T
+        source_file: CR_RISK_POSITION_MAPPING_POPULATION.sql
+        active: true
+    sub_processes:
+      - name: BNK_PRODUCT_PROCESSOR_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: BNK_UNDERLYING_EXPOSURES_DATA_POPULATION
+            type: T2T
+            source_file: BNK_UNDERLYING_EXPOSURES_DATA_POPULATION.sql
+            active: true
+      - name: ABL_INV_PRODUCT_PROCESSOR_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: INVESTMENT_EXPOSURE_DATA_CREATION
+            type: T2T
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "removed this T2T"
+          - order: 2
+            name: INV_MM_EXPOSURE_DATA_CREATION
+            type: T2T
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "removed this T2T"
+          - order: 3
+            name: FX_CONTRACTS_INV_EXPOSURE_DATA_CREATION
+            type: T2T
+            source_file: FX_CONTRACTS_INV_EXPOSURE_DATA_CREATION.sql
+            active: true
+          - order: 4
+            name: INVESTMENT_FIXED_ASSETS_DATA_POPULATION
+            type: T2T
+            source_file: INVESTMENT_FIXED_ASSETS_DATA_POPULATION.sql
+            active: true
+      - name: INVESTMENT_DERIVATIVE_UNDERLYING_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: DERIVATIVE_EQUITY_UNDERLYING_DATA_POP
+            type: T2T
+            source_file: DERIVATIVE_EQUITY_UNDERLYING_DATA_POP.sql
+            active: true
+          - order: 2
+            name: DERIVATIVE_UNDERLYING_DATA_POP
+            type: T2T
+            source_file: DERIVATIVE_UNDERLYING_DATA_POP.sql
+            active: true
+      - name: INV_PRODUCT_PROCESSOR_UNDERLYING_POP
+        tasks:
+          - order: 1
+            name: INV_UNDERLYING_COMP_EXP_DATA_POP
+            type: T2T
+            source_file: INV_UNDERLYING_COMP_EXP_DATA_POP.sql
+            active: true
+          - order: 2
+            name: FUND_CIS_COMPOSITION_INV_DATA_POPULATION
+            type: T2T
+            source_file: FUND_CIS_COMPOSITION_INV_DATA_POPULATION.sql
+            active: true
+          - order: 3
+            name: INV_UNDERLYING_EXPOSURES_DATA_POPULATION
+            type: T2T
+            source_file: INV_UNDERLYING_EXPOSURES_DATA_POPULATION.sql
+            active: true
+
+  # ---- from runchart sheet PMFSTDBISINV001 ----
+  - name: ABL_INV_DATA_PROCESSING_STD
+    sub_processes:
+      - name: ABL_INV_RECLASSIFICATION_STD
+        tasks:
+          - order: 10
+            name: ABL_INV_ASSET_CLASS_RECLASS
+            type: CSTM_DT
+            source_file: ABL_INV_ASSET_CLASS_RECLASS.sql
+            active: true
+      - name: INV_MULTIPLE_RATING_ASSESSMENT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: INV_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: ABL_INV_RISK_WEIGHT_ASSIGNMENT_STD
+        tasks:
+          - order: 11
+            name: FN_INV_CGCB_CSTM
+            type: CSTM_DT
+            source_file: FN_INV_CGCB_CSTM.sql
+            active: true
+            description: "rw =0 where cgcb and v ccy code ='pkr'"
+          - order: 12
+            name: FN_INV_RW_3MONTHS_LESS_CSTM
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+          - order: 13
+            name: ABL_INV_PRE_RW_CSTM
+            type: CSTM_DT
+            source_file: ABL_INV_PRE_RW_CSTM.sql
+            active: true
+      - name: ABL_INV_CAPITAL_CALCULATION
+        tasks:
+          - order: 4
+            name: ABL_Non_Sec_Inv_Significant_Investment_identify
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+          - order: 7
+            name: ABL_DED_FRM_EAD
+            type: CSTM_DT
+            source_file: ABL_DED_FRM_EAD.sql
+            active: true
+  # ---- from runchart sheet PMFSTDBISDRV001 ----
+  - name: DERIVATIVES_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: DERIVATIVE_SWAPS_EXPOSURE_DATA_POPULATION
+        type: T2T
+        source_file: DERIVATIVE_SWAPS_EXPOSURE_DATA_POPULATION.sql
+        active: true
+      - order: 2
+        name: DERIVATIVE_FUT_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: removed_from_batch_per_run_chart
+      - order: 3
+        name: DERIVATIVE_OPT_EXPOSURE_DATA_POPULATION
+        type: T2T
+        source_file: DERIVATIVE_OPT_EXPOSURE_DATA_POPULATION.sql
+        active: true
+      - order: 4
+        name: DERIVATIVE_FORWARDS_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: DERIVATIVE_CREDIT_DERIVATIVES_DATA_POPULATION
+        type: T2T
+        source_file: DERIVATIVE_CREDIT_DERIVATIVES_DATA_POPULATION.sql
+        active: true
+      - order: 6
+        name: OTH_PLACED_COLLATERAL_PROCESSING_DATA_POPULATION
+        type: T2T
+        source_file: OTH_PLACED_COLLATERAL_PROCESSING_DATA_POPULATION.sql
+        active: true
+      - order: 7
+        name: DERIVATIVE_PLACED_COLLATERALS_DATA_CREATION
+        type: T2T
+        source_file: DERIVATIVE_PLACED_COLLATERALS_DATA_CREATION.sql
+        active: true
+      - order: 8
+        name: OTH_PLACED_COLLATERAL_FSI_CAP_MITIGANTS_DATA_CREATION
+        type: T2T
+        source_file: OTH_PLACED_COLLATERAL_FSI_CAP_MITIGANTS_DATA_CREATION.sql
+        active: true
+      - order: 9
+        name: FSI_CREDIT_SPREAD_DATA_POP
+        type: T2T
+        source_file: FSI_CREDIT_SPREAD_DATA_POP.sql
+        active: true
+      - order: 10
+        name: FSI_CPTY_EXPECTED_EXPOSURE_DATA_POP
+        type: T2T
+        source_file: FSI_CPTY_EXPECTED_EXPOSURE_DATA_POP.sql
+        active: true
+      - order: 11
+        name: DERIVATIVE_INCURRED_CVA_LOSS_CALC_POP
+        type: T2T
+        source_file: DERIVATIVE_INCURRED_CVA_LOSS_CALC_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFSTDBISDRV001 ----
+  - name: DRV_DATA_PROCESSING_STD
+    sub_processes:
+      - name: DRV_MULTIPLE_RATING_ASSESSMENT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: DRV_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: SOLD_CREDIT_PROTECTION_DATA_PROCESSING
+        tasks:
+          - order: 2
+            name: DERIVATIVE_FCT_SOLD_CDP_DATA_POPULATION
+            type: T2T
+            source_file: DERIVATIVE_FCT_SOLD_CDP_DATA_POPULATION.sql
+            active: true
+      - name: DERIVATIVE_SACCR_EAD_CALCULATION_DRV_NETTING_AGREEMENT_DETAILS_DATA_POP
+        tasks:
+          - order: 1
+            name: DERIVATIVES_NETTING_SET_DETAILS_DATA_POP_SACCR
+            type: T2T
+            source_file: DERIVATIVES_NETTING_SET_DETAILS_DATA_POP_SACCR.sql
+            active: true
+            description: "insert into FSI_NETTING_AGREEMENT_DETAILS"
+      - name: DERIVATIVE_SACCR_EAD_CALCULATION_NETTABLE_POOL_FORMATION_DATA_POPULATION
+        tasks:
+          - order: 3
+            name: NETTABLE_POOL_MASTER_DATA_POP
+            type: T2T
+            source_file: NETTABLE_POOL_MASTER_DATA_POP.sql
+            active: true
+            description: "insert intp FSI_CAP_NETTABLE_POOL fromFSI_CAP_DERIVATIVES"
+          - order: 5
+            name: NETTABLE_POOL_OTC_DATA_POP_SA_CCR
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+            description: "Insert into FSI_CAP_NETTABLE_POOL"
+          - order: 6
+            name: NETTABLE_POOL_OTC_DATA_POP_OTHERS_SA_CCR
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+            description: "Insert into FSI_CAP_NETTABLE_POOL"
+      - name: DERIVATIVE_SACCR_EAD_CALCULATION_RC_MARGINED_UNMARGINED_TRANSACTION
+        tasks:
+          - order: 1
+            name: MARGINED_EAD_CALC_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+            description: "insert into FSI_MARGINED_EAD_CALC from FSI_CAP_NETTABLE_POOL"
+      - name: DERIVATIVE_SACCR_EAD_CALCULATION_PRE_POTENTIAL_FUTURE_RISK_PARAMETERS
+        tasks:
+          - order: 1
+            name: FSI_CAP_ACCT_RISK_DRIVER_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+          - order: 5
+            name: FSI_CAP_ACCT_RISK_CATEGORY_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: DERIVATIVE_SACCR_EAD_CALCULATION_HEDGING_SET_FORMATION
+        tasks:
+          - order: 4
+            name: CCR_HEDGING_SET_MASTER_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+          - order: 6
+            name: FSI_POTENTIAL_FUTURE_EXP_CALC_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISDRV001 ----
+  - name: DRV_PLACED_COLL_DATA_PROCESSING_STD
+    sub_processes:
+      - name: DRV_MULTIPLE_RATING_ASSESSMENT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: DRV_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: MITIGANT_PROCESSING_STD_APPROACH_BIS_ASSET_CLASS_BASED_MITIGANT_MULTIPLE_RATING_ASSESSMENT
+        tasks:
+          - order: 1
+            name: CAP_ASSET_BASED_MITIGANT_MULTIPLE_ASSESSMENT_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFMR0049 ----
+  - name: ABL_BASELIII_MKT_RISK_DATA_PROCESSING
+    sub_processes:
+      - name: ABL_MARKET_RISK_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR
+            type: CSTM_T2T
+            source_file: ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR.sql
+            active: true
+            description: "ABL_MARKET_RISK_EXPOSURES_FROM_MRVAR custom t2t added in batch"
+          - order: 2
+            name: MARKET_RISK_EXPOSURES_FROM_MRVAR
+            type: T2T
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "removed this T2T"
+          - order: 3
+            name: MKT_RISK_POSITION_MAPPING_POPULATION
+            type: T2T
+            source_file: MKT_RISK_POSITION_MAPPING_POPULATION.sql
+            active: true
+          - order: 4
+            name: MKT_RISK_FOREX_POPULATION
+            type: T2T
+            source_file: MKT_RISK_FOREX_POPULATION.sql
+            active: true
+
+  # ---- from runchart sheet PMFMR0049 ----
+  - name: BASELIII_MKT_RISK_POSITION_CONVERSION
+    sub_processes:
+      - name: POSITION_CONVERSION_EXOTIC_OPTIONS
+        tasks:
+          - order: 1
+            name: PC_EXOTIC_INSTR_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: POSITION_CONVERSION_OPTIONS
+        tasks:
+          - order: 1
+            name: PC_OPTIONS_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: POSITION_CONVERSION_BASKET_FUTURES_INTEREST_RATE
+        tasks:
+          - order: 2
+            name: MKT_RISK_BSKT_UNDERLYING_POPULATION
+            type: T2T
+            source_file: MKT_RISK_BSKT_UNDERLYING_POPULATION.sql
+            active: true
+          - order: 4
+            name: MKT_RISK_BSKT_UL_BNDFUT_POPULATION
+            type: T2T
+            source_file: MKT_RISK_BSKT_UL_BNDFUT_POPULATION.sql
+            active: true
+      - name: POSITION_CONVERSION_SWAPS
+        tasks:
+          - order: 1
+            name: PC_SWAPS_FWD_FUT
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: POSITION_CONVERSION_HYBRID_INSTRUMENTS
+        tasks:
+          - order: 1
+            name: MKT_RISK_HYB_UNDERLYING_POPULATION
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: ABL_MKT_RISK_SPECIFIC_RISK_IR_ASSIGNMENT
+        tasks:
+          - order: 1
+            name: MR_SP_RW_MAPPING_POP
+            type: T2T
+            source_file: MR_SP_RW_MAPPING_POP.sql
+            active: true
+            description: "MR_SP_RW_MAPPING"
+          - order: 5
+            name: ABL_MR_SPEC_RISK_CATEGORY
+            type: CSTM_DT
+            source_file: ABL_MR_SPEC_RISK_CATEGORY.sql
+            active: true
+          - order: 8
+            name: ABL_MR_SPEC_CAT_INV_QUAL
+            type: CSTM_DT
+            source_file: ABL_MR_SPEC_CAT_INV_QUAL.sql
+            active: true
+          - order: 10
+            name: ABL MR Specific Risk Assignment based on Multiple Assessment
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+      - name: POSITION_CONVERSION_CREDIT_DERIVATIVES
+        tasks:
+          - order: 1
+            name: AMORTIZATION_SCHEDULE_POP
+            type: T2T
+            source_file: AMORTIZATION_SCHEDULE_POP.sql
+            active: true
+          - order: 3
+            name: PC_CREDIT_DERIVATIVES_POPULATION
+            type: T2T
+            source_file: PC_CREDIT_DERIVATIVES_POPULATION.sql
+            active: true
+
+  # ---- from runchart sheet PMFMR0049 ----
+  - name: ABL_BASELIII_MKT_RISK_STD_APPROACH
+    sub_processes:
+      - name: MARKET_RISK_DEPOSITORY_RECEIPTS
+        tasks:
+          - order: 1
+            name: DEPOSITORY_RECEIPTS_POP
+            type: T2T
+            source_file: DEPOSITORY_RECEIPTS_POP.sql
+            active: true
+          - order: 2
+            name: MKT_RISK_DR_NDEQ_POP
+            type: T2T
+            source_file: MKT_RISK_DR_NDEQ_POP.sql
+            active: true
+      - name: MARKET_RISK_ARBITRAGE_STRATEGY
+        tasks:
+          - order: 1
+            name: INDEX_COMPOSITION_POP
+            type: T2T
+            source_file: INDEX_COMPOSITION_POP.sql
+            active: true
+          - order: 2
+            name: EQ_ARBITRAGE_STRGY_POP
+            type: T2T
+            source_file: EQ_ARBITRAGE_STRGY_POP.sql
+            active: true
+      - name: MARKET_RISK_SPECIFIC_RISK_CHARGE_CALCULATION_IR_AND_EQUITY
+        tasks:
+          - order: 3
+            name: MKT_RISK_SPECIFIC_CHARGE_IR_EQ
+            type: T2T
+            source_file: MKT_RISK_SPECIFIC_CHARGE_IR_EQ.sql
+            active: false
+            inactive_reason: removed_from_batch_per_run_chart
+            description: "Insert into FCT_MARKET_RISK_SUMMARY -> FCT_MARKET_RISK_EXPOSURES"
+      - name: ABL_TIME_BAND_RECLASSIFICATION_MATURITY_APPROACH
+        tasks:
+          - order: 6
+            name: MKT_RISK_WTDPOS_MATURITY_APPROACH_IR
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+          - order: 7
+            name: MKT_RISK_TB_POP_MATURITY_APPROACH_IR
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: TIME_BAND_RECLASSIFICATION_COMMODITIES_MATURITY_APPROACH
+        tasks:
+          - order: 2
+            name: MKT_RISK_WTDPOS_MATURITY_APPROACH_COMMODITY
+            type: T2T
+            source_file: MKT_RISK_WTDPOS_MATURITY_APPROACH_COMMODITY.sql
+            active: true
+          - order: 3
+            name: MKT_RISK_TB_POP_MATURITY_APPROACH_COMMODITY
+            type: T2T
+            source_file: MKT_RISK_TB_POP_MATURITY_APPROACH_COMMODITY.sql
+            active: true
+      - name: TIME_BAND_RECLASSIFICATION_DURATION_APPROACH
+        tasks:
+          - order: 5
+            name: MKT_RISK_WTDPOS_DURATION_APPROACH_IR
+            type: T2T
+            source_file: MKT_RISK_WTDPOS_DURATION_APPROACH_IR.sql
+            active: true
+          - order: 6
+            name: MKT_RISK_TB_POP_DURATION_APPROACH_IR
+            type: T2T
+            source_file: MKT_RISK_TB_POP_DURATION_APPROACH_IR.sql
+            active: true
+      - name: MARKET_RISK_OPTIONS_DELTA_AND_GAMMA_CALCULATIONS_DELTA_PLUS_APPROACH
+        tasks:
+          - order: 4
+            name: MKT_RISK_WTDPOS_DPLUS_IR_OPTIONS
+            type: T2T
+            source_file: MKT_RISK_WTDPOS_DPLUS_IR_OPTIONS.sql
+            active: true
+          - order: 5
+            name: MKT_RISK_SIM_COMDTY_DPLUS_COMDTY_OPT
+            type: T2T
+            source_file: MKT_RISK_SIM_COMDTY_DPLUS_COMDTY_OPT.sql
+            active: true
+      - name: ABL_MARKET_RISK_GENERIC_RISK_CHARGE_CALCULATION_IR_AND_EQUITY
+        tasks:
+          - order: 2
+            name: ABL_Residual_Curr_Identification
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+          - order: 3
+            name: ABL_MKT_RISK_GENRSK_IR
+            type: CSTM_DT
+            source_file: ABL_MKT_RISK_GENRSK_IR.sql
+            active: true
+          - order: 5
+            name: MKT_RISK_GEN_RISK_CHARGE_EQUITY
+            type: T2T
+            source_file: MKT_RISK_GEN_RISK_CHARGE_EQUITY.sql
+            active: true
+            description: "Insert into FCT_MARKET_RISK_EQ_CAPITAL"
+      - name: MARKET_RISK_CAPITAL_CHARGE_CALCULATION_SIMPLE_APPROACH
+        tasks:
+          - order: 1
+            name: MKT_RISK_SIM_APP_COMDTY
+            type: T2T
+            source_file: MKT_RISK_SIM_APP_COMDTY.sql
+            active: true
+      - name: MARKET_RISK_OPTIONS_CAPITAL_CHARGE_CALCULATION_DELTA_PLUS_APPROACH
+        tasks:
+          - order: 1
+            name: MKT_RISK_SR_DPLUS_IR_OPTION
+            type: T2T
+            source_file: MKT_RISK_SR_DPLUS_IR_OPTION.sql
+            active: true
+          - order: 2
+            name: MKT_RISK_SR_DPLUS_EQ_OPTION
+            type: T2T
+            source_file: MKT_RISK_SR_DPLUS_EQ_OPTION.sql
+            active: true
+          - order: 3
+            name: MKT_RISK_GR_DPLUS_OPTION_EQUITY
+            type: T2T
+            source_file: MKT_RISK_GR_DPLUS_OPTION_EQUITY.sql
+            active: true
+          - order: 5
+            name: MKT_RISK_GR_DPLUS_OPTION_FOREX
+            type: T2T
+            source_file: MKT_RISK_GR_DPLUS_OPTION_FOREX.sql
+            active: true
+          - order: 9
+            name: MKT_RISK_CR_DPLUS_OPTION_GOLD
+            type: T2T
+            source_file: MKT_RISK_CR_DPLUS_OPTION_GOLD.sql
+            active: true
+          - order: 10
+            name: MKT_RISK_CR_DPLUS_OPTION_FOREX
+            type: T2T
+            source_file: MKT_RISK_CR_DPLUS_OPTION_FOREX.sql
+            active: true
+      - name: MARKET_RISK_OPTIONS_CAPITAL_CHARGE_CALCULATION_SIMPLE_APPROACH
+        tasks:
+          - order: 4
+            name: MKT_RISK_SIM_APP_OPTION
+            type: T2T
+            source_file: MKT_RISK_SIM_APP_OPTION.sql
+            active: true
+      - name: ABL_MARKET_RISK_CAPITAL_RISK_CHARGE_CALCULATION
+        tasks:
+          - order: 1
+            name: MKT_RISK_CAPITAL_CHARGE_COMDTY
+            type: T2T
+            source_file: MKT_RISK_CAPITAL_CHARGE_COMDTY.sql
+            active: true
+          - order: 4
+            name: ABL_MR_Significant_Investment_identification
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+      - name: MARKET_RISK_IR_REPORTING_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: CAP_MKT_RISK_REPORTING_POP_IR
+            type: T2T
+            source_file: CAP_MKT_RISK_REPORTING_POP_IR.sql
+            active: true
+      - name: MARKET_RISK_COMMODITIES_REPORTING_DATA_POPULATION_MATURITY_APPROACH
+        tasks:
+          - order: 1
+            name: MKT_RISK_REPORTING_POP_MAT_COM
+            type: T2T
+            source_file: MKT_RISK_REPORTING_POP_MAT_COM.sql
+            active: true
+
+  # ---- from runchart sheet PMFMR0049 ----
+  - name: MKT_RISK_IMM_VAR
+    sub_processes:
+      - name: MARKET_RISK_IMM_VAR_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: MKT_RISK_VAR_DATA_POPULATION
+            type: T2T
+            source_file: MKT_RISK_VAR_DATA_POPULATION.sql
+            active: true
+      - name: MARKET_RISK_IMM_VAR_SUMMARY_POPULATION
+        tasks:
+          - order: 1
+            name: MKT_RISK_VAR_SUMMARY_POPULATION
+            type: T2T
+            source_file: MKT_RISK_VAR_SUMMARY_POPULATION.sql
+            active: true
+      - name: MARKET_RISK_VAR_CAPITAL_CHARGE_POPULATION
+        tasks:
+          - order: 1
+            name: MKT_RISK_VAR_CAPITAL_CHARGE
+            type: T2T
+            source_file: MKT_RISK_VAR_CAPITAL_CHARGE.sql
+            active: true
+
+  # ---- from runchart sheet PMFSTDBISMIT001 ----
+  - name: ABL_BIS_MITIGANT_DATA_PROCESSING_STANDARDIZED_V1
+    tasks:
+      - order: 1
+        name: CAP_MITIGANT_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISMIT001 ----
+  - name: ABL_MITIGANT_PROCESSING_STD_APPROACH_BIS_V1
+    sub_processes:
+      - name: MITIGANT_COLLATERAL_ELIGIBILITY_SIMPLE_APPROACH_BIS
+        tasks:
+          - order: 9
+            name: FN_MITIGANT_ELIGIBILITY_CSTM
+            type: CSTM_DT
+            source_file: FN_MITIGANT_ELIGIBILITY_CSTM.sql
+            active: true
+            description: "For ABL marked all the std mitigant type eligible here"
+      - name: ABL_MITIGANT_COLLATERAL_ELIGIBILITY_COMPREHENSIVE_APPROACH_BIS
+        tasks:
+          - order: 10
+            name: FN_MITIGANT_ELIGIBILITY_CSTM
+            type: CSTM_DT
+            source_file: FN_MITIGANT_ELIGIBILITY_CSTM.sql
+            active: true
+            description: "For ABL marked all the std mitigant type eligible here"
+      - name: ABL_MITIGANTS_VOLATILITY_HAIRCUT_ASSIGNMENTS_BIS_V1
+        tasks:
+          - order: 6
+            name: FN_MIT_VOLATILITY_HAIRCUT_CSTM
+            type: CSTM_DT
+            active: false
+            inactive_reason: source_file_missing
+            description: "Cstm Dt for volatility Haircut"
+
+  # ---- from runchart sheet PMFSTDBISSEC001 ----
+  - name: SEC_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: SEC_POOL_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: BNK_UNDERLYING_EXPOSURES_DATA_POPULATION
+        type: T2T
+        source_file: BNK_UNDERLYING_EXPOSURES_DATA_POPULATION.sql
+        active: true
+      - order: 3
+        name: TRANCHE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: STD_INVESTMENT_DATA_POPULATION_SEC
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: GUARANTEES_DATA_POPULATION_SEC
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 6
+        name: CREDIT_DERIVATIVES_DATA_POPULATION_SEC
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 7
+        name: COMMITMENT_CONTRACT_DATA_POPULATION_SEC
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 8
+        name: SWAPS_SEC_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 9
+        name: SEC_INCEPTION_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 10
+        name: SECURITIZATION_ACTIVITY_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSEC001 ----
+  - name: BNK_DATA_PROCESSING_STD
+    tasks:
+      - order: 1
+        name: INV_UNDERLYING_EXPOSURES_DATA_POPULATION
+        type: T2T
+        source_file: INV_UNDERLYING_EXPOSURES_DATA_POPULATION.sql
+        active: true
+    sub_processes:
+      - name: BNK_MULTIPLE_RATING_ASSESSMENT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: BNK_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSEC001 ----
+  - name: INV_DATA_PROCESSING_STD
+    tasks:
+      - order: 2
+        name: SEC_BANKING_UNDERLYING_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+    sub_processes:
+      - name: INV_MULTIPLE_RATING_ASSESSMENT_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: INV_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSEC001 ----
+  - name: SEC_DATA_PROCESSING_STD
+    tasks:
+      - order: 1
+        name: SEC_INV_UNDERLYING_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+    sub_processes:
+      - name: SEC_INFERRED_RATING_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: SEC_TRANCHE_INFERRED_RATING_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: SECURITIZATION_RISK_WEIGHT_ASSIGNMENT_FOR_RATED_EXPOSURES
+        tasks:
+          - order: 1
+            name: SEC_RISK_WEIGHT_MAPPING_POPULATION_ERB
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSFT001 ----
+  - name: SFT_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: SFT_LOAN_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: SFT_REPO_EXPOSURE_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 3
+        name: SFT_PLACED_COLLATERAL_PROCESSING_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: SFT_PLACED_COLLATERALS_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: SFT_PLACED_COLLATERAL_FSI_CAP_MITIGANTS_DATA_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 6
+        name: CAP_SFT_MITIGANT_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSFT001 ----
+  - name: SFT_EXP_AND_PLACED_COLLATERAL_PROCESSING_STD
+    sub_processes:
+      - name: SFT_PLACED_COLLATERAL_DATA_PROCESSING_STD_SFT_COMPREHENSIVE_APPROACH_HAIRCUT
+        tasks:
+          - order: 5
+            name: CAP_PLACED_COLLATERAL_FSI_SFT_UNDERLYINGS_DATA_CREATION
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+          - order: 6
+            name: CAP_SFT_MITIGANT_TO_FSI_SFT_UNDERLYINGS_DATA_CREATION
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: SFT_DATA_PROCESSING_STD_SFT_MULTIPLE_RATING_ASSESSMENT_POPULATION_STD
+        tasks:
+          - order: 1
+            name: SFT_MULTIPLE_ASSESSMENT_PROCESSING_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFSTDBISSFT001 ----
+  - name: SFT_NETTABLE_POOL_POPULATION
+    tasks:
+      - order: 4
+        name: SFT_NETTABLE_POOL_MASTER_DATA_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 6
+        name: CAP_NETTABLE_POOL_REPO_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 7
+        name: CAP_NETTABLE_POOL_SFT_POPULATION_OTHERS
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFCOM025 ----
+  - name: CCP_CAPITAL_CALCULATION_DATA_POP
+    tasks:
+      - order: 1
+        name: CCP_CAPITAL_CALCULATION_DATA_POPULATION
+        type: T2T
+        source_file: CCP_CAPITAL_CALCULATION_DATA_POPULATION.sql
+        active: true
+
+  # ---- from runchart sheet PMFCOM025 ----
+  - name: DEFAULT_FUND_CONTRIBUTION_DATA_POP
+    tasks:
+      - order: 1
+        name: DEFAULT_FUND_CONTRIBUTION_DATA_POPULATION
+        type: T2T
+        source_file: DEFAULT_FUND_CONTRIBUTION_DATA_POPULATION.sql
+        active: true
+
+  # ---- from runchart sheet PMFBISMIT014 ----
+  - name: CREDIT_RISK_MITIGATION_FOR_SECURITIZATION_EXPOSURES_STANDARDIZED_APPROACH
+    sub_processes:
+      - name: SEC_CRM_SUB_EXPOSURES_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: CAP_SUB_EXPOSURES_SEC_DATA_POP
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISMIT014 ----
+  - name: CRM_SUB_EXPOSURE_DATA_PROCESSING
+    sub_processes:
+      - name: BANK_POST_CAP_CRM_DILUTION_RISK_CALCULATION
+        tasks:
+          - order: 2
+            name: CAP_SUB_EXPOSURES_POP_DIL_RISK
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+          - order: 3
+            name: CAP_SUB_EXPOSURES_POP_DIL_RISK_UNCOV
+            type: T2T
+            active: false
+            inactive_reason: source_file_missing
+      - name: CRM_SUB_EXPOSURE_DATA_POPULATION
+        tasks:
+          - order: 1
+            name: T2T_DERIVATIVES_NET_POOL_EXP_MITIGANT_MAPPING
+            type: T2T
+            source_file: T2T_DERIVATIVES_NET_POOL_EXP_MITIGANT_MAPPING.sql
+            active: true
+          - order: 2
+            name: SUB_EXPOSURES_BANKING_DATA_POP
+            type: T2T
+            source_file: SUB_EXPOSURES_BANKING_DATA_POP.sql
+            active: true
+            description: "exp mitigant map-> FSI_CAP_SUB_EXPOSURE"
+          - order: 3
+            name: SUB_EXPOSURES_INVESTMENTS_DATA_POP
+            type: T2T
+            source_file: SUB_EXPOSURES_INVESTMENTS_DATA_POP.sql
+            active: true
+            description: "exp mitigant map -> FSI_CAP_SUB_EXPOSURE"
+          - order: 4
+            name: SUB_EXPOSURES_BANKING_UNCOV_DATA_POP
+            type: T2T
+            source_file: SUB_EXPOSURES_BANKING_UNCOV_DATA_POP.sql
+            active: true
+            description: "FSI_CAP_BANKING_EXPOSURE -> FSI_CAP_SUB_EXPOSURE"
+          - order: 5
+            name: SUB_EXPOSURES_INVESTMENT_UNCOV_DATA_POP
+            type: T2T
+            source_file: SUB_EXPOSURES_INVESTMENT_UNCOV_DATA_POP.sql
+            active: true
+            description: "FSI_CAP_INVESTMENT_EXPOSURE -> FSI_CAP_SUB_EXPOSURE"
+          - order: 6
+            name: T2T_FSI_CAP_NET_POOL_UNCOV_SUB_EXPOSURES
+            type: T2T
+            source_file: T2T_FSI_CAP_NET_POOL_UNCOV_SUB_EXPOSURES.sql
+            active: true
+          - order: 7
+            name: T2T_SFT_NET_POOL_EXP_MITIGANT_MAPPING
+            type: T2T
+            source_file: T2T_SFT_NET_POOL_EXP_MITIGANT_MAPPING.sql
+            active: true
+          - order: 8
+            name: T2T_FSI_CAP_NET_POOL_SUB_EXPOSURES
+            type: T2T
+            source_file: T2T_FSI_CAP_NET_POOL_SUB_EXPOSURES.sql
+            active: true
+      - name: CRM_SUB_EXPOSURE_POOLING_AND_OPTIMIZER_PROCESSING
+        tasks:
+          - order: 3
+            name: FSI_OPTMIZER_EXPOSURE_MAPPING_DATA_POP
+            type: T2T
+            source_file: FSI_OPTMIZER_EXPOSURE_MAPPING_DATA_POP.sql
+            active: true
+          - order: 4
+            name: FSI_OPTIMIZER_PROCESSING_DATA_POP
+            type: T2T
+            source_file: FSI_OPTIMIZER_PROCESSING_DATA_POP.sql
+            active: true
+            description: "FSI_CAP_SUB_EXPOSURE -> FSI_OPTIMIZER_PROCESSING"
+
+  # ---- from runchart sheet PMFBISLE001 ----
+  - name: LARGE_EXPOSURE_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: LARGE_EXP_BNK_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: LARGE_EXP_INV_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 3
+        name: LARGE_EXP_DRV_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: LARGE_EXP_SFT_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: LARGE_EXP_SEC_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 6
+        name: LARGE_EXP_MKT_RISK_EXPOSURE_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 7
+        name: LARGE_PLACED_COLLATERAL_DETAILS_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 8
+        name: LARGE_EXP_BNK_UNDERLYING_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 9
+        name: LARGE_EXP_INV_UNDERLYING_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 10
+        name: LARGE_EXP_DRV_UNDERLYING_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 11
+        name: LARGE_EXP_SFT_UNDERLYING_EXPOSURE_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 12
+        name: LARGE_EXPOSURE_MITIGANT_DATA_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXPOSURE_TRADING_BOOK_POPULATION
+    tasks:
+      - order: 1
+        name: MKT_RISK_BANK_INSTR_POSITIONS_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: TRADING_BOOK_LARGE_EXPOSURE_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXPOSURE_CAPITAL_AMOUNTS_POPULATION
+    tasks:
+      - order: 1
+        name: LARGE_EXP_STD_ACCT_CAPITAL_INFO_POPULATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXP_SPV_UNDERLYING_PROCESSING
+    tasks:
+      - order: 1
+        name: SEC_POOL_TRANCHE_UNDERLYING_COUNTERPARTY_DETAILS_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXPOSURE_COUNTERPARTY_POPULATION
+    tasks:
+      - order: 1
+        name: EXPOSURES_TO_COUNTERPARTY_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: CCP_EXPOSURES_TO_COUNTERPARTY_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 3
+        name: LARGE_EXP_UNKNOWN_CLIENT_CREATION
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: LARGE_EXP_UNKNOWN_COUNTERPARTY_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: SEC_UNDERLYING_COUNTERPARTY_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 6
+        name: SEC_POOL_SPV_THIRD_PARTY_DATA_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 7
+        name: NON_SEC_UNDERLYING_COUNTERPARTY_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXP_PARTY_GROUP_MEMBER_MAPPING
+    tasks:
+      - order: 1
+        name: PARTY_GROUP_SELF_MEMBER_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 2
+        name: PARTY_GROUP_DIRECT_CHILD_MEMBER_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 3
+        name: PARTY_GROUP_INDIRECT_CHILD_MEMBER_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 4
+        name: PARTY_GROUP_INDIVIDUAL_SELF_MEMBER_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+      - order: 5
+        name: PARTY_GROUP_INDIVIDUAL_INDIRECT_MEMBER_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFBISLE015 ----
+  - name: LARGE_EXP_PARTY_GROUP_EXP_POPULATION
+    tasks:
+      - order: 1
+        name: PARTY_GROUP_LARGE_EXPOSURE_POP
+        type: T2T
+        active: false
+        inactive_reason: source_file_missing
+
+  # ---- from runchart sheet PMFCVA001 ----
+  - name: CVA_COUNTERPARTY_POPULATION
+    tasks:
+      - order: 1
+        name: COUNTERPARTY_CVA_DATA_POP
+        type: T2T
+        source_file: COUNTERPARTY_CVA_DATA_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFCVA001 ----
+  - name: CVA_INDEX_DECOMPOSITION
+    tasks:
+      - order: 1
+        name: EXTERNAL_HEDGE_DATA_POPULATION
+        type: T2T
+        source_file: EXTERNAL_HEDGE_DATA_POPULATION.sql
+        active: true
+      - order: 3
+        name: SINGLE_NAME_CDS_MITIGANT_DATA_CREATION
+        type: T2T
+        source_file: SINGLE_NAME_CDS_MITIGANT_DATA_CREATION.sql
+        active: true
+      - order: 4
+        name: SINGLE_NAME_CDS_HEDGE_DATA_POP
+        type: T2T
+        source_file: SINGLE_NAME_CDS_HEDGE_DATA_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFCVA001 ----
+  - name: CVA_INDEX_WEIGHT_ASSIGNMENT
+    tasks:
+      - order: 1
+        name: REFERENCE_ENTITY_RISK_PARAM_POPULATION
+        type: T2T
+        source_file: REFERENCE_ENTITY_RISK_PARAM_POPULATION.sql
+        active: true
+
+  # ---- from runchart sheet PMFCVA001 ----
+  - name: CVA_SUMMARY_CALCULATION
+    tasks:
+      - order: 1
+        name: CVA_SUMMARY_DATA_POP
+        type: T2T
+        source_file: CVA_SUMMARY_DATA_POP.sql
+        active: true
+
+  # ---- from runchart sheet PMFBISRPT001 ----
+  - name: ABL_BASEL_ANALYTICS_DATA_POPULATION
+    tasks:
+      - order: 1
+        name: T2T_NON_SEC_FSI_CAP_DERIVATIVES
+        type: T2T
+        source_file: T2T_NON_SEC_FSI_CAP_DERIVATIVES.sql
+        active: true
+      - order: 2
+        name: T2T_NON_SEC_FSI_CAP_SFT_EXPOSURES
+        type: T2T
+        source_file: T2T_NON_SEC_FSI_CAP_SFT_EXPOSURES.sql
+        active: true
+      - order: 3
+        name: T2T_NON_SEC_FSI_CAP_BANKING_EXPOSURES
+        type: T2T
+        source_file: T2T_NON_SEC_FSI_CAP_BANKING_EXPOSURES.sql
+        active: true
+      - order: 4
+        name: T2T_NON_SEC_FSI_CAP_INVESTMENT_EXPOSURES
+        type: T2T
+        source_file: T2T_NON_SEC_FSI_CAP_INVESTMENT_EXPOSURES.sql
+        active: true
+      - order: 5
+        name: T2T_SUB_EXPOSURES_FCT_SUB_EXPOSURES
+        type: T2T
+        source_file: T2T_SUB_EXPOSURES_FCT_SUB_EXPOSURES.sql
+        active: true
+      - order: 6
+        name: T2T_MITIGANTS_FSI_CAP_MITIGANT
+        type: T2T
+        source_file: T2T_MITIGANTS_FSI_CAP_MITIGANT.sql
+        active: true
+      - order: 7
+        name: T2T_NETTABLE_POOL_FCT_NETTABLE_POOL
+        type: T2T
+        source_file: T2T_NETTABLE_POOL_FCT_NETTABLE_POOL.sql
+        active: true
+      - order: 13
+        name: ABL_LEV_RATIO
+        type: CSTM_DT
+        source_file: ABL_LEV_RATIO.sql
+        active: true
+      - order: 14
+        name: FN_STRESS_COLUMN_FILLING_CSTM
+        type: CSTM_DT
+        source_file: FN_STRESS_COLUMN_FILLING_CSTM.sql
+        active: true
+      - order: 15
+        name: FN_STRESS_DATALOAD_CSTM
+        type: CSTM_DT
+        source_file: FN_STRESS_DATALOAD_CSTM.sql
+        active: true

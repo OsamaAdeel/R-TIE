@@ -949,12 +949,14 @@ class IndexerAgent:
         Returns:
             Dict with description, tables_read, tables_written, key_columns.
         """
-        # Use OpenAI for indexing (one-time, fast).
-        # W34c: site-default is gpt-4o-mini (SITE_MODEL_DEFAULTS).
-        # OPENAI_MODEL env, when set, still wins (explicit-model arg
-        # > site default), preserving the prior override semantic.
+        # W34c: provider sourced from self._llm_provider (constructor arg) so
+        # the IndexerAgent honors whatever was resolved upstream
+        # (claude_cli, anthropic, openai). The literal "openai" hardcode here
+        # bypassed the resolver and broke claude_cli setups (no OPENAI_API_KEY).
+        # Site-default model is gpt-4o-mini (SITE_MODEL_DEFAULTS); OPENAI_MODEL
+        # env, when set, still wins for the openai provider.
         llm = create_llm(
-            provider="openai",
+            provider=self._llm_provider,
             model=os.getenv("OPENAI_MODEL"),
             site="indexer.generate_description",
             temperature=self._temperature,

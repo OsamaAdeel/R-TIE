@@ -16,3 +16,5 @@ tests/canary/last_*.log
 
 # Proprietary SQL logic — excluded from public repo (history scrubbed via git-filter-repo)
 db/modules/*/functions/
+db/modules/*/_functions_skipped/
+tmp_sdk_diag/

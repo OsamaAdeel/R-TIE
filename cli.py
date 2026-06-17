@@ -102,13 +102,16 @@ async def cmd_index(
     ignored when ``from_disk=True``.
     """
     from src.agents.indexer import IndexerAgent
+    from src.llm_factory import get_default_provider
 
     vs, _ = await get_clients()
 
     indexer = IndexerAgent(
         vector_store=vs,
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-        llm_provider="openai",
+        # Honor DEFAULT_LLM_PROVIDER (claude_cli) instead of hardcoding openai,
+        # so `cli.py index` works on the claude_cli setup (no OPENAI_API_KEY).
+        llm_provider=get_default_provider(),
         llm_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     )
 

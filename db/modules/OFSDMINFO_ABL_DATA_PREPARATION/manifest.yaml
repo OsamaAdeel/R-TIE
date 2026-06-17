@@ -1,0 +1,116 @@
+batch: OFSDMINFO_ABL_DATA_PREPARATION
+schema: OFSMDM
+description: "ABL data preparation — staging and operational risk data loading"
+
+processes:
+  - name: STAGING_DATA_PREPARATION
+    description: "Load and transform staging data"
+
+    sub_processes:
+      - name: GL_AND_PRODUCT_PROCESSOR_LOADING
+        description: "Populate staging tables from GL and related sources"
+
+        tasks:
+          - order: 1
+            name: TLX_LOAD_DELETE_OFSMDM
+            type: FUNCTION
+            source_file: TLX_LOAD_DELETE_OFSMDM.sql
+            active: true
+            description: "Pre-load cleanup across six staging tables"
+
+          - order: 2
+            name: POPULATE_GL_FROMGLBAL
+            type: FUNCTION
+            source_file: POPULATE_GL_FROMGLBAL.sql
+            active: true
+            description: "INSERT from stg_gl_balances into STG_GL_DATA"
+
+          - order: 3
+            name: POPULATE_PP_FROMGL
+            type: FUNCTION
+            source_file: POPULATE_PP_FROMGL.sql
+            active: true
+            description: "Main product processor population from GL data"
+
+          - order: 4
+            name: POPULATE_PP_FROMGL_AMC
+            type: FUNCTION
+            source_file: POPULATE_PP_FROMGL_AMC.sql
+            active: true
+            description: "AMC line-of-business product processor rows"
+
+          - order: 5
+            name: POPULATE_STDACC_FROMGL
+            type: FUNCTION
+            source_file: POPULATE_STDACC_FROMGL.sql
+            active: true
+            description: "Populate STG_STANDARD_ACCT_HEAD from GL"
+
+      - name: MAPPING_AND_ENRICHMENT
+        description: "Apply mappings and enrichment to loaded data"
+
+        tasks:
+          - order: 1
+            name: MAPPING_PARTY_TLX_EXPO
+            type: FUNCTION
+            source_file: MAPPING_PARTY_TLX_EXPO.sql
+            active: true
+            description: "Party master exposure mapping"
+
+          - order: 2
+            name: MAPPING_999999_ENTRIES_EXPO
+            type: FUNCTION
+            source_file: MAP_999999_ENTRIES_EXPO.sql
+            active: true
+            description: "999999 entries mapping"
+
+          - order: 3
+            name: FN_UPDATE_RATING_CODE
+            type: FUNCTION
+            source_file: FN_UPDATE_RATING_CODE.sql
+            active: true
+            description: "Rating code, issuer type, floating rate spread MERGE"
+
+          - order: 4
+            name: TLX_LOB_MAPPING
+            type: FUNCTION
+            source_file: TLX_LOB_MAPPING.sql
+            active: true
+            description: "UPDATE N_BETA_FACTOR on financial-year row"
+
+  - name: OPS_RISK_PROCESSING
+    description: "Operational risk data loading and adjustments"
+
+    sub_processes:
+      - name: OPS_RISK_LOAD
+        description: "Load operational risk data"
+
+        tasks:
+          - order: 1
+            name: FN_LOAD_OPS_RISK_DATA
+            type: FUNCTION
+            source_file: FN_LOAD_OPS_RISK_DATA.sql
+            active: true
+            description: "December-only annual gross income load"
+
+          - order: 2
+            name: TLX_OPS_ADJ_MISDATE
+            type: FUNCTION
+            source_file: TLX_OPS_ADJ_MISDATE.sql
+            active: true
+            description: "Year-end operational risk adjustment"
+
+  - name: CAPITAL_ADJUSTMENTS
+    description: "Capital-related adjustments"
+
+    sub_processes:
+      - name: PROVISION_ADJUSTMENTS
+        description: "Past-due provision handling"
+
+        tasks:
+          - order: 1
+            name: TLX_PROV_AMT_FOR_CAP013
+            type: FUNCTION
+            source_file: TLX_PROV_AMT_FOR_CAP013.sql
+            active: true
+            description: "UPDATE N_BALANCE for ABL_CAP013 capital head"

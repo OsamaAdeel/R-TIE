@@ -1,0 +1,49 @@
+# RTIE runtime + dev dependencies
+# Pinned to working ranges verified on Python 3.12-3.14.
+
+# --- LangGraph / LangChain stack ---
+langgraph>=0.2.0,<0.3.0
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.0,<0.4.0
+langchain-openai>=0.2.0,<0.3.0
+langchain-anthropic>=0.3.0,<0.4.0
+langgraph-checkpoint-postgres>=2.0.0,<3.0.0
+langsmith>=0.1.0,<0.2.0
+
+# --- LLM SDKs ---
+anthropic>=0.39.0,<1.0.0
+openai>=1.40.0,<2.0.0
+
+# --- Web / ASGI stack ---
+fastapi>=0.115.0,<0.116.0
+uvicorn[standard]>=0.32.0,<0.33.0
+starlette>=0.40.0,<1.0.0
+httpx>=0.27.0,<1.0.0
+
+# --- Databases ---
+oracledb>=3.4.0,<4.0.0
+redis>=5.2.0,<6.0.0
+# psycopg v3 (async) used by src/pipeline/logic_graph.py via psycopg_pool.
+# The [binary] extra installs psycopg_binary which bundles libpq, so no
+# separate PostgreSQL client install is required. Without this extra you
+# get: "ImportError: no pq wrapper available".
+psycopg[binary]>=3.2.0,<4.0.0
+psycopg-pool>=3.2.0,<4.0.0
+# psycopg2 (sync) is used by src/monitoring/health.py for the /health probe.
+psycopg2-binary>=2.9.9,<3.0.0
+
+# --- Data validation / config ---
+pydantic>=2.9.0,<3.0.0
+pydantic-settings>=2.6.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+
+# --- Parsing / serialization / utilities ---
+sqlparse>=0.5.0,<0.6.0
+pyyaml>=6.0.0,<7.0.0
+msgpack>=1.0.0,<2.0.0
+numpy>=2.2
+tenacity>=9.0.0,<10.0.0
+
+# --- Dev / test ---
+pytest>=8.3.0,<9.0.0
+pytest-asyncio>=0.24.0,<0.25.0
